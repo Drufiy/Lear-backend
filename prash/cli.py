@@ -16,6 +16,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -62,6 +63,23 @@ def _parse_mode(raw: str) -> PermissionMode:
 
 def _make_connectors(creds: Dict[str, Any]) -> Dict[str, Connector]:
     return {name: cls(creds) for name, cls in PROVIDERS.items()}
+
+
+# Keys the kubernetes connector (Track B) reads directly from the process
+# environment, not from ctx.credentials -- see PRASH_V2.md §10, 2026-08-09.
+_CLUSTER_ENV_PASSTHROUGH = ("KUBECONFIG", "KUBE_CONTEXT", "KUBE_NAMESPACE")
+
+
+def _export_cluster_env(creds: Dict[str, Any]) -> None:
+    """Make .env's cluster settings visible to the kubernetes client library.
+
+    A shell-exported value always wins over .env -- this only fills in what
+    isn't already set, so power users overriding via their shell still work
+    exactly as before.
+    """
+    for key in _CLUSTER_ENV_PASSTHROUGH:
+        if key in creds and key not in os.environ:
+            os.environ[key] = str(creds[key])
 
 
 class CliAsk(AskFn):
@@ -127,6 +145,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
 def cmd_run(args: argparse.Namespace) -> int:
     store = CredentialStore.from_env()
     creds = store.load()
+    _export_cluster_env(creds)
     mode_raw = args.mode or creds.get("PRASH_PERMISSION_MODE", "ask")
     mode = _parse_mode(mode_raw)
     dispatcher = _build_dispatcher(mode)
@@ -295,8 +314,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "env_file", None):
-        import os
-
         os.environ["PRASH_ENV"] = str(args.env_file)
     try:
         return args.func(args)
