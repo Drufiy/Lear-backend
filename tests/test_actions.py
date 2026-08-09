@@ -131,6 +131,35 @@ def test_restart_pod_reports_failure_honestly_when_pod_missing(tmp_path, monkeyp
     assert "did not succeed" in result.result.summary
 
 
+def test_restart_pod_verify_consumes_track_b_pod_status_schema(tmp_path, monkeypatch):
+    """Cross-track seam test: Track C's verify() must read Track B's real
+    PodStatus fields (phase / ready / problem). Uses the actual dataclass so
+    this breaks loudly the day Aradhya renames a field.
+    """
+    from prash.connectors.kubernetes import PodStatus
+
+    def healthy(ns, name):
+        return [PodStatus(name=name, namespace=ns, phase="Running", problem=None, restart_count=1, ready=True)]
+
+    def still_crash_looping(ns, name):
+        return [PodStatus(name=name, namespace=ns, phase="Running", problem="CrashLoopBackOff", restart_count=9, ready=False)]
+
+    monkeypatch.setattr("prash.actions.restart_pod.k8s_restart_pod", lambda ns, name: True)
+    ctx = _ctx(tmp_path, resource="default/api")
+
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([RestartPodAction()])
+    monkeypatch.setattr("prash.actions.restart_pod.get_pod_status", healthy)
+    result = dispatcher.run("restart-pod", ctx)
+    assert result.ok and result.result.verification.ok
+
+    monkeypatch.setattr("prash.actions.restart_pod.get_pod_status", still_crash_looping)
+    result = dispatcher.run("restart-pod", ctx)
+    assert result.ok and not result.result.verification.ok
+    assert "CrashLoopBackOff" in result.result.verification.detail
+
+
+
 def test_rollback_approval_prompts_even_in_bypass(tmp_path):
     ctx = _ctx(tmp_path, resource="acme/api", env="production")
     dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
