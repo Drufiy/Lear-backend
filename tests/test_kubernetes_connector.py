@@ -145,7 +145,46 @@ def test_healthy_pod_has_no_problem(monkeypatch):
     result = k8s.get_pod_status("prash-demo", "broken-app-abc")
 
     assert result[0].problem is None
-    assert result[0].ready is True
+
+
+def test_not_ready_with_restarts_and_no_waiting_reason_is_still_crash_loop(monkeypatch):
+    """Real CI failure caught live (2026-08-09): a genuinely crash-looping
+    pod polled mid-restart-attempt, when container_statuses.waiting is
+    transiently empty (the split-second between a backoff wait ending and
+    the actual restart attempt), came back problem=None entirely -- not
+    even the StuckPending fallback, since a young pod (few restarts) hasn't
+    hit the 120s age threshold yet. restart_count > 0 is itself sufficient
+    independent evidence this is CrashLoopBackOff, regardless of what the
+    current instantaneous waiting.reason snapshot says.
+    """
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_pod.return_value = _pod(
+        phase="Running",
+        # No waiting/terminated reason set at all -- exactly the mid-restart
+        # snapshot that caused the real CI failure.
+        container_statuses=[_container_status(ready=False, restart_count=3)],
+    )
+
+    result = k8s.get_pod_status("prash-demo", "broken-app-abc")
+
+    assert result[0].problem == "CrashLoopBackOff"
+
+
+def test_not_ready_with_zero_restarts_and_no_waiting_reason_stays_unclassified(monkeypatch):
+    """The restart_count>0 fallback must not fire for a pod that's simply
+    still starting up for the first time (0 restarts) -- that's normal
+    startup latency, not evidence of crash-looping. Age-gated StuckPending
+    (tested separately) is what should eventually catch a pod stuck like
+    this for too long, not an immediate CrashLoopBackOff label."""
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_pod.return_value = _pod(
+        phase="Running",
+        container_statuses=[_container_status(ready=False, restart_count=0)],
+    )
+
+    result = k8s.get_pod_status("prash-demo", "broken-app-abc")
+
+    assert result[0].problem is None
 
 
 def test_multi_container_pod_flags_the_broken_one(monkeypatch):

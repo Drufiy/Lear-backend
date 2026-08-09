@@ -108,6 +108,22 @@ def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
             problem = "OOMKilled"
             break
 
+    # A pod that's already restarted at least once and currently isn't ready
+    # is exhibiting crash-loop behavior NOW, independent of whether
+    # container_statuses.waiting.reason happens to say "CrashLoopBackOff" at
+    # this exact instant. It often doesn't: state.waiting briefly clears
+    # during the split-second a container is actually mid-restart-attempt
+    # between backoff waits, which a point-in-time snapshot can catch --
+    # confirmed live (PRASH_V2.md §10, 2026-08-09) and then confirmed again
+    # by real CI flakiness on exactly this race, same day: a genuinely
+    # crash-looping pod (restart_count=3, not ready, phase=Running) polled
+    # with problem=None, no CrashLoopBackOff and not even the StuckPending
+    # fallback below (too young for the 120s threshold). Checked BEFORE the
+    # StuckPending fallback and with no age requirement -- waiting for the
+    # 120s threshold here would just reproduce the same bug for two minutes.
+    if problem is None and not ready and pod.status.phase == "Running" and restart_count > 0:
+        problem = "CrashLoopBackOff"
+
     if problem is None and pod.status.phase == "Pending":
         age = _seconds_since(pod.status.start_time or pod.metadata.creation_timestamp)
         if age > _STUCK_THRESHOLD_SECONDS:
