@@ -23,6 +23,9 @@ Full task breakdown, day by day, is in `PRASH_V2.md` section 6.
 
 ## Status
 
-Scaffolding only as of this commit. Aryan has working local progress on
-Track A/C (action registry, permission-mode engine, dry-run execution) not
-yet pushed — see the decision log in `PRASH_V2.md` for the latest state.
+Track A + C are landed on `main`: the `prash` CLI spine, five-mode permission
+engine, append-only audit log, and the `open-pr`, `request-secret`,
+`restart-pod`, and `rollback` actions (28 tests passing). Track B (`k8s`
+connector stubs) and Track D scaffolding are on `main` too. `restart-pod` and
+`rollback` are wired to Track B's connector stubs and report honestly until the
+real drivers land. See `PRASH_V2.md` for the decision log and current state.

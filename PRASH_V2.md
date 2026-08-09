@@ -219,7 +219,7 @@ Build the entire §0b path end to end with everything faked: a hardcoded "crash-
 
 ### Track A + C — Aryan
 
-*Actual start date: Day 1 = ____*
+*Actual start date: Day 1 = 2026-08-09*
 
 | Day | Milestone | Depends on |
 |---|---|---|
@@ -340,6 +340,12 @@ Smaller: `kind` (Kubernetes-in-Docker) added to CI, since GitHub Actions can't r
 
 **2026-08-09 — The one blocker that remains: Aryan has still not pushed.** Checked directly against the repo — only Aradhya's commits exist. Every date in Aryan's Track A/C schedule (§6) is still an estimate from a screenshot, not a confirmed number. This is the single highest-priority open item and supersedes everything else in this log.
 
+**2026-08-09 — RESOLVED: Aryan's Day 0 push landed directly to `main`.** Track A + C shipped in two commits: (1) action registry (`open-pr`, `request-secret`, `restart-pod`, `rollback`) with risk tiers/reversibility, the five-mode permission engine, dry-run execution, append-only audit log, and a `rich`-based CLI (`prash run/actions/audit/config`); (2) Track C wired to Track B's `connectors/kubernetes.py` stubs per cross-track deps #1/#2, with config-loading aligned to `.env.example`. 28 tests passing. The entry immediately above this one is superseded.
+
+**2026-08-09 — Convention change: direct pushes to `main`, no PR gate.** §0c's "nobody pushes directly to main" + branch/PR flow was written for a 4-account team, but in practice Aradhya is pushing straight to `main` and both owners want the same for Track A/C. Rule now: still no force-push, still update PRASH_V2.md with every push, but branches/PRs are optional rather than mandatory.
+
+**2026-08-09 — Cross-track alignment of Track C with Track B.** `restart-pod` now calls `connectors/kubernetes.restart_pod()` and `get_pod_status()`; `rollback` calls `get_previous_revision()`. Aryan's temporary `connectors/k8s.py` (class-based duplicate) was deleted. Both actions report honestly ("not implemented yet (Track B)") until Aradhya's driver lands — never a fake success. `open-pr` uses a small GitHub REST connector (Track A territory; GitHub is not in Track B's connector list).
+
 ---
 
 ## 10. Running log — bugs, improvements, suggestions, ideas
@@ -348,6 +354,10 @@ Add to this table, don't rewrite it. Newest at the top. Every entry gets a name 
 
 | Date | Who | Type | Note |
 |---|---|---|---|
+| 2026-08-09 | Aryan | Progress | **Track A + C landed on `main`.** Action registry (`open-pr`, `request-secret`, `restart-pod`, `rollback`) with risk tiers + reversibility; five-mode permission engine; append-only audit log (`.prash/audit.log`, configurable via `PRASH_AUDIT_LOG_PATH`); dry-run plans; `rich` CLI (`prash run/actions/audit/config`); 28 tests passing. `request-secret` closes the `needs_secret` dead end — asks for the value, stores it in the local `.env` only, re-triggers the job. |
+| 2026-08-09 | Aryan | Setup | Added `pyproject.toml` (runtime dep: `rich`), the first packaging file in this repo — per the §10 note that whoever adds one first must log it. Package name `prash`, so `python -m prash.cli` works as the docs specify. |
+| 2026-08-09 | Aryan | Cross-track | `restart-pod` + `rollback` wired to Aradhya's `connectors/kubernetes.py` stubs (cross-track deps #1/#2): restart calls `restart_pod()`/`get_pod_status()`, rollback calls `get_previous_revision()`. Deleted my duplicate `connectors/k8s.py`. Both report "not implemented yet (Track B)" honestly until the driver lands. `open-pr` uses a small GitHub REST connector kept in `connectors/github.py` (Track A; GitHub isn't in Track B's list). |
+| 2026-08-09 | Aryan | Decision | Convention: direct pushes to `main` (matching how Aradhya has been working) instead of §0c's branch+PR flow. Logged in §9. |
 | 2026-08-09 | Claude (Sonnet), for Aradhya | Setup | **Local dev cluster is live.** Docker Desktop installed + running, `kind create cluster --name prash-dev` succeeded, node `Ready`. Set `.env`'s `KUBE_CONTEXT=kind-prash-dev` (kind auto-sets this as your active kubectl context too). Deployed a deliberately broken pod (`prash/connectors/testdata/broken-pod.yaml`) and confirmed it reaches real `CrashLoopBackOff` in ~15s with real events and real logs — this is the exact fixture to develop `get_pod_status`/`get_pod_logs`/`get_pod_events` against. **Track B's local blocker is now fully clear; only Aryan's push remains open project-wide (see entry above).** |
 | 2026-08-09 | Claude (Sonnet), for Aradhya | Setup | Local dev environment: `kind` + `kubectl` installed via Homebrew. **Docker Desktop still needs manual install** (macOS requires approving a system extension — can't be done non-interactively). Get it from docker.com, then `kind create cluster` gives a real, disposable local cluster to build Track B against. |
 | 2026-08-09 | Claude (Sonnet), for Aradhya | Scaffold | Added `prash/__init__.py`, `prash/connectors/__init__.py` + `kubernetes.py` (stubs, `NotImplementedError`, function signatures matching §6's spec — pod status/logs/events, restart, `get_previous_revision`), and `prash/brain/__init__.py` (empty, docstring pointing at the day 1-2 port). Deliberately narrow — nothing at repo root, nothing that could collide with wherever Aryan's action registry lands. **No `requirements.txt`/`pyproject.toml` yet** — the `kubernetes` PyPI package is needed for the connector and isn't declared anywhere. First person to need it, add it and log it here. |
