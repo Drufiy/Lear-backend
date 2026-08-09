@@ -1,0 +1,32 @@
+# Deliberately broken deployment for developing/testing prash/connectors/kubernetes.py
+# against a real CrashLoopBackOff — the exact state this connector and the
+# Track D brain work are built around (PRASH_V2.md §8).
+#
+# Apply:  kubectl apply -f prash/connectors/testdata/broken-pod.yaml
+# Watch:  kubectl get pods -n prash-demo -w
+# Clean:  kubectl delete namespace prash-demo
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prash-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-app
+  namespace: prash-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: broken-app
+  template:
+    metadata:
+      labels:
+        app: broken-app
+    spec:
+      containers:
+        - name: broken-app
+          image: busybox:latest
+          # Exits immediately every time -> CrashLoopBackOff within ~30s.
+          command: ["sh", "-c", "echo 'simulated failure: config file missing'; exit 1"]
