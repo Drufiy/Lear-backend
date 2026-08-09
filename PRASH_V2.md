@@ -187,48 +187,76 @@ Database migrations. Anything that destroys data. Anything touching production w
 
 3. **The watcher (Track E) consumes Track B's connectors and triggers Track A's interface.** Aradhya owns both E and B so the connector side is internal to him — but the *ping → user opens interface → Prash acts* handoff crosses into Aryan's territory. Agree that handoff shape before Day 10, not during it.
 
-### Day 0 (both, immediately — this is blocking)
+### Capacity assumption
 
-**Aryan:** push current local work (action registry, permission-mode engine, dry-run execution, `tests/test_permissions.py`) to `prash-v2-backend` as-is, even if not fully polished. Nothing below can be planned precisely until this lands — the day numbers in Track A/C below are estimates against what was visible in a screenshot, not the real code.
+**14 full-time working days, both people.** Confirmed 2026-08-09. If that stops being true, the priority tiers below tell you what to cut, in order.
 
-**Aradhya:** once Aryan's push lands, read the actual `Action` interface and update this file's §9 decision log with what's actually there vs. what was assumed. Do not start Track B/D connector code that needs to *conform* to the Action interface until this is confirmed — but Track D's brain-porting work (below) has no dependency on Track A and can start immediately in parallel.
+### Priority tiers — cut from the bottom, never the top
+
+Everything is ranked against §0b's definition of done. If the sprint slips, drop from tier 3 upward. Do not improvise this at day 10.
+
+**Tier 1 — the demo does not exist without these.** Walking skeleton · k8s connector (read) · brain that can classify a runtime failure · restart-pod action · permission engine · verification · audit log · circuit breaker · watcher (k8s only).
+
+**Tier 2 — known-valuable, but the demo survives without them.** Multi-failure fix · request-secret action · a usable interface beyond raw text.
+
+**Tier 3 — drop these first.** Cloud Run connector · rollback action · AWS connector · anything Vercel.
+
+### Day 0 (both, immediately — blocking)
+
+**Aryan:** push current local work (action registry, permission-mode engine, dry-run execution, `tests/test_permissions.py`) to this repo as-is, even if unpolished. Day numbers below are estimated from a screenshot, not real code, until this lands.
+
+**Aradhya:** once it lands, read the actual `Action` interface and record in §9 what's really there vs. what this doc assumed.
+
+### Days 1–2 — the walking skeleton (BOTH, together, before anything real)
+
+**This is the single most important change to the plan and it is not optional.**
+
+Build the entire §0b path end to end with everything faked: a hardcoded "crash-looping pod", a hardcoded diagnosis, a **real** permission prompt, a fake restart that just prints, a **real** audit-log write. Nothing real underneath — but the whole path runs, and both of you agree on every seam where your code meets.
+
+*Why:* as originally written, five tracks owned by two people met for the first time on day 13. If the shapes didn't fit, there was one day to fix it. That's the classic way a two-week sprint fails. With a skeleton on day 2, integration is continuous — each track swaps its own stub for the real thing, and a mismatch surfaces the day it's introduced.
+
+*Done when:* `prash fix` runs the full fake path, prompts for permission, and writes an audit entry — on both Aryan's Windows machine and Aradhya's Mac.
 
 ### Track A + C — Aryan
 
-*Fill in your actual start date here: Day 1 = ____*
+*Actual start date: Day 1 = ____*
 
 | Day | Milestone | Depends on |
 |---|---|---|
-| 0 | Push existing local work (registry, permission engine, dry-run, tests) to this repo | — |
-| 1–2 | Harden the `Action` interface based on real usage from Track D's port (once that starts) and Track B's first connector; make sure it's documented in code (docstrings/types), since two other tracks build against it without asking you each time | Day 0 push |
-| 3–4 | Wire **request-secret** for real: prompt the user, store the value locally, retry the originally-failed job. This is the no-dependency action — get it fully working end to end first | — |
-| 5–6 | Wire **restart-pod** for real, against Track B's Kubernetes connector once it exists (build against a mock first if B isn't ready yet) | Track B: k8s connector (read + restart capability) |
-| 7–8 | Audit log: append-only, persisted, and surfaced in the interface — every action taken, its risk tier, whether it was approved or ran automatically | — |
-| 9–10 | Wire **rollback** for real, calling Track B connectors' `get_previous_revision()` | Track B: `get_previous_revision()` on relevant connectors |
-| 11–12 | The interface layer itself — how a user actually reviews a finding and approves/denies, beyond raw CLI text. Resolve the open question in §8 about interface richness before this starts | — |
-| 13–14 | Integration testing with Track D's decomposed multi-failure output (each independent fix becomes its own Action going through your permission engine) — coordinate directly with Aradhya on this day | Track D: multi-failure decomposition |
+| 0 | Push existing local work to this repo | — |
+| 1–2 | **Walking skeleton with Aradhya** (see above), then harden the `Action` interface with docstrings/types — two other tracks build against it without asking you each time | Day 0 push |
+| 3–4 | **request-secret** end to end: prompt, store locally, retry the failed job. No dependencies — the fastest proof Prash *finishes* work | Skeleton |
+| 5–6 | **restart-pod** for real, against Aradhya's k8s connector (landing day 2) | Track B: k8s connector |
+| 7 | **Circuit breaker.** Hard cap on actions per resource per time window; on breach, stop and escalate to a human. **Also: every action prompt must name its exact target** — "restart pod `api-7f9d` in namespace `production`", never "restart the pod" | — |
+| 8–9 | Audit log: append-only, persisted, surfaced in the interface — every action, its risk tier, whether it was approved or auto-ran, and its outcome | — |
+| 10–12 | The interface layer — how a user reviews a finding and approves/denies. Resolve §8's interface question before starting | — |
+| 13 | Integration + fix whatever the skeleton's stubs were hiding | Both tracks |
+| 14 | **Demo, recorded.** The §0b sequence, on a live cluster, captured as a shareable video | Everything |
+| *stretch* | Cloud Run connector + **rollback** — grouped deliberately: rollback is your action and it needs `get_previous_revision()`, so you building the connector you depend on removes a cross-track dependency entirely | — |
 
-### Track B + D — Aradhya
+### Track B + D + E — Aradhya
 
-*Fill in your actual start date here: Day 1 = ____*
+*Actual start date: Day 1 = ____*
 
 | Day | Milestone | Depends on |
 |---|---|---|
-| 1 | **(Track D — do this FIRST, before touching the brain)** Port `prash-backend/evals/` into this repo and get it running against the v1 brain as a baseline. **Rationale: days 8–9 rewrite how diagnosis handles multi-failure. Without the eval harness in place first, there is no way to tell whether that rewrite silently made diagnosis worse.** This is brain surgery; the evals are the anaesthetic | — |
-| 1–2 | **(Track D)** Extract `diagnosis_agent.py`, `log_fetcher.py`, `schemas.py` from `prash-backend` into this repo as a standalone package, no Supabase coupling. Make `kimi_client.py`'s call-logging optional. Confirm importable and callable on its own, and that the ported evals still pass against it | Day 1 evals port |
-| 2 | *(parallel, small)* Confirm Track A's real `Action` interface once Aryan's Day 0 push lands; note any gap vs. what this doc assumed in §9 | Aryan: Day 0 push |
-| 3–5 | **(Track B)** Kubernetes connector: pod status, logs, events (read), plus restart capability and `get_previous_revision()`-equivalent for k8s deployments. **Highest-priority connector — Aryan's restart-pod is blocked on this, so it ships before anything else in Track B** | — |
-| 6–7 | **(Track B)** Cloud Run connector: logs, deployment status, `get_previous_revision()` | — |
-| 8–9 | **(Track D)** Fix the multi-failure bug: decompose N independent problems, attempt each through the standalone brain, report partial success ("fixed 3 of 4") instead of one all-or-nothing result. Validate against the real AgentCore case from 2026-08-03 (4 independent CI failures). **Re-run the ported evals afterwards and compare to the Day 1 baseline — a regression here is a stop-and-fix, not a ship-it** | Day 1–2 port + evals baseline |
-| 10–12 | **(Track E — the watcher)** The background process: a poll loop over whatever connectors exist, detection logic for "this looks wrong", and the ping. Scope it to **one source done properly** (Kubernetes, since it's built first and is the demo path in §0b) rather than all sources done shallowly. Notification channel per §8 — pick the simplest that works and log the choice in §9 | Track B: k8s connector |
-| 13–14 | Run the §0b definition-of-done sequence end to end on a live system, then get it in front of one real outside setup — not a fork, not our own test infra | Both tracks working |
-| *stretch* | **(Track B)** AWS connector, read-only (see load warning above — this is the first thing to drop if the sprint slips) | — |
+| 1–2 | **Walking skeleton with Aryan**, and in parallel ship a **minimal k8s read connector** (pod status, logs, events). Ship it rough on day 2 — **Aryan's day-5 restart-pod is blocked on this, so it's your highest-priority deliverable, ahead of your own deep work.** Refine it later | — |
+| 3 | **(Track D)** Port `prash-backend/evals/` and get a baseline against the v1 brain **before touching it.** Days 9–10 rewrite diagnosis; without this baseline there's no way to tell if the rewrite made it worse | — |
+| 4–5 | **(Track D)** Port `diagnosis_agent.py` / `log_fetcher.py` / `schemas.py` standalone (no Supabase), make `kimi_client`'s call-logging optional. **Then extend the `Diagnosis` schema with runtime categories** — the current enum (`code`/`dependency`/`workflow_config`/`environment`/`flaky_test`/`unknown`) literally cannot express "a running service is unhealthy" | Day 3 evals |
+| 6–8 | **(Track D — the underestimated one)** Teach the brain Kubernetes. The prompt has **69 CI-specific references and zero runtime ones** — it has never seen a crash-loop. Write worked examples for `CrashLoopBackOff`, `OOMKilled`, `ImagePullBackOff`, failed readiness probes. Validate against the day-3 eval baseline: **CI diagnosis quality must not regress while adding runtime capability** | Day 4–5 port |
+| 9–11 | **(Track E)** The watcher: poll loop over the k8s connector, detection for "this looks wrong", and the ping. **One source done properly**, not many done shallowly. Start deliberately narrow on what counts as wrong — false pings destroy trust faster than missed ones | k8s connector |
+| 12–13 | **(Track D, tier 2)** Multi-failure fix: decompose N independent problems, attempt each, report "fixed 3 of 4" as partial success. Validate against the AgentCore case from 2026-08-03. **This is the first thing to sacrifice if days 6–8 overrun** | Day 4–8 |
+| 14 | Demo with Aryan | Everything |
+| *stretch* | AWS connector (read-only) | — |
 
-### Days 13–14 (both, together)
+### Running in parallel from Day 1 (Aradhya, ~30 min/day — not a day-13 task)
 
-Get this in front of at least one real outside user on their own infrastructure. **As of 2026-08-03, this has never happened even once** for Prash v1 — everything known is from testing on copies of other people's repos, which fail for reasons a real user's own repo often won't hit. This is the first real signal either version of Prash will have had.
+**Start recruiting the real outside user now.** Finding someone, getting them to trust an alpha CLI near their production Kubernetes, and scheduling it is a week of lead time minimum. Left until day 13, "get a real user" silently becomes day 20. Line up 3 candidates so one dropping out doesn't kill it.
 
----
+### Testing actions without a real cluster
+
+GitHub Actions cannot reach your cluster, so action tests won't run in CI unless you give them somewhere to run. Use **`kind`** (Kubernetes-in-Docker) in the workflow — it's standard and it spins up a throwaway cluster per run. **Owner: Aradhya, alongside the day 1–2 connector.** Untested action code is precisely the code that must not be untested.
+
 
 ## 7. Explicitly out of scope for this sprint
 
@@ -284,6 +312,17 @@ Get this in front of at least one real outside user on their own infrastructure.
 
 Also: runtime (Python 3.12, package `prash`) and test framework (pytest) were never written down. Now in §0c.
 
+**2026-08-09 (second review pass, Opus)** — Stress-tested the revised plan. Four more findings, all now folded into §6:
+
+1. **The brain is CI-*shaped*, not merely CI-coupled — the earlier "ports cleanly, zero coupling" note was true about database coupling and misleading about applicability.** Measured: `diagnosis_agent.py` contains **69** CI-specific references and **zero** runtime ones, and the `Diagnosis` schema's category enum (`code`/`dependency`/`workflow_config`/`environment`/`flaky_test`/`unknown`) **cannot express "a running service is unhealthy" at all.** A crash-looping pod would be forced into `unknown` — which is exactly the failure mode that produced `unknown`/40%-confidence/no-action on AgentCore on 2026-08-03. Track D is therefore substantially bigger than first written: port + extend the schema + teach an unseen domain. Aradhya chose to take this on (rather than retreating the demo to CI or using deterministic rules for k8s); budgeted as days 4–8.
+2. **First integration was scheduled for day 13.** Five tracks, two people, meeting once, with one day of runway if the seams didn't fit. Replaced with a **walking skeleton on days 1–2** — whole path, all stubs, real permission prompt and real audit write. Highest-leverage change in either review pass.
+3. **The critical path was inverted** — Aryan's day-5 restart-pod was blocked on Aradhya's day 3–5 connector, meaning the more-loaded person gated the less-loaded one. The k8s connector moved to **days 1–2, ahead of Aradhya's own deep work**, specifically to unblock Aryan early.
+4. **No circuit breaker on actions.** Crash-loop → restart → crash → restart, unattended in `auto-safe` mode, is a self-inflicted outage. In v1 a wrong answer produced a reviewable PR; in v2 it takes down a service — the blast radius changed and nothing addressed it. Added as Aryan day 7, together with a requirement that every action prompt names its exact target.
+
+Smaller: `kind` (Kubernetes-in-Docker) added to CI, since GitHub Actions can't reach a real cluster and action tests would otherwise never run. Real-user recruitment moved from day 13 to a day-1 parallel activity (a week of lead time, otherwise day 13 silently becomes day 20). Day 14 now explicitly produces a **recorded** demo.
+
+**2026-08-09** — Capacity confirmed: 14 full-time working days, both people. Priority tiers added to §6 so that any slippage is cut in a pre-agreed order rather than improvised.
+
 **2026-08-09** — Aradhya claimed Track E (the watcher) and declined a workload rebalance with Aryan. To create room, the **AWS connector was demoted from committed work to a stretch goal**. Documented drop-order if the sprint slips: AWS first, then narrow the watcher's scope — never cut from Tracks B or D, which the definition of done depends on.
 
 ---
@@ -294,6 +333,10 @@ Add to this table, don't rewrite it. Newest at the top. Every entry gets a name 
 
 | Date | Who | Type | Note |
 |---|---|---|---|
+| 2026-08-09 | Claude (Opus, review 2) | Bug (plan) | **The `Diagnosis` schema cannot represent a runtime failure.** Category enum has no value for "running service unhealthy". Must be extended before the k8s demo can work — this is on the critical path, not a nice-to-have. Track D days 4–5. |
+| 2026-08-09 | Claude (Opus, review 2) | Risk | **The brain has never seen a Kubernetes problem.** 69 CI references, 0 runtime references in the diagnosis prompt. Teaching it is budgeted at days 6–8 and is the most likely source of overrun in the sprint. If it overruns, drop the multi-failure fix (tier 2) — do not drop the watcher or connector. |
+| 2026-08-09 | Claude (Opus, review 2) | Improvement | Walking skeleton on days 1–2 replaces day-13 big-bang integration. |
+| 2026-08-09 | Claude (Opus, review 2) | Improvement | Circuit breaker added — unattended restart loops are a real outage scenario now that actions touch live systems. |
 | 2026-08-09 | Aradhya | Decision | Claimed Track E (watcher) personally; declined rebalancing Track B/D load with Aryan. AWS connector demoted to stretch to compensate. |
 | 2026-08-09 | Claude (Opus, plan review) | Improvement | Seven gaps found and fixed before code was written — see the full entry in §9. Biggest: the watcher existed in the product description but in nobody's track, making the planned day-13 demo undeliverable. |
 | 2026-08-09 | Claude (Opus) | Risk | **Aradhya's load is the sprint's main risk.** Three connectors + brain port + evals port + multi-failure fix + watcher, against Aryan's Track A/C. Drop order if it slips is written into §6 — follow it rather than improvising. |
