@@ -11,6 +11,7 @@ Commands:
     prash actions                   list registered actions and risk tiers
     prash audit                     show the append-only audit log
     prash config                    show local config (secrets redacted)
+    prash watch                     poll a namespace, notify on new pod problems (Track E)
 """
 
 from __future__ import annotations
@@ -256,6 +257,22 @@ def cmd_config(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    from .watcher import run_watch_loop
+
+    store = CredentialStore.from_env()
+    creds = store.load()
+    _export_cluster_env(creds)
+    # Read from os.environ (post-passthrough), not creds directly -- a
+    # KUBE_NAMESPACE the user exported in their own shell must win over
+    # .env, matching _export_cluster_env's own "shell wins" contract. creds
+    # alone would silently ignore a shell-only override.
+    namespace = args.namespace or os.environ.get("KUBE_NAMESPACE", "default")
+    console.print(f"[bold]Watching namespace '{namespace}' for CrashLoopBackOff / OOMKilled / ImagePullBackOff / stuck pods...[/bold] (Ctrl+C to stop)")
+    run_watch_loop(namespace, interval=args.interval, console=console)
+    return 0
+
+
 def cmd_circuit(args: argparse.Namespace) -> int:
     breaker = CircuitBreaker.default()
     if args.circuit_action == "status":
@@ -314,6 +331,11 @@ def build_parser() -> argparse.ArgumentParser:
     circuit.add_argument("circuit_action", choices=["status", "reset"])
     circuit.add_argument("resource", nargs="?", help="reset only this resource (reset only)")
     circuit.set_defaults(func=cmd_circuit)
+
+    watch = sub.add_parser("watch", help="poll a namespace for CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck pods, notify on new problems")
+    watch.add_argument("--namespace", default=None, help="default: KUBE_NAMESPACE from .env, or 'default'")
+    watch.add_argument("--interval", type=int, default=None, help="poll interval in seconds (default: PRASH_WATCH_INTERVAL_SECONDS or 30)")
+    watch.set_defaults(func=cmd_watch)
 
     return parser
 

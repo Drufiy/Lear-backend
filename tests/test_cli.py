@@ -6,7 +6,9 @@ with option (a)).
 
 from __future__ import annotations
 
-from prash.cli import _export_cluster_env
+from argparse import Namespace
+
+from prash.cli import _export_cluster_env, cmd_watch
 
 
 def test_exports_kube_context_from_env_dict(monkeypatch):
@@ -63,3 +65,39 @@ def test_exports_deepseek_and_primary_model_for_the_brain(monkeypatch):
 
     assert os.environ["DEEPSEEK_API_KEY"] == "sk-ds-test"
     assert os.environ["PRIMARY_MODEL"] == "deepseek"
+
+
+def test_cmd_watch_uses_shell_exported_namespace_not_just_dotenv(monkeypatch, tmp_path):
+    """Real bug caught by manual verification against a live cluster
+    (Track E, 2026-08-09): cmd_watch read KUBE_NAMESPACE from creds (.env)
+    directly instead of os.environ post-passthrough, so a namespace set only
+    via shell export was silently ignored and it watched 'default' instead."""
+    import prash.cli as cli_mod
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+    seen_namespace = {}
+    monkeypatch.setattr(watcher_mod, "run_watch_loop", lambda ns, **kw: seen_namespace.setdefault("ns", ns))
+
+    args = Namespace(namespace=None, interval=None)
+    cmd_watch(args)
+    assert seen_namespace["ns"] == "prash-demo"
+
+
+def test_cmd_watch_cli_flag_wins_over_env(monkeypatch):
+    import prash.cli as cli_mod
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+    seen_namespace = {}
+    monkeypatch.setattr(watcher_mod, "run_watch_loop", lambda ns, **kw: seen_namespace.setdefault("ns", ns))
+
+    args = Namespace(namespace="explicit-ns", interval=None)
+    cmd_watch(args)
+    assert seen_namespace["ns"] == "explicit-ns"
