@@ -274,6 +274,35 @@ GitHub Actions cannot reach your cluster, so action tests won't run in CI unless
 
 ---
 
+## 7b. Sprint 2 — expansion roadmap (documented 2026-08-09, not started)
+
+**Status: intent captured, not scheduled, not built.** Aradhya wants Prash to grow well beyond CI/CD + Kubernetes into a genuinely full-spectrum DevOps agent — the standing bar he gave: *"the agent should feel like magic — solving all your issues while you sit back and relax and just hit 'yes, permission granted.'"* This section exists so that intent isn't lost, not as a commitment to build all of it, or in this order.
+
+**Explicit, deliberate sequencing (Aradhya's call, 2026-08-09):** this sprint's remaining scope — Track D tier 2 (multi-failure fix) and the recorded demo — finishes **first, unchanged**. Nothing below starts until that's done. This mirrors exactly how this pivot itself got decided: prove one thing works deeply and get real evidence before widening scope, not the other way around. Expanding *before* the demo would risk repeating the exact failure mode that ended v1's CI-only era — spreading thin instead of deep (§1).
+
+**What "more" concretely means (Aradhya's list, not yet prioritized against each other):**
+
+| Category | Examples given |
+|---|---|
+| Deepen Kubernetes (lowest risk — same vertical, more depth) | `scale`, `exec` into a pod, tail live logs, edit a ConfigMap/Secret |
+| More CI providers | GitLab CI, CircleCI, Jenkins — same diagnosis brain, new log-fetching connectors |
+| Infra / IaC | Terraform (drift/plan diagnosis), AWS **write** actions (currently read-only, §7), standalone Docker (non-k8s hosts) |
+| Observability | Datadog, Grafana |
+| Testing | k6, Cypress, Playwright |
+| Incidents | PagerDuty |
+| Security | Snyk, gitleaks |
+| Dependencies | Dependabot |
+| Team/notifications | Slack/Discord — a team seeing a ping, not just one laptop's desktop notification (§7 already flagged this as "sprint 2" for exactly this reason) |
+
+**UI direction (decided 2026-08-09):** stays CLI/terminal-based — a richer TUI (live-updating panels, better formatting, possibly an actual TUI framework), **not** a desktop/web app. The GUI stays explicitly deferred (§7) — Aradhya confirmed this when asked directly, consistent with §4's original reasoning for why CLI-first matched developer trust expectations (the same reasoning that made "your keys never touch our servers" credible).
+
+**What is NOT decided, and shouldn't be assumed:**
+- Which of the categories above ship first, or in what order. This list is breadth-of-intent, not a priority-ranked backlog — turning it into one is a planning exercise for after the demo, informed by what the demo and any real outside user actually reveal is missing (the same evidence-driven method that produced this pivot, §1).
+- Whether every category becomes a full read+write connector or some stay read-only/investigate-only (the same distinction §5's inclusion rule already draws for existing connectors).
+- Timeline. This is explicitly "sprint 2" — no day-by-day breakdown exists for it, unlike §6's table for the current sprint, and none should be invented before the current sprint's demo actually lands.
+
+---
+
 ## 8. Open questions
 
 **Four of five resolved 2026-08-09 — see §9 for reasoning.** Only the genuinely non-blocking one remains open.
@@ -349,6 +378,12 @@ Smaller: `kind` (Kubernetes-in-Docker) added to CI, since GitHub Actions can't r
 **2026-08-09 — Cross-track alignment of Track C with Track B.** `restart-pod` now calls `connectors/kubernetes.restart_pod()` and `get_pod_status()`; `rollback` calls `get_previous_revision()`. Aryan's temporary `connectors/k8s.py` (class-based duplicate) was deleted. Both actions report honestly ("not implemented yet (Track B)") until Aradhya's driver lands — never a fake success. `open-pr` uses a small GitHub REST connector (Track A territory; GitHub is not in Track B's connector list).
 
 **2026-08-09 — Circuit breaker shipped (Track A day 7).** `prash/circuit_breaker.py`: persistent per-resource cap (default 5 actions / 60s, configurable via `PRASH_CIRCUIT_*`), checked by the dispatcher before every execution; on breach, the run stops, is audited with `reason=circuit_open`, and the CLI escalates to a human with `prash circuit status/reset`. Every action prompt now prints its exact target (`Target: <resource> (<env>)`). This closes the last open Tier-1 item Aryan could build alone; the remaining Track A/C work is shared (walking skeleton, integration, demo) or blocked on Track B.
+
+**2026-08-09 — Sprint 2 scope decided (breadth), sequencing decided (not yet), UI direction decided (stays CLI).** With Tracks A-E all landed and only tier-2 + the demo left, Aradhya asked to expand Prash well beyond CI/CD + Kubernetes — full breadth of the DevOps toolchain (more k8s actions, more CI providers, Terraform/IaC, AWS write actions, Docker standalone, observability, testing, incidents, security, dependency tooling, team notifications — full list in the new §7b). Three things were explicitly decided, one explicitly deferred:
+- **Sequencing: current sprint finishes first, unchanged.** Tier 2 and the demo do not get displaced or rushed by this. Confirmed directly when asked.
+- **UI: richer CLI/TUI, not a desktop/web app.** The GUI stays deferred exactly as §7 already had it — asked directly rather than assumed, given how much this reopens if wrong.
+- **Scope: intent captured in full, not prioritized.** Every category Aradhya listed is documented in §7b so none of it gets lost, but this is breadth-of-intent, not a ranked backlog — turning it into one is explicitly left for after the demo, so it's driven by what real use actually reveals is missing rather than a list assembled from aspiration alone. This mirrors exactly how the original CI-repair-only scope got cut down to this sprint in the first place (§1) — not deciding priority order now was a deliberate choice, not an oversight.
+- **Not decided:** which categories get built first, whether each becomes full read+write or stays read-only, any timeline for sprint 2 at all.
 
 ---
 
