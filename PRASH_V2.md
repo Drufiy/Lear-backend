@@ -229,7 +229,7 @@ Build the entire §0b path end to end with everything faked: a hardcoded "crash-
 | 5–6 | **restart-pod** for real, against Aradhya's k8s connector (landing day 2) | Track B: k8s connector |
 | 7 | **Circuit breaker.** Hard cap on actions per resource per time window; on breach, stop and escalate to a human. **Also: every action prompt must name its exact target** — "restart pod `api-7f9d` in namespace `production`", never "restart the pod" | — |
 | 8–9 | Audit log: append-only, persisted, surfaced in the interface — every action, its risk tier, whether it was approved or auto-ran, and its outcome | — |
-| 10–12 | The interface layer — how a user reviews a finding and approves/denies. Resolve §8's interface question before starting | — |
+| 10–12 | The interface layer — how a user reviews a finding and approves/denies, using `rich` for formatted CLI output (§8) | — |
 | 13 | Integration + fix whatever the skeleton's stubs were hiding | Both tracks |
 | 14 | **Demo, recorded.** The §0b sequence, on a live cluster, captured as a shareable video | Everything |
 | *stretch* | Cloud Run connector + **rollback** — grouped deliberately: rollback is your action and it needs `get_previous_revision()`, so you building the connector you depend on removes a cross-track dependency entirely | — |
@@ -244,7 +244,7 @@ Build the entire §0b path end to end with everything faked: a hardcoded "crash-
 | 3 | **(Track D)** Port `prash-backend/evals/` and get a baseline against the v1 brain **before touching it.** Days 9–10 rewrite diagnosis; without this baseline there's no way to tell if the rewrite made it worse | — |
 | 4–5 | **(Track D)** Port `diagnosis_agent.py` / `log_fetcher.py` / `schemas.py` standalone (no Supabase), make `kimi_client`'s call-logging optional. **Then extend the `Diagnosis` schema with runtime categories** — the current enum (`code`/`dependency`/`workflow_config`/`environment`/`flaky_test`/`unknown`) literally cannot express "a running service is unhealthy" | Day 3 evals |
 | 6–8 | **(Track D — the underestimated one)** Teach the brain Kubernetes. The prompt has **69 CI-specific references and zero runtime ones** — it has never seen a crash-loop. Write worked examples for `CrashLoopBackOff`, `OOMKilled`, `ImagePullBackOff`, failed readiness probes. Validate against the day-3 eval baseline: **CI diagnosis quality must not regress while adding runtime capability** | Day 4–5 port |
-| 9–11 | **(Track E)** The watcher: poll loop over the k8s connector, detection for "this looks wrong", and the ping. **One source done properly**, not many done shallowly. Start deliberately narrow on what counts as wrong — false pings destroy trust faster than missed ones | k8s connector |
+| 9–11 | **(Track E)** The watcher: poll loop over the k8s connector, detection for the four states in §8 (`CrashLoopBackOff` / `OOMKilled` / `ImagePullBackOff` / stuck >2min), and a `plyer` desktop notification on the ping. **One source done properly**, not many done shallowly | k8s connector |
 | 12–13 | **(Track D, tier 2)** Multi-failure fix: decompose N independent problems, attempt each, report "fixed 3 of 4" as partial success. Validate against the AgentCore case from 2026-08-03. **This is the first thing to sacrifice if days 6–8 overrun** | Day 4–8 |
 | 14 | Demo with Aryan | Everything |
 | *stretch* | AWS connector (read-only) | — |
@@ -270,13 +270,17 @@ GitHub Actions cannot reach your cluster, so action tests won't run in CI unless
 
 ---
 
-## 8. Open questions — not yet decided
+## 8. Open questions
 
-- Exact shape of the local "interface" beyond terminal output — how much richer than plain CLI text does it need to be in v1? *(Blocks Track A day 11-12 — resolve before then.)*
-- Where does the watcher process live for a user without their own always-on server — does it need a lightweight hosted option, or is "runs on your laptop" acceptable for v1? *(Blocks Track E day 10-12. For this sprint, assume "runs on your laptop" and note the limitation; the real answer is a sprint-2 question.)*
-- What's the actual notification channel — OS-level, Slack, email, all three? *(Blocks Track E. Recommendation: pick ONE for the sprint — OS-level desktop notification is the least infrastructure — and log the choice in §9.)*
-- What counts as "this looks wrong" for the watcher? Crash-loops and failed deploys are obvious; beyond that it's a judgement call, and false pings destroy trust faster than missed ones. *(Blocks Track E. Start deliberately narrow.)*
-- Pricing/packaging implications of a local-agent model vs. the hosted v1 — not addressed in this document, needs its own pass.
+**Four of five resolved 2026-08-09 — see §9 for reasoning.** Only the genuinely non-blocking one remains open.
+
+- ~~Exact shape of the local interface~~ → **RESOLVED: `rich` (Python), formatted CLI text. No TUI framework, no GUI, this sprint.**
+- ~~Where the watcher process lives for a user without an always-on server~~ → **RESOLVED by existing scope: §7 already rules out any hosted layer this sprint. Runs on the user's own machine, full stop. Real answer is a sprint-2 question, not reopened here.**
+- ~~Notification channel~~ → **RESOLVED: OS-level desktop notification via `plyer`** (cross-platform: Windows toast / macOS Notification Center / Linux notify-send).
+- ~~What counts as "this looks wrong" for the watcher~~ → **RESOLVED: exactly the four states Track D is teaching the brain to diagnose** — `CrashLoopBackOff`, `OOMKilled`, `ImagePullBackOff`, and a pod stuck `Pending` or failing readiness for >2 minutes (starting default, tune after the first real test). Deliberately not a separate list — the watcher should never alert on something the brain can't yet explain, and vice versa.
+
+**Still open, and fine to leave open — not a blocker:**
+- Pricing/packaging implications of a local-agent model vs. the hosted v1. Doesn't block any of the 14 days; needs its own pass post-sprint.
 
 ---
 
@@ -325,6 +329,17 @@ Smaller: `kind` (Kubernetes-in-Docker) added to CI, since GitHub Actions can't r
 
 **2026-08-09** — Aradhya claimed Track E (the watcher) and declined a workload rebalance with Aryan. To create room, the **AWS connector was demoted from committed work to a stretch goal**. Documented drop-order if the sprint slips: AWS first, then narrow the watcher's scope — never cut from Tracks B or D, which the definition of done depends on.
 
+**2026-08-09** — CI verified working, not just written: first run failed on all three OSes identically (a script bug — `bash -e` aborted before `pytest`'s expected exit-code-5 handling could run, since GitHub runs steps under `-e`). Fixed with `set +e`/`set -e` around the pytest call. Second run green on Linux, Windows, and macOS. Confirms the cross-platform CI is actually catching things, not just present.
+
+**2026-08-09 — Four of five open questions resolved, to unblock Track A day 10-12 and Track E day 9-11 before either starts:**
+- **Interface:** `rich` (Python) for formatted CLI output. No TUI framework, no GUI, this sprint — consistent with §3's existing "CLI/terminal this sprint, desktop app later."
+- **Watcher hosting:** not actually a new decision — §7 already rules out any hosted layer this sprint, so "runs on the user's own machine" was already implied. Closed rather than re-litigated.
+- **Notification channel:** `plyer`, for one library that covers Windows/macOS/Linux natively rather than three separate integrations.
+- **Detection scope ("what counts as wrong"):** deliberately set to *exactly* the four states Track D is teaching the brain to diagnose (`CrashLoopBackOff`, `OOMKilled`, `ImagePullBackOff`, stuck-pending/failed-readiness >2min). Reasoning: the watcher and the brain must stay in lockstep — alerting on a state the brain can't yet explain would produce a ping Prash then fails to diagnose, which is worse than not watching for it at all. The 2-minute threshold is a starting default, not fixed — long enough to not fire during normal pod startup, short enough to still feel fast. Tune after the first real test.
+- **Left open on purpose:** pricing/packaging. Doesn't block any of the 14 days.
+
+**2026-08-09 — The one blocker that remains: Aryan has still not pushed.** Checked directly against the repo — only Aradhya's commits exist. Every date in Aryan's Track A/C schedule (§6) is still an estimate from a screenshot, not a confirmed number. This is the single highest-priority open item and supersedes everything else in this log.
+
 ---
 
 ## 10. Running log — bugs, improvements, suggestions, ideas
@@ -333,6 +348,9 @@ Add to this table, don't rewrite it. Newest at the top. Every entry gets a name 
 
 | Date | Who | Type | Note |
 |---|---|---|---|
+| 2026-08-09 | Claude (Sonnet) | Blocker | **Aryan still hasn't pushed** (checked directly against the repo, commit history is Aradhya-only). Highest-priority open item — everything in Aryan's §6 schedule is still an estimate until this lands. |
+| 2026-08-09 | Claude (Sonnet) | Decision | Closed 4 of 5 open questions from §8 to unblock Track A day 10-12 and Track E day 9-11: `rich` for the interface, `plyer` for notifications, watcher stays local per §7 (not a new decision), and watcher detection scope set to exactly Track D's four Kubernetes categories so the watcher and brain never drift apart. Pricing left open on purpose — not a sprint blocker. |
+| 2026-08-09 | Claude (Sonnet) | Verification | CI confirmed actually working, not just present: first run failed identically on all 3 OSes (a real script bug — `bash -e` swallowing pytest's exit code 5 before the handling for it could run), fixed, second run green on all 3. |
 | 2026-08-09 | Claude (Opus, review 2) | Bug (plan) | **The `Diagnosis` schema cannot represent a runtime failure.** Category enum has no value for "running service unhealthy". Must be extended before the k8s demo can work — this is on the critical path, not a nice-to-have. Track D days 4–5. |
 | 2026-08-09 | Claude (Opus, review 2) | Risk | **The brain has never seen a Kubernetes problem.** 69 CI references, 0 runtime references in the diagnosis prompt. Teaching it is budgeted at days 6–8 and is the most likely source of overrun in the sprint. If it overruns, drop the multi-failure fix (tier 2) — do not drop the watcher or connector. |
 | 2026-08-09 | Claude (Opus, review 2) | Improvement | Walking skeleton on days 1–2 replaces day-13 big-bang integration. |
