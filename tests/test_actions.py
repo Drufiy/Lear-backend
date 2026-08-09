@@ -112,15 +112,13 @@ def test_open_pr_skipped_when_user_declines(tmp_path):
 
 
 def test_restart_pod_reports_honestly_without_driver(tmp_path):
-    from prash.connectors.k8s import K8sConnector
-
-    ctx = _ctx(tmp_path, resource="default/api", extra={"connectors": {"github": FakeGitHub(), "k8s": K8sConnector({})}})
+    ctx = _ctx(tmp_path, resource="default/api")
     dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
     dispatcher.register_all([RestartPodAction()])
     result = dispatcher.run("restart-pod", ctx)
     assert result.outcome.value == "executed"
     assert result.result.status is ActionResultStatus.FAILED
-    assert "not built yet" in result.result.summary
+    assert "not implemented yet" in result.result.summary
 
 
 def test_rollback_approval_prompts_even_in_bypass(tmp_path):
@@ -132,7 +130,7 @@ def test_rollback_approval_prompts_even_in_bypass(tmp_path):
     assert result.result.status is ActionResultStatus.SKIPPED
 
 
-def test_rollback_with_grant_attempts_but_fails_without_tracking(tmp_path):
+def test_rollback_with_grant_attempts_but_fails_until_track_b_read_exists(tmp_path):
     ctx = _ctx(tmp_path, resource="acme/api", env="staging")
     ctx.grant = True
     dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
@@ -140,7 +138,7 @@ def test_rollback_with_grant_attempts_but_fails_without_tracking(tmp_path):
     result = dispatcher.run("rollback", ctx, ask=FakeAsk(answer=False))
     assert result.decision is Decision.ALLOW
     assert result.result.status is ActionResultStatus.FAILED
-    assert "not wired yet" in result.result.summary
+    assert "release-tracking read not implemented yet" in result.result.summary
 
 
 def test_audit_recorded_for_refused_read_only(tmp_path):

@@ -26,7 +26,7 @@ def _utc_now() -> str:
 
 class AuditLog:
     def __init__(self, path: Optional[Path] = None):
-        self.path = path or Path(os.environ.get("PRASH_AUDIT", "~/.prash/audit.jsonl")).expanduser()
+        self.path = path or Path(os.environ.get("PRASH_AUDIT_LOG_PATH", ".prash/audit.log")).expanduser()
 
     def _open_append(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)

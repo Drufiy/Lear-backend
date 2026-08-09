@@ -27,8 +27,6 @@ from rich.table import Table
 
 from .actions.contract import (
     ActionContext,
-    ActionResultStatus,
-    Decision,
     MissingSecretError,
     Plan,
     Target,
@@ -40,7 +38,6 @@ from .actions.rollback import RollbackAction
 from .audit import AuditLog
 from .connectors.base import Connector
 from .connectors.github import GitHubConnector
-from .connectors.k8s import K8sConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher
@@ -50,7 +47,6 @@ console = Console()
 
 PROVIDERS = {
     "github": GitHubConnector,
-    "k8s": K8sConnector,
     "vercel": VercelConnector,
 }
 
@@ -88,7 +84,7 @@ def _make_context(args: argparse.Namespace, store: CredentialStore, creds: Dict[
             return Prompt.ask(prompt, password=True)
 
     return ActionContext(
-        target=Target(resource=args.resource, environment=args.env),
+        target=Target(resource=args.resource, environment=args.env or creds.get("PRASH_ENVIRONMENT", "staging")),
         credentials=creds,
         secrets=store.secrets(),
         dry_run=getattr(args, "dry_run", False),
@@ -116,9 +112,10 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    mode = _parse_mode(args.mode)
     store = CredentialStore.from_env()
     creds = store.load()
+    mode_raw = args.mode or creds.get("PRASH_PERMISSION_MODE", "ask")
+    mode = _parse_mode(mode_raw)
     dispatcher = _build_dispatcher(mode)
     ctx = _make_context(args, store, creds)
 
@@ -214,8 +211,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="execute an action through the permission pipeline")
     run.add_argument("action", help="action id (see `prash actions`)")
     run.add_argument("resource", help="target resource, e.g. owner/repo or ns/name")
-    run.add_argument("--mode", default="ask", help="permission mode: read-only|ask|auto-safe|environment-scoped|bypass")
-    run.add_argument("--env", default="staging", help="target environment (staging|production)")
+    run.add_argument("--mode", default=None, help="permission mode: read-only|ask|auto-safe|environment-scoped|bypass (default: PRASH_PERMISSION_MODE or ask)")
+    run.add_argument("--env", default=None, help="target environment staging|production (default: PRASH_ENVIRONMENT or staging)")
     run.add_argument("--dry-run", action="store_true", help="plan only; never touch infrastructure")
     run.add_argument("--grant", action="store_true", help="pre-grant this single action (approval tier still prompts via ask)")
     run.add_argument("--noninteractive", action="store_true", help="never prompt; missing secrets return NEEDS_INPUT")

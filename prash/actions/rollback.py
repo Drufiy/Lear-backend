@@ -1,17 +1,20 @@
 """Action: rollback (Track C #3).
 
 Approval tier: always requires an explicit per-action grant, even in bypass
-mode. Blocked on release-tracking existing (Prash must know what "last known
-good" means before "undo" means anything). Until a ReleaseTracker is supplied
-via ctx, execute reports honestly that tracking is not wired.
+mode.
+
+Per PRASH_V2.md §6 cross-track dependency #2, "last known good" is answered by
+a ``get_previous_revision()``-shaped read on the Track B connector — there is
+deliberately no separate release-history store. Until Track B implements that
+read (and a rollout driver exists), execute reports honestly rather than
+claiming a rollback it cannot perform.
 """
 
 from __future__ import annotations
 
-import abc
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Optional
 
+from ..connectors.kubernetes import get_previous_revision
 from .contract import (
     Action,
     ActionContext,
@@ -25,83 +28,66 @@ from .contract import (
 )
 
 
-@dataclass
-class Release:
-    revision: str
-    tag: str
-    timestamp: str
-    healthy: bool
-
-
-class ReleaseTracker(abc.ABC):
-    """What Prash needs before rollback can mean anything."""
-
-    @abc.abstractmethod
-    def last_known_good(self, resource: str) -> Optional[Release]:
-        """The last release of ``resource`` verified healthy."""
-
-
 class RollbackAction(Action):
     spec = ActionSpec(
         id="rollback",
         summary="Roll back a deployment to the last known good revision",
         risk_tier=RiskTier.APPROVAL,
         reversible=True,
-        capabilities=("deploy_state", "rollback"),
+        capabilities=("get_previous_revision", "rollback"),
         approval_hint="Production rollbacks always prompt, even in bypass mode.",
     )
 
+    def _split(self, ctx: ActionContext) -> tuple[str, str]:
+        namespace, _, deployment = ctx.target.resource.partition("/")
+        return (namespace or "default", deployment)
+
     def plan(self, ctx: ActionContext) -> Plan:
-        tracker: Optional[ReleaseTracker] = ctx.extra.get("release_tracker")
-        if tracker is None:
-            return Plan(
-                action_id=self.spec.id,
-                reversible=True,
-                risk_tier=self.spec.risk_tier,
-                steps=[
-                    PlanStep(
-                        description=f"Roll back {ctx.target.resource} to last known good",
-                        impact="requires release-tracking (not wired yet)",
-                    )
-                ],
-            )
-        target = tracker.last_known_good(ctx.target.resource)
-        target_s = target.revision if target else "unknown (none recorded)"
+        namespace, deployment = self._split(ctx)
         return Plan(
             action_id=self.spec.id,
             reversible=True,
             risk_tier=self.spec.risk_tier,
             steps=[
-                PlanStep(description=f"Identify last known good revision for {ctx.target.resource}", impact="read-only"),
-                PlanStep(description=f"Set {ctx.target.resource} to revision {target_s}"),
+                PlanStep(description=f"Read last known good revision for deployment {deployment} in {namespace}", impact="read-only"),
+                PlanStep(description=f"Set {deployment} to the identified revision"),
                 PlanStep(description="Confirm rollout completes and health checks pass"),
             ],
         )
 
     def execute(self, ctx: ActionContext) -> ActionResult:
-        tracker: Optional[ReleaseTracker] = ctx.extra.get("release_tracker")
-        driver: Any = ctx.extra.get("deploy_driver")
-        if tracker is None or driver is None:
+        namespace, deployment = self._split(ctx)
+        try:
+            previous = get_previous_revision(namespace, deployment)
+        except NotImplementedError:
             return ActionResult(
                 status=ActionResultStatus.FAILED,
-                summary="release-tracking not wired yet (Track C #3 dependency): nothing rolled back",
+                summary="release-tracking read not implemented yet (Track B): cannot identify last known good for rollback",
             )
-        target = tracker.last_known_good(ctx.target.resource)
-        if target is None:
+        if not previous:
             return ActionResult(
                 status=ActionResultStatus.FAILED,
-                summary="no last-known-good revision recorded for this resource",
+                summary=f"no prior revision recorded for {namespace}/{deployment}",
             )
-        driver.rollback(ctx.target.resource, target.revision)
+        revision = previous.get("revision") if isinstance(previous, dict) else previous
+        driver: Optional[Callable[[str, str, Any], None]] = ctx.extra.get("rollout_driver")
+        if driver is None:
+            return ActionResult(
+                status=ActionResultStatus.FAILED,
+                summary=f"previous revision {revision} identified; no rollout driver wired to act on it",
+                detail={"revision": str(revision)},
+            )
+        driver(namespace, deployment, revision)
         return ActionResult(
             status=ActionResultStatus.SUCCEEDED,
-            summary=f"rolled back {ctx.target.resource} to {target.revision}",
-            detail={"revision": target.revision},
+            summary=f"rolled back {namespace}/{deployment} to {revision}",
+            detail={"revision": str(revision)},
         )
 
     def verify(self, ctx: ActionContext, result: ActionResult) -> VerificationResult:
-        driver: Any = ctx.extra.get("deploy_driver")
-        if driver is None:
-            return VerificationResult(ok=False, detail="no deploy driver to verify against")
-        healthy = driver.rollout_healthy(ctx.target.resource)
-        return VerificationResult(ok=healthy, detail=f"rollout healthy={healthy}")
+        checker: Optional[Callable[[str, str], bool]] = ctx.extra.get("rollout_healthy")
+        if checker is None:
+            return VerificationResult(ok=False, detail="no rollout health checker wired")
+        namespace, deployment = self._split(ctx)
+        ok = checker(namespace, deployment)
+        return VerificationResult(ok=ok, detail=f"rollout healthy={ok}")

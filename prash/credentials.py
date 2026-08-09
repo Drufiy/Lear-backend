@@ -27,8 +27,13 @@ class CredentialStore:
 
     @classmethod
     def from_env(cls) -> "CredentialStore":
-        path = os.environ.get("PRASH_ENV", "~/.prash/.env")
-        return cls(path=Path(path).expanduser())
+        explicit = os.environ.get("PRASH_ENV")
+        if explicit:
+            return cls(path=Path(explicit).expanduser())
+        cwd_env = Path(".env")
+        if cwd_env.exists():
+            return cls(path=cwd_env)
+        return cls(path=Path("~/.prash/.env").expanduser())
 
     def load(self) -> Dict[str, Any]:
         if not self.path.exists():
