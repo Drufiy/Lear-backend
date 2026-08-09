@@ -1,33 +1,39 @@
 """Kubernetes connector — Track B, days 1-2 priority (PRASH_V2.md §6).
 
 Highest-priority connector in the whole sprint: Track C's restart-pod
-(Aryan, days 5-6) and Track E's watcher (Aradhya, days 9-11) are both
-blocked on this existing. Ship it rough by day 2; refine after.
+(Aryan) and Track E's watcher (Aradhya) are both blocked on this
+existing.
 
-Reads local credentials only, per §4 — KUBECONFIG / KUBE_CONTEXT /
-KUBE_NAMESPACE from .env (see .env.example). Never anything hosted.
+Reads cluster config from the standard kubectl locations — KUBECONFIG /
+current-context in ~/.kube/config, optionally overridden by KUBE_CONTEXT
+and KUBE_NAMESPACE environment variables. See PRASH_V2.md §10, 2026-08-09
+"Pending" entry: `.env`'s values don't currently reach os.environ
+automatically (a cross-track gap, not yet resolved) -- for now this only
+picks them up if they're actually exported in the shell, or falls back
+to kubeconfig's own current-context (which `kind create cluster` already
+sets correctly for local development).
 
-Needs the `kubernetes` PyPI package (the official Python client).
-Not yet added to a requirements file — no requirements/pyproject.toml
-exists in this repo yet (see PRASH_V2.md §10, 2026-08-09 entry on the
-package skeleton). Whoever adds one first, log it in §10.
-
-The four states below are exactly what Track D is being taught to
-diagnose (§8) and what Track E's watcher fires on. Keep this list and
-the brain's prompt work in lockstep — don't detect a state the brain
+The four `problem` states below are exactly what Track D is being taught
+to diagnose (§8) and what Track E's watcher fires on. Keep this list and
+the brain's prompt work in lockstep -- don't detect a state the brain
 can't yet explain.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
 
 
 @dataclass
 class PodStatus:
     name: str
     namespace: str
-    phase: str  # Running, Pending, Failed, ...
+    phase: str  # Running, Pending, Failed, Succeeded, Unknown
     # One of the four states this connector watches for, or None if healthy.
     # CrashLoopBackOff | OOMKilled | ImagePullBackOff | StuckPending
     problem: str | None
@@ -35,51 +41,250 @@ class PodStatus:
     ready: bool
 
 
+# How long a pod may sit Pending / not-Ready before we call it "stuck".
+# Matches PRASH_V2.md §8's 2-minute starting default.
+_STUCK_THRESHOLD_SECONDS = 120
+
+_ERR_IMAGE_REASONS = {"ImagePullBackOff", "ErrImagePull"}
+
+_core_api: client.CoreV1Api | None = None
+
+
+def _client() -> client.CoreV1Api:
+    """Lazy singleton so tests can monkeypatch this module's _core_api
+    directly instead of every function reaching into the kubernetes lib.
+    """
+    global _core_api
+    if _core_api is not None:
+        return _core_api
+
+    kubeconfig = os.environ.get("KUBECONFIG")
+    context = os.environ.get("KUBE_CONTEXT") or None
+    config.load_kube_config(config_file=kubeconfig, context=context)
+    _core_api = client.CoreV1Api()
+    return _core_api
+
+
+def _default_namespace(namespace: str | None) -> str:
+    return namespace or os.environ.get("KUBE_NAMESPACE", "default")
+
+
+def _seconds_since(ts) -> float:
+    if ts is None:
+        return 0.0
+    now = datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now - ts).total_seconds()
+
+
+def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
+    """Derive (problem, restart_count, ready) from a pod's real status.
+
+    Checks every container, not just the first -- a multi-container pod
+    with one healthy sidecar and one crash-looping main container must
+    still be flagged.
+    """
+    statuses = pod.status.container_statuses or []
+    restart_count = sum(s.restart_count for s in statuses) if statuses else 0
+    ready = bool(statuses) and all(s.ready for s in statuses)
+
+    problem: str | None = None
+    for s in statuses:
+        waiting = s.state.waiting
+        terminated = s.state.terminated
+        last_terminated = s.last_state.terminated if s.last_state else None
+
+        if waiting and waiting.reason == "CrashLoopBackOff":
+            problem = "CrashLoopBackOff"
+            break
+        if waiting and waiting.reason in _ERR_IMAGE_REASONS:
+            problem = "ImagePullBackOff"
+            break
+        if terminated and terminated.reason == "OOMKilled":
+            problem = "OOMKilled"
+            break
+        if last_terminated and last_terminated.reason == "OOMKilled":
+            problem = "OOMKilled"
+            break
+
+    if problem is None and pod.status.phase == "Pending":
+        age = _seconds_since(pod.status.start_time or pod.metadata.creation_timestamp)
+        if age > _STUCK_THRESHOLD_SECONDS:
+            problem = "StuckPending"
+
+    if problem is None and not ready and pod.status.phase == "Running":
+        age = _seconds_since(pod.status.start_time)
+        if age > _STUCK_THRESHOLD_SECONDS:
+            problem = "StuckPending"
+
+    return problem, restart_count, ready
+
+
 def get_pod_status(namespace: str, pod_name: str | None = None) -> list[PodStatus]:
     """Read-only. All pods in `namespace`, or just `pod_name` if given.
 
-    TODO(Track B): implement against the `kubernetes` client's
-    CoreV1Api.list_namespaced_pod / read_namespaced_pod. Derive
-    `problem` from container statuses' waiting/terminated reasons.
+    Returns an empty list if the pod/namespace doesn't exist -- never
+    raises for "not found", since Track C's restart-pod verify() step
+    already handles an empty list as its "pod missing" case.
     """
-    raise NotImplementedError
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        if pod_name:
+            pod = api.read_namespaced_pod(name=pod_name, namespace=namespace)
+            pods = [pod]
+        else:
+            pods = api.list_namespaced_pod(namespace=namespace).items
+    except ApiException as exc:
+        if exc.status == 404:
+            return []
+        raise
+
+    result = []
+    for pod in pods:
+        problem, restart_count, ready = _classify(pod)
+        result.append(
+            PodStatus(
+                name=pod.metadata.name,
+                namespace=pod.metadata.namespace,
+                phase=pod.status.phase or "Unknown",
+                problem=problem,
+                restart_count=restart_count,
+                ready=ready,
+            )
+        )
+    return result
 
 
 def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
-    """Read-only. Recent logs for a pod (its most recent container/restart)."""
-    raise NotImplementedError
+    """Read-only. Recent logs for a pod.
+
+    Tries the current container attempt first. A crash-looping pod's
+    *current* attempt often has zero logs (it just restarted and hasn't
+    logged anything new yet) -- the real story is in the previous
+    attempt, so this falls back to `previous=True` when the current
+    attempt is empty. Verified against a real CrashLoopBackOff pod
+    during development (see PRASH_V2.md §10) -- this fallback is not
+    theoretical, the first attempt genuinely came back empty.
+    """
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        logs = api.read_namespaced_pod_log(
+            name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=False
+        )
+    except ApiException as exc:
+        if exc.status == 404:
+            return ""
+        logs = ""
+
+    if logs.strip():
+        return logs
+
+    try:
+        return api.read_namespaced_pod_log(
+            name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=True
+        )
+    except ApiException:
+        return logs  # whatever we had, even if empty -- never raise for "no logs yet"
 
 
 def get_pod_events(namespace: str, pod_name: str) -> list[dict]:
     """Read-only. Kubernetes Events involving this pod, most recent first.
 
     Events are where the real story usually is for ImagePullBackOff /
-    scheduling failures — logs alone often won't show why a pod never
+    scheduling failures -- logs alone often won't show why a pod never
     started.
     """
-    raise NotImplementedError
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        events = api.list_namespaced_event(
+            namespace=namespace,
+            field_selector=f"involvedObject.name={pod_name}",
+        ).items
+    except ApiException as exc:
+        if exc.status == 404:
+            return []
+        raise
+
+    events.sort(key=lambda e: e.last_timestamp or e.event_time or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return [
+        {
+            "type": e.type,
+            "reason": e.reason,
+            "message": e.message,
+            "count": e.count,
+            "last_timestamp": (e.last_timestamp or e.event_time).isoformat() if (e.last_timestamp or e.event_time) else None,
+        }
+        for e in events
+    ]
 
 
 def restart_pod(namespace: str, pod_name: str) -> bool:
-    """WRITE. Safe-tier action per PRASH_V2.md §5 — Track C wires the
-    permission check; this function assumes it has already been
-    granted and just does the deletion (the Deployment/ReplicaSet
-    recreates it).
+    """WRITE. Safe-tier action per PRASH_V2.md §5 -- Track C's
+    RestartPodAction wires the permission check; this function assumes
+    it has already been granted and just does the deletion (the
+    Deployment/ReplicaSet recreates it).
 
     Returns True if the delete succeeded. Track C is responsible for
-    the post-action verification step (§3) — re-check the pod here is
-    NOT this function's job, keep it a single clear action.
+    the post-action verification step (§3) -- re-checking the pod here
+    is NOT this function's job, keep it a single clear action.
+
+    Honest caveat, worth stating plainly: deleting a pod whose
+    *application* is broken will just recreate the same broken pod
+    under a new name. Restart fixes stuck/wedged processes; it cannot
+    fix a genuinely broken container image or command. Track D's
+    diagnosis is what tells a user which case they're in.
     """
-    raise NotImplementedError
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        api.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
 
 
 def get_previous_revision(namespace: str, deployment_name: str) -> dict | None:
-    """Read-only. The last known-good revision for a Deployment, from
-    the ReplicaSet revision history Kubernetes already keeps — no
-    separate state store. See PRASH_V2.md §6, cross-track dependency #2.
+    """Read-only. The last known-good revision for a Deployment, from the
+    ReplicaSet revision history Kubernetes already keeps -- no separate
+    state store. See PRASH_V2.md §6, cross-track dependency #2.
 
-    Returns something Track C's rollback action can act on directly
-    (e.g. a revision number `kubectl rollout undo` can target), or
-    None if there's no prior revision to roll back to.
+    Returns {"revision": <int>} matching what Track C's rollback action
+    expects (`previous.get("revision")`), or None if there's no prior
+    revision to roll back to.
+
+    Real mechanics: a Deployment's revision history is tracked via each
+    ReplicaSet's `deployment.kubernetes.io/revision` annotation, not on
+    the Deployment object itself. This lists the Deployment's owned
+    ReplicaSets and returns the second-highest revision number (the
+    highest is the current one).
     """
-    raise NotImplementedError
+    namespace = _default_namespace(namespace)
+    api = _client()
+    apps_api = client.AppsV1Api(api.api_client)
+    try:
+        rs_list = apps_api.list_namespaced_replica_set(namespace=namespace).items
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+
+    revisions = []
+    for rs in rs_list:
+        owners = rs.metadata.owner_references or []
+        if not any(o.kind == "Deployment" and o.name == deployment_name for o in owners):
+            continue
+        rev_str = (rs.metadata.annotations or {}).get("deployment.kubernetes.io/revision")
+        if rev_str is not None:
+            revisions.append(int(rev_str))
+
+    if len(revisions) < 2:
+        return None
+
+    revisions.sort(reverse=True)
+    return {"revision": revisions[1]}

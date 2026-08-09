@@ -9,6 +9,7 @@ description = "Prash v2 - local-first AI DevOps agent"
 requires-python = ">=3.10"
 dependencies = [
     "rich>=13.0",
+    "kubernetes>=29.0",
 ]
 
 [project.optional-dependencies]

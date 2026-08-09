@@ -112,14 +112,23 @@ def test_open_pr_skipped_when_user_declines(tmp_path):
     assert result.result.status is ActionResultStatus.SKIPPED
 
 
-def test_restart_pod_reports_honestly_without_driver(tmp_path):
+def test_restart_pod_reports_failure_honestly_when_pod_missing(tmp_path, monkeypatch):
+    """Track B's connector is real now (2026-08-09) -- was previously a
+    stub raising NotImplementedError, which this test used to assert on
+    ("not implemented yet"). Updated to mock the real connector function
+    instead of hitting whatever k8s cluster happens to be configured on
+    whoever runs the suite (that was a real latent bug: it only ever
+    'passed' by accident on a machine with a matching cluster). See
+    PRASH_V2.md §10, 2026-08-09.
+    """
+    monkeypatch.setattr("prash.actions.restart_pod.k8s_restart_pod", lambda ns, name: False)
     ctx = _ctx(tmp_path, resource="default/api")
     dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
     dispatcher.register_all([RestartPodAction()])
     result = dispatcher.run("restart-pod", ctx)
     assert result.outcome.value == "executed"
     assert result.result.status is ActionResultStatus.FAILED
-    assert "not implemented yet" in result.result.summary
+    assert "did not succeed" in result.result.summary
 
 
 def test_rollback_approval_prompts_even_in_bypass(tmp_path):
@@ -131,7 +140,13 @@ def test_rollback_approval_prompts_even_in_bypass(tmp_path):
     assert result.result.status is ActionResultStatus.SKIPPED
 
 
-def test_rollback_with_grant_attempts_but_fails_until_track_b_read_exists(tmp_path):
+def test_rollback_with_grant_fails_honestly_when_no_prior_revision(tmp_path, monkeypatch):
+    """Same update as test_restart_pod_reports_failure_honestly_when_pod_missing
+    above -- Track B's get_previous_revision() is real now, this asserted
+    on the old stub's "not implemented yet" text. Mocked instead of
+    hitting a real cluster. See PRASH_V2.md §10, 2026-08-09.
+    """
+    monkeypatch.setattr("prash.actions.rollback.get_previous_revision", lambda ns, deployment: None)
     ctx = _ctx(tmp_path, resource="acme/api", env="staging")
     ctx.grant = True
     dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
@@ -139,7 +154,7 @@ def test_rollback_with_grant_attempts_but_fails_until_track_b_read_exists(tmp_pa
     result = dispatcher.run("rollback", ctx, ask=FakeAsk(answer=False))
     assert result.decision is Decision.ALLOW
     assert result.result.status is ActionResultStatus.FAILED
-    assert "release-tracking read not implemented yet" in result.result.summary
+    assert "no prior revision recorded" in result.result.summary
 
 
 def test_audit_recorded_for_refused_read_only(tmp_path):
