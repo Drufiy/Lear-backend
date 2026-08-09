@@ -65,19 +65,27 @@ def _make_connectors(creds: Dict[str, Any]) -> Dict[str, Connector]:
     return {name: cls(creds) for name, cls in PROVIDERS.items()}
 
 
-# Keys the kubernetes connector (Track B) reads directly from the process
-# environment, not from ctx.credentials -- see PRASH_V2.md §10, 2026-08-09.
+# Keys the kubernetes connector (Track B) and the diagnosis brain (Track D)
+# read directly from the process environment, not from ctx.credentials --
+# see PRASH_V2.md §10, 2026-08-09 (cluster keys) and days 4-5 (brain keys).
 _CLUSTER_ENV_PASSTHROUGH = ("KUBECONFIG", "KUBE_CONTEXT", "KUBE_NAMESPACE")
+_BRAIN_ENV_PASSTHROUGH = (
+    "KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL",
+    "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
+    "PRIMARY_MODEL",
+)
 
 
 def _export_cluster_env(creds: Dict[str, Any]) -> None:
-    """Make .env's cluster settings visible to the kubernetes client library.
+    """Make .env's cluster + brain-model settings visible to the libraries that
+    read them straight from the process environment (prash.connectors.kubernetes,
+    prash.brain.kimi_client) rather than through ctx.credentials.
 
     A shell-exported value always wins over .env -- this only fills in what
     isn't already set, so power users overriding via their shell still work
     exactly as before.
     """
-    for key in _CLUSTER_ENV_PASSTHROUGH:
+    for key in (*_CLUSTER_ENV_PASSTHROUGH, *_BRAIN_ENV_PASSTHROUGH):
         if key in creds and key not in os.environ:
             os.environ[key] = str(creds[key])
 

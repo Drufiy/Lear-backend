@@ -1,6 +1,7 @@
-"""Track A/B boundary: cli.py's .env -> os.environ passthrough for the
-kubernetes connector. See PRASH_V2.md §10, 2026-08-09 (Pending decision,
-resolved with option (a)).
+"""Track A/B/D boundary: cli.py's .env -> os.environ passthrough for the
+kubernetes connector and, since Track D days 4-5, the diagnosis brain's
+model clients. See PRASH_V2.md §10, 2026-08-09 (Pending decision, resolved
+with option (a)).
 """
 
 from __future__ import annotations
@@ -44,3 +45,21 @@ def test_missing_keys_are_a_no_op(monkeypatch):
     import os
 
     assert "KUBECONFIG" not in os.environ
+
+
+def test_exports_kimi_api_key_for_the_brain(monkeypatch):
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    _export_cluster_env({"KIMI_API_KEY": "sk-test-value"})
+    import os
+
+    assert os.environ["KIMI_API_KEY"] == "sk-test-value"
+
+
+def test_exports_deepseek_and_primary_model_for_the_brain(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("PRIMARY_MODEL", raising=False)
+    _export_cluster_env({"DEEPSEEK_API_KEY": "sk-ds-test", "PRIMARY_MODEL": "deepseek"})
+    import os
+
+    assert os.environ["DEEPSEEK_API_KEY"] == "sk-ds-test"
+    assert os.environ["PRIMARY_MODEL"] == "deepseek"
