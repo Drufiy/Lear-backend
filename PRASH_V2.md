@@ -18,6 +18,38 @@
 
 ---
 
+## 0b. Definition of done for this sprint
+
+At the end of 14 days, on a live system, this exact sequence works end to end:
+
+> A Kubernetes pod is crash-looping. Prash's watcher notices and pings. The user runs `prash fix`. Prash reads the real pod logs and events, works out why, and says what it wants to do. Restarting the pod is a **safe-tier** action, so in `auto-safe` mode it just does it and reports what it did — but in `ask` mode it asks first. It then **re-checks the pod** and reports honestly whether the restart actually worked. Every step of that lands in the local audit log.
+
+If that sequence works, the sprint succeeded, even if connectors are missing and the interface is plain text. If it doesn't, the sprint didn't succeed, however much code exists. Everything in §6 is in service of that sentence.
+
+**Explicitly NOT required for "done":** AWS support, a rich TUI, rollback working on every platform, the desktop app.
+
+---
+
+## 0c. Tech stack and repo conventions (read before writing any code)
+
+**Language/runtime:** Python 3.12. Package name is `prash` (so `python -m prash.cli`). This matches v1, and the brain being ported in Track D is Python.
+
+**Cross-platform is a hard requirement, not a nice-to-have.** Aryan develops on **Windows/PowerShell**, Aradhya on **macOS**. Prash v2 is a CLI tool, so path handling, shell quoting, signal handling, and line endings all differ between your two machines. Use `pathlib` not string paths, never shell out to a Unix-only command without a Windows path, and assume the other person's machine will break your code if you don't. CI runs on Linux + Windows + macOS on every push for exactly this reason.
+
+**Tests:** `pytest`. Aryan's existing `tests/test_permissions.py` sets the pattern.
+
+**CI:** `.github/workflows/ci.yml` runs lint + tests on all three OSes on every push and PR. It is deliberately lenient while scaffolding (lint warns rather than fails; "no tests collected" passes) — tighten it once there's real code.
+
+**Branching — this matters with 4 Claude Code accounts on one repo:**
+- Nobody pushes directly to `main`.
+- Branch names are prefixed by track: `track-a/...`, `track-b/...`, `track-c/...`, `track-d/...`, `track-e/...`. That way it's obvious at a glance whose work a branch is, and two accounts don't collide on the same name.
+- Open a PR into `main`. CI must pass. The *other* person doesn't have to review every PR — that would be a bottleneck for two people — but anything touching a shared interface (the `Action` interface, `.env.example`, this file) does need the other's eyes before merge.
+- Merge often. Long-lived branches across four parallel agents is how you get an unmergeable mess on day 10.
+
+**Credentials:** `.env.example` is the schema; `.env` is gitignored and never committed. **Aryan owns the `.env.example` schema** (Track A owns config loading). Adding a key = log it in §10.
+
+---
+
 ## 1. Why we're pivoting (context for anyone reading this cold)
 
 Prash v1 is a hosted service: it watches GitHub Actions, diagnoses why a CI run failed, and opens a pull request with a fix. It works, and it's live at prash.drufiy.com.
@@ -141,7 +173,9 @@ Database migrations. Anything that destroys data. Anything touching production w
 ### Ground rules for the split
 
 - **Aryan owns Track A (CLI spine & permission engine) + Track C (write actions).**
-- **Aradhya owns Track B (read connectors) + Track D (diagnosis brain port + multi-failure fix).**
+- **Aradhya owns Track B (read connectors) + Track D (diagnosis brain port + multi-failure fix) + Track E (the watcher).**
+
+> ⚠️ **Load warning, stated once and then left to Aradhya's judgement.** Aradhya's side is the heavier of the two: three connectors, the brain port, the evals port, the multi-failure fix, *and* the watcher. Aradhya explicitly chose to own the watcher (2026-08-09) and declined a rebalance. To make room, the **AWS connector has been demoted from committed work to a stretch goal** — it is read-only this sprint, no action depends on it, and it is the cheapest thing to drop. If the sprint starts slipping, drop AWS first, then descope the watcher to "polls one source" rather than cutting anything in Tracks B or D.
 - **The `Action` interface is Aryan's to define and own.** Track B (Aradhya) writes connectors that *expose data*; Track C (Aryan) writes actions that *consume* that data through the Action interface. If Track B needs to change how it exposes something, that's a conversation, not a unilateral change on either side — log it in §10 before changing shared shape.
 - **Nobody touches another track's files without saying so in §10 first.** If Aradhya needs to add a method to something Aryan owns (or vice versa), that's a flagged cross-track dependency (see the two explicit ones below), not a silent edit.
 - Day numbers are **relative to when each person actually starts**, not calendar dates — this doc deliberately doesn't pin real dates so it doesn't go stale if someone starts a day late. When you start, write the actual date next to Day 1 in your own section below.
@@ -150,6 +184,8 @@ Database migrations. Anything that destroys data. Anything touching production w
 
 1. **Restart-pod (Track C) needs the Kubernetes connector (Track B) to exist first.** Aryan should build restart-pod against a documented mock/interface before Aradhya's real connector lands, then swap the mock for the real thing once it's pushed. Don't block on this — build the shape first.
 2. **Rollback (Track C) needs to know "the last known-good revision."** Design decision made here, now, to avoid a shared-state headache: **this is a read query, not a new database.** Track B's connectors (Cloud Run / Vercel / k8s) should each expose a `get_previous_revision()`-shaped read call as part of their normal read scope. Track C's rollback action calls that, rather than Prash maintaining its own separate "release history" store. Aradhya: build this into each connector's read interface from the start, not as an afterthought.
+
+3. **The watcher (Track E) consumes Track B's connectors and triggers Track A's interface.** Aradhya owns both E and B so the connector side is internal to him — but the *ping → user opens interface → Prash acts* handoff crosses into Aryan's territory. Agree that handoff shape before Day 10, not during it.
 
 ### Day 0 (both, immediately — this is blocking)
 
@@ -178,14 +214,15 @@ Database migrations. Anything that destroys data. Anything touching production w
 
 | Day | Milestone | Depends on |
 |---|---|---|
-| 1–2 | **(Track D, no dependency, start immediately)** Extract `diagnosis_agent.py`, `log_fetcher.py`, `schemas.py` from `prash-backend` into this repo as a standalone package, no Supabase coupling. Confirm it's importable and callable on its own | — |
-| 1–2 | *(parallel)* Confirm Track A's real `Action` interface once Aryan's Day 0 push lands; note any gap vs. what this doc assumed | Aryan: Day 0 push |
-| 3–5 | **(Track B)** Kubernetes connector: pod status, logs, events (read), plus restart capability and `get_previous_revision()`-equivalent if it applies to k8s deployments. Highest priority connector — Track C's restart-pod depends on it | — |
+| 1 | **(Track D — do this FIRST, before touching the brain)** Port `prash-backend/evals/` into this repo and get it running against the v1 brain as a baseline. **Rationale: days 8–9 rewrite how diagnosis handles multi-failure. Without the eval harness in place first, there is no way to tell whether that rewrite silently made diagnosis worse.** This is brain surgery; the evals are the anaesthetic | — |
+| 1–2 | **(Track D)** Extract `diagnosis_agent.py`, `log_fetcher.py`, `schemas.py` from `prash-backend` into this repo as a standalone package, no Supabase coupling. Make `kimi_client.py`'s call-logging optional. Confirm importable and callable on its own, and that the ported evals still pass against it | Day 1 evals port |
+| 2 | *(parallel, small)* Confirm Track A's real `Action` interface once Aryan's Day 0 push lands; note any gap vs. what this doc assumed in §9 | Aryan: Day 0 push |
+| 3–5 | **(Track B)** Kubernetes connector: pod status, logs, events (read), plus restart capability and `get_previous_revision()`-equivalent for k8s deployments. **Highest-priority connector — Aryan's restart-pod is blocked on this, so it ships before anything else in Track B** | — |
 | 6–7 | **(Track B)** Cloud Run connector: logs, deployment status, `get_previous_revision()` | — |
-| 7–9 | **(Track D)** Fix the multi-failure bug: decompose N independent problems, attempt each through the (now-standalone) brain, report partial success ("fixed 3 of 4") instead of one all-or-nothing result. Validate against the real AgentCore case from 2026-08-03 (4 independent CI failures) | Track D Day 1-2 port |
-| 9–10 | **(Track B)** AWS connector, read-only only this sprint (see §7 — AWS writes are explicitly out of scope) | — |
-| 11–12 | Wire Track D's decomposed output into Track A's Action interface — each independent fix goes through the permission engine as its own action | Track A's Action interface finalized |
-| 13–14 | Get one real outside setup (not a fork, not our own test infra) running the full watch → ping → interface → fix → verify loop | Both tracks substantially working |
+| 8–9 | **(Track D)** Fix the multi-failure bug: decompose N independent problems, attempt each through the standalone brain, report partial success ("fixed 3 of 4") instead of one all-or-nothing result. Validate against the real AgentCore case from 2026-08-03 (4 independent CI failures). **Re-run the ported evals afterwards and compare to the Day 1 baseline — a regression here is a stop-and-fix, not a ship-it** | Day 1–2 port + evals baseline |
+| 10–12 | **(Track E — the watcher)** The background process: a poll loop over whatever connectors exist, detection logic for "this looks wrong", and the ping. Scope it to **one source done properly** (Kubernetes, since it's built first and is the demo path in §0b) rather than all sources done shallowly. Notification channel per §8 — pick the simplest that works and log the choice in §9 | Track B: k8s connector |
+| 13–14 | Run the §0b definition-of-done sequence end to end on a live system, then get it in front of one real outside setup — not a fork, not our own test infra | Both tracks working |
+| *stretch* | **(Track B)** AWS connector, read-only (see load warning above — this is the first thing to drop if the sprint slips) | — |
 
 ### Days 13–14 (both, together)
 
@@ -197,17 +234,20 @@ Get this in front of at least one real outside user on their own infrastructure.
 
 - The desktop app (CLI/terminal only, this round)
 - Docker-layer actions beyond what's needed to support the Kubernetes connector
-- AWS write actions (read/investigate only this sprint — AWS write actions are a later phase)
+- AWS **write** actions (read/investigate only — and even the read connector is a stretch goal, see §6 load warning)
 - Database/migration actions of any kind
 - Rebuilding or touching the v1 hosted service (`prash-backend`)
+- A hosted layer of any kind for v2 — no dashboard, no cross-project history, no team visibility this sprint. Local only.
+- Multi-source watching. Track E watches **one** source (Kubernetes) properly; watching everything is sprint 2.
 
 ---
 
 ## 8. Open questions — not yet decided
 
 - Exact shape of the local "interface" beyond terminal output — how much richer than plain CLI text does it need to be in v1? *(Blocks Track A day 11-12 — resolve before then.)*
-- Where does the watcher process live for a user without their own always-on server — does it need a lightweight hosted option, or is "runs on your laptop" acceptable for v1?
-- What's the actual notification channel — OS-level, Slack, email, all three?
+- Where does the watcher process live for a user without their own always-on server — does it need a lightweight hosted option, or is "runs on your laptop" acceptable for v1? *(Blocks Track E day 10-12. For this sprint, assume "runs on your laptop" and note the limitation; the real answer is a sprint-2 question.)*
+- What's the actual notification channel — OS-level, Slack, email, all three? *(Blocks Track E. Recommendation: pick ONE for the sprint — OS-level desktop notification is the least infrastructure — and log the choice in §9.)*
+- What counts as "this looks wrong" for the watcher? Crash-loops and failed deploys are obvious; beyond that it's a judgement call, and false pings destroy trust faster than missed ones. *(Blocks Track E. Start deliberately narrow.)*
 - Pricing/packaging implications of a local-agent model vs. the hosted v1 — not addressed in this document, needs its own pass.
 
 ---
@@ -232,6 +272,20 @@ Get this in front of at least one real outside user on their own infrastructure.
 
 **2026-08-09** — Design decision: rollback's "last known good" state is answered by a `get_previous_revision()`-shaped read query on each Track B connector, not a separately maintained release-history store. Avoids a third piece of shared state between Track B and C.
 
+**2026-08-09 (plan review, Opus)** — Reviewed the plan for gaps before any code was written. Found seven, all now addressed:
+
+1. **The watcher was in the product description but in nobody's track.** §2/§3 describe background watching as the core of the product, but Tracks A–D built none of it — meaning the day 13–14 demo ("watch → ping → interface → fix → verify") was impossible as planned. **Resolution: Aradhya explicitly claimed it as Track E.** Scoped to one source (Kubernetes) done properly.
+2. **Track D was rewriting the diagnosis brain with no eval harness.** Now the evals port is Day 1, before anything touches the brain, with an explicit baseline-vs-after comparison on Day 8–9.
+3. **No branch strategy for 4 Claude Code accounts on one repo.** Now documented in §0c: no direct pushes to `main`, track-prefixed branch names, PRs with CI passing, cross-track interface changes need the other person's eyes.
+4. **No CI on the repo.** Added `.github/workflows/ci.yml`.
+5. **Cross-platform risk unflagged** — Aryan is on Windows/PowerShell, Aradhya on macOS, and this is a CLI tool. Now a stated hard requirement in §0c, with CI running on all three OSes.
+6. **`.env` schema had no owner and no template.** Added `.env.example`; Aryan owns the schema.
+7. **No definition of done for the sprint.** Added §0b as a single concrete sequence that either works or doesn't.
+
+Also: runtime (Python 3.12, package `prash`) and test framework (pytest) were never written down. Now in §0c.
+
+**2026-08-09** — Aradhya claimed Track E (the watcher) and declined a workload rebalance with Aryan. To create room, the **AWS connector was demoted from committed work to a stretch goal**. Documented drop-order if the sprint slips: AWS first, then narrow the watcher's scope — never cut from Tracks B or D, which the definition of done depends on.
+
 ---
 
 ## 10. Running log — bugs, improvements, suggestions, ideas
@@ -240,6 +294,10 @@ Add to this table, don't rewrite it. Newest at the top. Every entry gets a name 
 
 | Date | Who | Type | Note |
 |---|---|---|---|
+| 2026-08-09 | Aradhya | Decision | Claimed Track E (watcher) personally; declined rebalancing Track B/D load with Aryan. AWS connector demoted to stretch to compensate. |
+| 2026-08-09 | Claude (Opus, plan review) | Improvement | Seven gaps found and fixed before code was written — see the full entry in §9. Biggest: the watcher existed in the product description but in nobody's track, making the planned day-13 demo undeliverable. |
+| 2026-08-09 | Claude (Opus) | Risk | **Aradhya's load is the sprint's main risk.** Three connectors + brain port + evals port + multi-failure fix + watcher, against Aryan's Track A/C. Drop order if it slips is written into §6 — follow it rather than improvising. |
+| 2026-08-09 | Claude (Opus) | Risk | **Cross-platform.** Aryan on Windows, Aradhya on macOS, building a CLI. CI now covers all three OSes, but expect this to bite at least once — most likely on path handling or shelling out. |
 | 2026-08-09 | Aradhya | Idea | Repo created (`prash-v2-backend`), work split into day-by-day plan, this file established as the single source of truth with a mandatory update-after-every-session rule. |
 | 2026-08-09 | Claude (for Aryan, from screenshot) | Progress note | Track A action registry + permission engine + dry-run already working locally, unpushed. Needs Aryan to add real detail here once he's pushed and can speak to it directly — this entry is secondhand. |
 
