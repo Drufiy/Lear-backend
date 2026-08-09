@@ -1,0 +1,19 @@
+{
+  "id": "runtime_image_pull_back_off",
+  "source": "verified",
+  "repo_full_name": "acme/frontend",
+  "workflow_name": "kubernetes",
+  "commit_message": "(no commit — runtime failure detected by the watcher, not a CI run)",
+  "logs": "=== POD STATUS ===\nname: frontend-9b4c1\nnamespace: staging\nphase: Pending\nproblem: ImagePullBackOff\nrestart_count: 0\nready: false\n\n=== POD LOGS ===\n(empty — no output before the container exited)\n\n=== POD EVENTS ===\n- Warning Failed: Failed to pull image \"myapp:v2.1.0\": rpc error: code = NotFound desc = failed to pull and unpack image \"docker.io/library/myapp:v2.1.0\": not found (x5)",
+  "current_files": {},
+  "expected": {
+    "category": "runtime",
+    "fix_type": "manual_required",
+    "confidence": 0.92,
+    "recommended_action": null,
+    "files_changed_paths": [],
+    "problem_summary": "Kubernetes cannot pull image myapp:v2.1.0 — tag not found in the registry",
+    "verified": true
+  },
+  "notes": "Hand-authored (Track D days 6-8) — the clearest 'restart never helps' case: a new pod would retry pulling the exact same missing tag. Tests that the brain doesn't default to recommending restart_pod just because it's the only action it knows about."
+}

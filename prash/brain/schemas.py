@@ -97,6 +97,20 @@ class Diagnosis(BaseModel):
         ),
     )
 
+    @field_validator("recommended_action", mode="before")
+    @classmethod
+    def _normalize_recommended_action(cls, v):
+        """Models routinely emit the literal string "null" (or "none"/"") in
+        tool-call JSON instead of an actual JSON null for a nullable field --
+        a known cross-model quirk, not unique to one provider (hit this via
+        both Kimi and DeepSeek in eval runs). Without this, Pydantic rejects
+        the string outright since it isn't one of the three literal values,
+        which silently failed 2 hand-authored k8s cases AND 3 unrelated CI
+        cases in the same eval run -- caught by the harness, not assumed."""
+        if isinstance(v, str) and v.strip().lower() in ("null", "none", ""):
+            return None
+        return v
+
     @model_validator(mode="after")
     def coerce_fix_type(self) -> "Diagnosis":
         """

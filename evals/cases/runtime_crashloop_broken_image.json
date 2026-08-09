@@ -1,0 +1,19 @@
+{
+  "id": "runtime_crashloop_broken_image",
+  "source": "verified",
+  "repo_full_name": "acme/web",
+  "workflow_name": "kubernetes",
+  "commit_message": "(no commit — runtime failure detected by the watcher, not a CI run)",
+  "logs": "=== POD STATUS ===\nname: web-6c9f8\nnamespace: production\nphase: Running\nproblem: CrashLoopBackOff\nrestart_count: 23\nready: false\n\n=== POD LOGS ===\nTraceback (most recent call last):\n  File \"/app/server.py\", line 12, in <module>\n    with open('/app/config.yaml') as f:\nFileNotFoundError: [Errno 2] No such file or directory: '/app/config.yaml'\n\n=== POD EVENTS ===\n- Warning BackOff: Back-off restarting failed container (x21)",
+  "current_files": {},
+  "expected": {
+    "category": "runtime",
+    "fix_type": "manual_required",
+    "confidence": 0.85,
+    "recommended_action": null,
+    "files_changed_paths": [],
+    "problem_summary": "Container exits on startup with FileNotFoundError for /app/config.yaml, identical every restart",
+    "verified": true
+  },
+  "notes": "Hand-authored (Track D days 6-8) — deterministic startup error every restart, so restart_pod cannot help. Tests that the brain distinguishes a genuinely broken image from a merely wedged process (see runtime_crashloop_wedged for the contrast case)."
+}

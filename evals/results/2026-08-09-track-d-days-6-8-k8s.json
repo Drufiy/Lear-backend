@@ -1,0 +1,465 @@
+{
+  "label": "2026-08-09-track-d-days-6-8-k8s",
+  "aggregate": {
+    "n_cases": 19,
+    "valid_diagnosis_rate_pct": 100.0,
+    "verified_cohort": {
+      "n": 19,
+      "valid_diagnosis_pct": 100.0,
+      "category_accuracy_pct": 100.0,
+      "actionability_pct": 94.7,
+      "fix_type_accuracy_pct": 89.5,
+      "mean_file_recall": 1.0
+    },
+    "latency_ms": {
+      "p50": 13415,
+      "p90": 35854,
+      "max": 39861
+    },
+    "errors": [],
+    "runtime_cohort": {
+      "n": 4,
+      "recommended_action_accuracy_pct": 100.0
+    }
+  },
+  "results": [
+    {
+      "case_id": "runtime_crashloop_broken_image",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 4647,
+      "predicted_category": "runtime",
+      "expected_category": "runtime",
+      "predicted_fix_type": "manual_required",
+      "expected_fix_type": "manual_required",
+      "produced_files": [],
+      "expected_files": [],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": null,
+      "recommended_action_match": true
+    },
+    {
+      "case_id": "runtime_crashloop_wedged",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 4898,
+      "predicted_category": "runtime",
+      "expected_category": "runtime",
+      "predicted_fix_type": "manual_required",
+      "expected_fix_type": "manual_required",
+      "produced_files": [],
+      "expected_files": [],
+      "predicted_recommended_action": "restart_pod",
+      "expected_recommended_action": "restart_pod",
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": null,
+      "recommended_action_match": true
+    },
+    {
+      "case_id": "runtime_image_pull_back_off",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 4270,
+      "predicted_category": "runtime",
+      "expected_category": "runtime",
+      "predicted_fix_type": "manual_required",
+      "expected_fix_type": "manual_required",
+      "produced_files": [],
+      "expected_files": [],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": null,
+      "recommended_action_match": true
+    },
+    {
+      "case_id": "runtime_oomkilled",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 5294,
+      "predicted_category": "runtime",
+      "expected_category": "runtime",
+      "predicted_fix_type": "manual_required",
+      "expected_fix_type": "manual_required",
+      "produced_files": [],
+      "expected_files": [],
+      "predicted_recommended_action": "restart_pod",
+      "expected_recommended_action": "restart_pod",
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": null,
+      "recommended_action_match": true
+    },
+    {
+      "case_id": "08a2cac8",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 16581,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "main.py"
+      ],
+      "expected_files": [
+        "main.py"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "25fb07ce",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 17315,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "src/middleware.ts"
+      ],
+      "expected_files": [
+        "src/middleware.ts"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "3149990d",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 4825,
+      "predicted_category": "dependency",
+      "expected_category": "dependency",
+      "predicted_fix_type": "safe_auto_apply",
+      "expected_fix_type": "safe_auto_apply",
+      "produced_files": [
+        "requirements.txt"
+      ],
+      "expected_files": [
+        "requirements.txt"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "31ffc8f9",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 35854,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "src/middleware.ts"
+      ],
+      "expected_files": [
+        "src/middleware.ts"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "3f94a260",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 13415,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "main.py"
+      ],
+      "expected_files": [
+        "main.py"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "3ff7a5d5",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 28164,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "manual_required",
+      "produced_files": [
+        "main.py"
+      ],
+      "expected_files": [],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": false,
+      "actionable_match": false,
+      "file_recall": null,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "4ba89a5a",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 15101,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "safe_auto_apply",
+      "produced_files": [
+        "tests/test_core.py"
+      ],
+      "expected_files": [
+        "tests/test_core.py"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": false,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "8c20908e",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 13160,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "app/page.tsx"
+      ],
+      "expected_files": [
+        "app/page.tsx"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "93aab4c2",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 11559,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "main.py"
+      ],
+      "expected_files": [
+        "main.py"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "aa690446",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 33341,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "app/layout.tsx"
+      ],
+      "expected_files": [
+        "app/layout.tsx"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "ba7ed093",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 17000,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "src/middleware.ts"
+      ],
+      "expected_files": [
+        "src/middleware.ts"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "c166d3f8",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 15151,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "main.py"
+      ],
+      "expected_files": [
+        "main.py"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "c8c5b69d",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 39861,
+      "predicted_category": "code",
+      "expected_category": "code",
+      "predicted_fix_type": "review_recommended",
+      "expected_fix_type": "review_recommended",
+      "produced_files": [
+        "tests/test_core.py"
+      ],
+      "expected_files": [
+        "tests/test_core.py"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "f801bff9",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 4305,
+      "predicted_category": "dependency",
+      "expected_category": "dependency",
+      "predicted_fix_type": "safe_auto_apply",
+      "expected_fix_type": "safe_auto_apply",
+      "produced_files": [
+        "requirements.txt"
+      ],
+      "expected_files": [
+        "requirements.txt"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    },
+    {
+      "case_id": "workflow_config_static_site",
+      "source": "verified",
+      "valid_diagnosis": true,
+      "error": null,
+      "latency_ms": 5520,
+      "predicted_category": "workflow_config",
+      "expected_category": "workflow_config",
+      "predicted_fix_type": "safe_auto_apply",
+      "expected_fix_type": "safe_auto_apply",
+      "produced_files": [
+        ".github/workflows/drufiy-ci.yml"
+      ],
+      "expected_files": [
+        ".github/workflows/drufiy-ci.yml"
+      ],
+      "predicted_recommended_action": null,
+      "expected_recommended_action": null,
+      "category_match": true,
+      "fix_type_match": true,
+      "actionable_match": true,
+      "file_recall": 1.0,
+      "recommended_action_match": null
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": "runtime_oomkilled",
+  "source": "verified",
+  "repo_full_name": "acme/api",
+  "workflow_name": "kubernetes",
+  "commit_message": "(no commit — runtime failure detected by the watcher, not a CI run)",
+  "logs": "=== POD STATUS ===\nname: api-3d7e2\nnamespace: production\nphase: Running\nproblem: OOMKilled\nrestart_count: 7\nready: false\n\n=== POD LOGS ===\n(empty — no output before the container exited)\n\n=== POD EVENTS ===\n- Warning OOMKilling: Memory cgroup out of memory: Killed process 1 (node) total-vm:1245680kB, anon-rss:987432kB",
+  "current_files": {},
+  "expected": {
+    "category": "runtime",
+    "fix_type": "manual_required",
+    "confidence": 0.7,
+    "recommended_action": "restart_pod",
+    "files_changed_paths": [],
+    "problem_summary": "Container killed by the kernel OOM killer, memory usage exceeded the pod's configured limit",
+    "verified": true
+  },
+  "notes": "Hand-authored (Track D days 6-8) — tests that the brain recommends restart_pod as a stopgap for OOMKilled while being explicit in fix_description that it doesn't fix the underlying memory limit/leak issue (that part isn't scored automatically, spot-checked manually)."
+}

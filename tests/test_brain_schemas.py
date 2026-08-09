@@ -47,6 +47,17 @@ def test_recommended_action_rejects_unknown_value():
         Diagnosis(**_base(recommended_action="delete_everything"))
 
 
+def test_recommended_action_normalizes_string_null_to_none():
+    """Real bug caught by the eval harness (2026-08-09, Track D days 6-8):
+    models routinely emit the literal string "null" in tool-call JSON
+    instead of an actual JSON null, which Pydantic rejects outright since
+    it isn't one of the three literal action values. Hit via both Kimi and
+    DeepSeek, and it broke unrelated CI cases too, not just runtime ones."""
+    for raw in ("null", "NULL", "none", "None", ""):
+        d = Diagnosis(**_base(recommended_action=raw))
+        assert d.recommended_action is None, f"{raw!r} did not normalize to None"
+
+
 def test_category_aliases_map_onto_runtime():
     """k8s/kubernetes/infra/pod are common model-output variants that should
     still land on the one real category, matching the existing alias pattern

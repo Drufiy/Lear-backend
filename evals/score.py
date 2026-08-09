@@ -12,6 +12,11 @@ The metrics are deliberately ordered by what the production data says matters mo
 
 Ground truth is only trusted for cases with source == "verified". Negative cases
 score only `valid_diagnosis` (we have no known-good fix for them).
+
+Track D days 6-8 adds a 7th metric, recommended_action_match, scoped to its own
+"runtime cohort" (cases with expected category="runtime") rather than mixed into
+the main verified cohort -- for CI cases recommended_action is always null/null,
+which would trivially "match" and dilute the number rather than measure anything.
 """
 from __future__ import annotations
 
@@ -33,12 +38,15 @@ class CaseResult:
     expected_fix_type: str | None = None
     produced_files: list[str] = field(default_factory=list)
     expected_files: list[str] = field(default_factory=list)
+    predicted_recommended_action: str | None = None
+    expected_recommended_action: str | None = None
 
     # derived
     category_match: bool | None = None
     fix_type_match: bool | None = None
     actionable_match: bool | None = None
     file_recall: float | None = None
+    recommended_action_match: bool | None = None
 
     def score(self) -> CaseResult:
         if not self.valid_diagnosis or self.source != "verified":
@@ -52,6 +60,8 @@ class CaseResult:
         if self.expected_files:
             hit = sum(1 for p in self.expected_files if p in self.produced_files)
             self.file_recall = round(hit / len(self.expected_files), 3)
+        if self.expected_category == "runtime":
+            self.recommended_action_match = self.predicted_recommended_action == self.expected_recommended_action
         return self
 
     def to_dict(self) -> dict:
@@ -63,6 +73,7 @@ def aggregate(results: list[CaseResult]) -> dict:
     verified = [r for r in results if r.source == "verified"]
     diagnosed = [r for r in results if r.valid_diagnosis]
     ver_diag = [r for r in verified if r.valid_diagnosis]
+    runtime_diag = [r for r in ver_diag if r.expected_category == "runtime"]
 
     def pct(num, den):
         return round(100 * num / den, 1) if den else None
@@ -75,7 +86,7 @@ def aggregate(results: list[CaseResult]) -> dict:
 
     file_recalls = [r.file_recall for r in ver_diag if r.file_recall is not None]
 
-    return {
+    agg = {
         "n_cases": n,
         "valid_diagnosis_rate_pct": pct(len(diagnosed), n),          # <- headline
         "verified_cohort": {
@@ -89,6 +100,14 @@ def aggregate(results: list[CaseResult]) -> dict:
         "latency_ms": {"p50": p(0.5), "p90": p(0.9), "max": lats[-1] if lats else None},
         "errors": [{"case": r.case_id, "error": r.error} for r in results if not r.valid_diagnosis],
     }
+    if runtime_diag:
+        agg["runtime_cohort"] = {
+            "n": len(runtime_diag),
+            "recommended_action_accuracy_pct": pct(
+                sum(1 for r in runtime_diag if r.recommended_action_match), len(runtime_diag)
+            ),
+        }
+    return agg
 
 
 def render_scorecard(agg: dict, label: str) -> str:
@@ -106,8 +125,11 @@ def render_scorecard(agg: dict, label: str) -> str:
         f"│    file_recall     : {vc['mean_file_recall']}",
         f"│ latency: p50={lat['p50']}ms  p90={lat['p90']}ms  max={lat['max']}ms",
         f"│ failures: {len(agg['errors'])}",
-        "└" + "─" * 50,
     ]
+    if "runtime_cohort" in agg:
+        rc = agg["runtime_cohort"]
+        lines.append(f"│ runtime cohort (n={rc['n']}): recommended_action_acc: {rc['recommended_action_accuracy_pct']}%")
+    lines.append("└" + "─" * 50)
     for e in agg["errors"]:
         lines.append(f"   ✗ {e['case']}: {e['error']}")
     return "\n".join(lines)

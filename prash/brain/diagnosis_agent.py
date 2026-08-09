@@ -8,14 +8,13 @@ functionality was dropped (see prash/brain/repo_memory.py) -- diagnose_failure()
 already treats repo_memory as optional (defaults to None) everywhere it's used, so
 this port required zero logic changes to accommodate that.
 """
+import base64
 import hashlib
 import json
 import logging
 import re
-import base64
 
 import httpx
-
 from pydantic import ValidationError
 
 from prash.brain.kimi_client import (
@@ -106,12 +105,16 @@ DIAGNOSIS_TOOL = {
             },
             "category": {
                 "type": "string",
-                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "unknown"],
+                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "unknown"],
                 "description": (
                     "code: app code bug. workflow_config: .github/workflows/*.yml wrong. "
                     "dependency: package.json/requirements.txt/go.mod issue. "
                     "environment: missing secret/env var/infra issue. "
-                    "flaky_test: intermittent test. unknown: cannot determine."
+                    "flaky_test: intermittent test. "
+                    "runtime: a RUNNING service is unhealthy right now (Kubernetes pod "
+                    "CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck) — not a CI failure, "
+                    "nothing to diff. See the KUBERNETES / RUNTIME FAILURES section below. "
+                    "unknown: cannot determine."
                 ),
             },
             "logs_truncated_warning": {
@@ -128,6 +131,20 @@ DIAGNOSIS_TOOL = {
                     "For common safe defaults (CI=true, NODE_ENV=test, PORT=3000) — "
                     "add them directly to the workflow YAML in files_changed instead. "
                     "Leave empty [] for all other categories."
+                ),
+            },
+            "recommended_action": {
+                "type": ["string", "null"],
+                "enum": ["restart_pod", "rollback", None],
+                "description": (
+                    "ONLY populate when category='runtime'. Which infrastructure action "
+                    "addresses this failure: restart_pod (clears a wedged/stuck container — "
+                    "does NOT help if the image or command is genuinely broken, it will just "
+                    "crash-loop again), rollback (the last deployment introduced the problem). "
+                    "Leave null if no action can help (e.g. ImagePullBackOff needs a human to "
+                    "fix the image reference — no available action fixes that). Always leave "
+                    "files_changed=[] and fix_type=manual_required for category='runtime' — "
+                    "this is an action recommendation, not a code fix."
                 ),
             },
             "files_changed": {
@@ -516,6 +533,119 @@ FIX STRATEGY:
 4. These are often safe_auto_apply — Docker/deploy config is as mechanical as workflow YAML.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KUBERNETES / RUNTIME FAILURES (category: runtime — NOT a CI failure)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You will sometimes be asked to diagnose a RUNNING Kubernetes pod, not a CI run.
+You'll recognize this from the input format — it looks like this instead of
+"=== {step_name} ===" GitHub Actions sections:
+
+  === POD STATUS ===
+  name: api-7f9d
+  namespace: production
+  phase: Running
+  problem: CrashLoopBackOff
+  restart_count: 18
+  ready: false
+
+  === POD LOGS ===
+  {recent container log output — may be EMPTY, see below}
+
+  === POD EVENTS ===
+  - Warning BackOff: Back-off restarting failed container (x15)
+  - Normal Pulled: Successfully pulled image "myapp:v2"
+
+There is NO code diff for a running pod. category MUST be "runtime",
+files_changed MUST be [] (fix_type will auto-resolve to manual_required),
+and you communicate what to do via recommended_action instead: "restart_pod",
+"rollback", or null if no available action can help.
+
+CRITICAL — restart_pod is not a universal fix. It only helps a pod that's
+STUCK or WEDGED (a transient hang, a bad connection that needs a fresh
+process). It does NOT help a pod whose image, command, or config is
+genuinely broken — deleting it just recreates the identical failure. Your
+job is to tell these apart from the "problem" field + logs/events, not to
+default to "restart" every time. Being honest that no action can help is
+better than recommending a restart that will just loop again in 30 seconds.
+
+THE FOUR STATES:
+
+• CrashLoopBackOff — the container starts and exits repeatedly.
+  - If logs show a clear, deterministic error every time (missing file,
+    bad config value, uncaught startup exception) → the IMAGE is broken.
+    recommended_action: null. root_cause should name the exact startup
+    error; fix_description should say what needs to change in the image/
+    command (but you cannot make that change — no files_changed).
+  - If logs are EMPTY or show no consistent pattern (a genuinely wedged
+    process, a stale connection pool, a deadlock) → restart plausibly
+    unsticks it. recommended_action: "restart_pod", confidence capped at
+    0.7 (you're inferring "wedged" from absence of evidence, not proof).
+
+• OOMKilled — the container was killed for exceeding its memory limit
+  (visible in POD EVENTS as "OOMKilling" / the container's last_state
+  showing an OOM termination reason, or dmesg-style "Killed process").
+  recommended_action: "restart_pod" as an immediate mitigation (clears the
+  current dead state so the service is briefly available again) — but
+  fix_description MUST say plainly that this is a stopgap: without raising
+  the pod's memory limit or fixing a leak, it will OOM again. confidence
+  0.6-0.75 depending on how clearly the OOM signal shows in events.
+
+• ImagePullBackOff / ErrImagePull — Kubernetes cannot pull the container
+  image (wrong tag, image doesn't exist, missing registry credentials).
+  restart_pod NEVER helps this — the new pod tries to pull the exact same
+  broken reference and fails identically. recommended_action: null,
+  confidence 0.85+ (this state is unambiguous from the problem field
+  alone), fix_description states exactly what to check (image tag spelling,
+  whether the tag was ever pushed, registry auth) even though you can't
+  make the change yourself.
+
+• Stuck Pending / failed readiness (>2 min) — the pod hasn't started or
+  isn't passing its readiness probe. Check POD EVENTS for the reason:
+  "Insufficient cpu/memory" (needs more cluster capacity or a smaller
+  request — no action available, recommended_action: null), "FailedMount"
+  (a volume/secret problem — recommended_action: null), or no clear
+  scheduling failure event at all (possibly just slow-starting —
+  recommended_action: "restart_pod", low confidence ~0.5).
+
+EXAMPLE 20 — CrashLoopBackOff, broken image (manual_required, no action)
+POD STATUS: problem=CrashLoopBackOff, restart_count=23
+POD LOGS: "FileNotFoundError: [Errno 2] No such file or directory: '/app/config.yaml'"
+(identical on every restart attempt — this is deterministic, not transient)
+  category: "runtime", fix_type: "manual_required", confidence: 0.9
+  recommended_action: null, files_changed: []
+  root_cause: "Container exits on startup because /app/config.yaml is missing from the image — the same FileNotFoundError repeats on every restart attempt, so this is not a transient/wedged process."
+  fix_description: "The image build is missing config.yaml. Restarting the pod will not help — it will hit the identical error immediately. The Dockerfile or build pipeline needs to include this file."
+  ← WRONG would be recommended_action="restart_pod" — the error is 100% deterministic, restart changes nothing.
+
+EXAMPLE 21 — CrashLoopBackOff, no clear cause (manual_required, tentative restart)
+POD STATUS: problem=CrashLoopBackOff, restart_count=4
+POD LOGS: (empty — no output before each exit)
+POD EVENTS: "Back-off restarting failed container" x3, no other signal
+  category: "runtime", fix_type: "manual_required", confidence: 0.55
+  recommended_action: "restart_pod", files_changed: []
+  root_cause: "Pod is crash-looping with no log output before each exit and no revealing event — consistent with a wedged process on startup, but there isn't enough signal to confirm the actual cause."
+  fix_description: "Restarting may clear a transient/wedged state. If it crash-loops again with the same empty-log pattern after restart, this needs manual investigation — the current signal isn't enough to diagnose further."
+  ← Honest about the uncertainty in BOTH the confidence score and the text — not overclaiming a wedged-process diagnosis it can't actually prove.
+
+EXAMPLE 22 — OOMKilled (manual_required, restart as stopgap only)
+POD STATUS: problem=OOMKilled, restart_count=7, ready=false
+POD EVENTS: "Warning OOMKilling: Memory cgroup out of memory: Killed process ... (node)"
+  category: "runtime", fix_type: "manual_required", confidence: 0.7
+  recommended_action: "restart_pod"
+  root_cause: "Container is being killed by the kernel OOM killer — memory usage exceeded the pod's configured limit."
+  fix_description: "Note: restarting only clears the current dead state, it does not fix the underlying cause — the pod will OOM again under the same load unless its memory limit is raised or the memory leak/usage is addressed. That change is outside what an automated action can make."
+  ← CORRECT: recommends the one action that helps right now, while being explicit it isn't a real fix.
+
+EXAMPLE 23 — ImagePullBackOff (manual_required, no action helps)
+POD STATUS: problem=ImagePullBackOff, phase=Pending
+POD EVENTS: "Failed to pull image \"myapp:v2.1.0\": not found"
+  category: "runtime", fix_type: "manual_required", confidence: 0.92
+  recommended_action: null
+  root_cause: "Kubernetes cannot pull myapp:v2.1.0 — the tag doesn't exist in the registry (typo, or the build/push step for this tag never completed)."
+  fix_description: "No available action fixes this — restarting the pod would retry pulling the exact same missing tag and fail identically. Verify the image tag was actually pushed, or that the Deployment references the correct tag."
+  ← WRONG would be recommended_action="restart_pod" — this is exactly the state restart can never fix; recommending it anyway would waste a real action and give false hope.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MATRIX BUILD FAILURES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -617,6 +747,9 @@ ROOT CAUSE RULES
    - code: fix goes in application source files
    - environment: requires adding secrets or fixing infra (cannot be code-fixed)
    - flaky_test: network/timing/non-deterministic — set is_flaky_test=true
+   - runtime: a RUNNING service is unhealthy (not a CI run) — no code fix exists,
+     use recommended_action instead of files_changed. See "KUBERNETES / RUNTIME
+     FAILURES" above.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIX TYPE DECISION (default to review_recommended — not manual_required)
@@ -715,6 +848,51 @@ def compute_error_signature(logs: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+# ── K8s/runtime context detection (Track D days 6-8) ────────────────────────
+# format_k8s_context() below always emits this exact marker. Used to recognize
+# Kubernetes input so the CI-shaped _ERROR_RE guard doesn't reject it.
+_K8S_CONTEXT_MARKER = "=== POD STATUS ==="
+
+
+def _is_k8s_context(logs: str) -> bool:
+    return _K8S_CONTEXT_MARKER in (logs or "")
+
+
+def format_k8s_context(pod_status, logs: str, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a Kubernetes
+    diagnosis, matching the exact format documented in SYSTEM_PROMPT's
+    "KUBERNETES / RUNTIME FAILURES" section. `pod_status` is Track B's
+    PodStatus dataclass (prash.connectors.kubernetes) -- duck-typed here
+    (attribute access only) rather than imported, so this module doesn't
+    gain a hard dependency on the connectors package.
+
+    `events` matches Track B's get_pod_events() return shape: a list of
+    {"type", "reason", "message", "count", "last_timestamp"} dicts, already
+    sorted most-recent-first.
+    """
+    parts = [
+        "=== POD STATUS ===",
+        f"name: {pod_status.name}",
+        f"namespace: {pod_status.namespace}",
+        f"phase: {pod_status.phase}",
+        f"problem: {pod_status.problem or 'none'}",
+        f"restart_count: {pod_status.restart_count}",
+        f"ready: {str(pod_status.ready).lower()}",
+        "",
+        "=== POD LOGS ===",
+        logs.strip() if logs and logs.strip() else "(empty — no output before the container exited)",
+        "",
+        "=== POD EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            count_suffix = f" (x{e['count']})" if e.get("count") and e["count"] > 1 else ""
+            parts.append(f"- {e.get('type', '?')} {e.get('reason', '?')}: {e.get('message', '')}{count_suffix}")
+    else:
+        parts.append("(no events)")
+    return "\n".join(parts)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def diagnose_failure(
@@ -753,7 +931,12 @@ async def diagnose_failure(
             f"({100 * len(preprocessed) // max(len(logs), 1)}% kept) for run {run_id}"
         )
 
-    if not _ERROR_RE.search(preprocessed):
+    # The CI-shaped "no error signal" guard doesn't apply to Kubernetes input:
+    # a crash-looping pod's own logs are frequently EMPTY (see connectors/
+    # kubernetes.py's get_pod_logs docstring), but the POD STATUS block
+    # format_k8s_context() emits always carries real signal via the `problem`
+    # field even when there's nothing in POD LOGS for _ERROR_RE to match.
+    if not _is_k8s_context(logs) and not _ERROR_RE.search(preprocessed):
         logger.warning(f"Preprocessed logs contain no error signal for run {run_id} — likely incomplete logs")
         raise DiagnosisValidationError(
             "CI logs contain no error output (likely fetched before step logs were archived). "
@@ -836,7 +1019,7 @@ async def diagnose_failure(
     # Filter out files with empty/missing content before validation.
     # The model sometimes returns new_content="" for files it couldn't generate —
     # drop those rather than letting one bad file nuke the entire diagnosis.
-    if "files_changed" in raw_args and raw_args["files_changed"]:
+    if raw_args.get("files_changed"):
         valid_files = []
         for fc in raw_args["files_changed"]:
             content = fc.get("new_content") or ""

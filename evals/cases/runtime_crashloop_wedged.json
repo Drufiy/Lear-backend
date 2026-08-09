@@ -1,0 +1,19 @@
+{
+  "id": "runtime_crashloop_wedged",
+  "source": "verified",
+  "repo_full_name": "acme/worker",
+  "workflow_name": "kubernetes",
+  "commit_message": "(no commit — runtime failure detected by the watcher, not a CI run)",
+  "logs": "=== POD STATUS ===\nname: worker-8f2a1\nnamespace: production\nphase: Running\nproblem: CrashLoopBackOff\nrestart_count: 4\nready: false\n\n=== POD LOGS ===\n(empty — no output before the container exited)\n\n=== POD EVENTS ===\n- Warning BackOff: Back-off restarting failed container (x3)",
+  "current_files": {},
+  "expected": {
+    "category": "runtime",
+    "fix_type": "manual_required",
+    "confidence": 0.55,
+    "recommended_action": "restart_pod",
+    "files_changed_paths": [],
+    "problem_summary": "Pod crash-looping with no log output and no revealing event before each exit",
+    "verified": true
+  },
+  "notes": "Hand-authored (Track D days 6-8) — no log signal, no clear cause, low restart_count. This is the 'not enough evidence to say it's broken, restart is a reasonable low-confidence try' case, contrasting with runtime_crashloop_broken_image where the deterministic error rules restart out."
+}

@@ -10,12 +10,15 @@ model / schema change: run it before and after, compare the scorecards.
     python -m evals.run_eval --concurrency 4      # parallelize model calls
     python -m evals.run_eval --baseline evals/results/2026-08-09-pre-track-d-port-baseline.json
 
-NOT RUNNABLE YET: imports prash.brain.diagnosis_agent / prash.brain.kimi_client,
-which don't exist until Track D days 4-5 port the brain (see PRASH_V2.md §6). This
-file is checked in now so it's ready to flip on the moment that lands -- porting it
-twice would be wasted work. The baseline in evals/results/ was captured against the
-UNMODIFIED v1 brain (prash-backend, deepseek-v4-flash) on 2026-08-09, before any
-Track D changes -- diff every future run against it with --baseline.
+Runnable since Track D days 4-5 ported prash.brain.diagnosis_agent /
+prash.brain.kimi_client. The baseline in evals/results/ was captured against
+the UNMODIFIED v1 brain (prash-backend, deepseek-v4-flash) on 2026-08-09,
+before any Track D changes -- diff every future run against it with
+--baseline. A second checkpoint, 2026-08-09-post-track-d-port.json, was
+captured right after the days 4-5 port (zero regression) and right before
+days 6-8 taught the prompt Kubernetes -- diff against that one specifically
+to isolate what the Kubernetes prompt work changed, vs. what the port itself
+changed (nothing).
 """
 from __future__ import annotations
 
@@ -32,10 +35,9 @@ import prash.brain.kimi_client as _kc
 _kc._log_agent_call = lambda *a, **k: None          # don't write to agent_calls
 _kc.mark_agent_run_outcome = lambda *a, **k: None
 
+from evals.score import CaseResult, aggregate, render_scorecard
 from prash.brain.diagnosis_agent import diagnose_failure
 from prash.brain.kimi_client import DiagnosisValidationError
-
-from evals.score import CaseResult, aggregate, render_scorecard
 
 CASES_DIR = Path(__file__).parent / "cases"
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -91,6 +93,8 @@ async def run_case(case: dict, live: bool, gh_token: str | None, model: str = "d
         expected_fix_type=exp.get("fix_type"),
         produced_files=[fc.path for fc in diagnosis.files_changed],
         expected_files=exp.get("files_changed_paths", []),
+        predicted_recommended_action=diagnosis.recommended_action,
+        expected_recommended_action=exp.get("recommended_action"),
     ).score()
 
 
