@@ -40,11 +40,17 @@ jobs:
         shell: bash
         # Exit code 5 = "no tests collected", which is fine while the repo is
         # still being scaffolded. Any real test failure still fails the build.
+        #
+        # `set +e` is required: GitHub runs this step under `bash -e`, which
+        # aborts on the first non-zero exit — so without it, pytest's exit 5
+        # kills the script before the check below can run.
         run: |
+          set +e
           pytest -q
           code=$?
-          if [ $code -eq 5 ]; then
+          set -e
+          if [ "$code" -eq 5 ]; then
             echo "No tests collected yet — passing."
             exit 0
           fi
-          exit $code
+          exit "$code"
