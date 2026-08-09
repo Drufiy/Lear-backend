@@ -259,6 +259,8 @@ Build the entire §0b path end to end with everything faked: a hardcoded "crash-
 
 GitHub Actions cannot reach your cluster, so action tests won't run in CI unless you give them somewhere to run. Use **`kind`** (Kubernetes-in-Docker) in the workflow — it's standard and it spins up a throwaway cluster per run. **Owner: Aradhya, alongside the day 1–2 connector.** Untested action code is precisely the code that must not be untested.
 
+**DONE 2026-08-09 — flagged as missed during the days 6-8 status check, closed same day before starting Track E.** New `k8s-live-tests` CI job (`.github/workflows/ci.yml`), Linux-only — macOS Actions runners can't do the nested virtualization Docker needs, kind-on-Windows is unreliable enough not to chase this sprint. Uses `helm/kind-action@v1`, deploys `broken-pod.yaml`, polls for real `CrashLoopBackOff` (up to 300s, observed ~15-30s locally), then runs `tests/test_kubernetes_connector_live.py` — 7 tests against the real API server: crash-loop detection (both list and by-name), the previous-attempt log fallback, real Events, `get_previous_revision` correctly returning `None` for a single-revision Deployment, and `restart_pod` actually deleting/recreating. Skipped by default (`PRASH_LIVE_K8S_TESTS=1` gate) so it never runs against a real cluster in local dev or the main mocked job by accident. Additive to the existing 3-OS job, not a replacement — that one still covers classification logic thoroughly and runs everywhere.
+
 
 ## 7. Explicitly out of scope for this sprint
 
