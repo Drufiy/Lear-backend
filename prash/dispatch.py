@@ -4,11 +4,14 @@ This is Track A's orchestrator. It owns the pipeline the CLI drives:
 
 1. Resolve the action from the registry.
 2. Build its Plan (dry-run safe, touches nothing).
-3. Ask the permission engine for a Decision (mode + tier + environment).
-4. REFUSE -> record in audit, return a refused result. Never executes.
-5. PROMPT -> hand the plan to the interface (CLI) to ask the user.
-6. Execute, then Verify honestly.
-7. Append an audit entry for everything that happened.
+3. Check the circuit breaker — open circuit on this resource means stop and
+   escalate to a human (day 7 safety rail), never execute.
+4. Ask the permission engine for a Decision (mode + tier + environment).
+5. REFUSE -> record in audit, return a refused result. Never executes.
+6. PROMPT -> hand the plan to the interface (CLI) to ask the user.
+7. Execute, then Verify honestly. Every actual execution is recorded in the
+   circuit breaker so loops trip it.
+8. Append an audit entry for everything that happened.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from __future__ import annotations
 import abc
 import enum
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 
 from .actions.contract import (
     Action,
@@ -25,9 +28,9 @@ from .actions.contract import (
     ActionResultStatus,
     Decision,
     Plan,
-    RiskTier,
 )
 from .audit import AuditLog
+from .circuit_breaker import CircuitBreaker
 from .permissions import PermissionMode, decide
 
 
@@ -37,6 +40,7 @@ class ExecutionOutcome(enum.Enum):
     SKIPPED = "skipped"
     NEEDS_INPUT = "needs_input"
     ERRORED = "errored"
+    CIRCUIT_OPEN = "circuit_open"
 
 
 @dataclass
@@ -69,9 +73,11 @@ class Dispatcher:
         self,
         mode: PermissionMode = PermissionMode.ASK,
         audit: Optional[AuditLog] = None,
+        breaker: Optional[CircuitBreaker] = None,
     ):
         self.mode = mode
         self.audit = audit or AuditLog()
+        self.breaker = breaker
         self._actions: Dict[str, Action] = {}
 
     def register(self, action: Action) -> None:
@@ -99,6 +105,19 @@ class Dispatcher:
             return self._dry_run(action, ctx)
 
         plan = action.plan(ctx)
+
+        if self.breaker is not None and self.breaker.is_open(ctx.target.resource):
+            result = ActionResult(
+                status=ActionResultStatus.SKIPPED,
+                summary=(
+                    f"circuit open for {ctx.target.resource}: {self.breaker.max_actions} actions in "
+                    f"{self.breaker.window_seconds}s exceeded — stop and escalate to a human "
+                    f"(`prash circuit reset {ctx.target.resource}` to override)"
+                ),
+            )
+            audit_id = self._log(action, ctx, Decision.REFUSE, result, extra={"reason": "circuit_open"})
+            return RunResult(ExecutionOutcome.CIRCUIT_OPEN, Decision.REFUSE, result, plan, audit_id=audit_id)
+
         decision = decide(
             mode=self.mode,
             risk_tier=action.spec.risk_tier,
@@ -140,6 +159,7 @@ class Dispatcher:
                 status=ActionResultStatus.FAILED,
                 summary=f"errored during execute: {exc}",
             )
+            self._record_execution(ctx)
             audit_id = self._log(action, ctx, decision, result, grant=grant)
             return RunResult(ExecutionOutcome.ERRORED, decision, result, plan, grant=grant, audit_id=audit_id)
 
@@ -150,6 +170,7 @@ class Dispatcher:
         if result.status is ActionResultStatus.SUCCEEDED:
             verification = action.verify(ctx, result)
             result.verification = verification
+        self._record_execution(ctx)
         audit_id = self._log(action, ctx, decision, result, grant=grant)
         return RunResult(ExecutionOutcome.EXECUTED, decision, result, plan, grant=grant, audit_id=audit_id)
 
@@ -168,7 +189,14 @@ class Dispatcher:
         audit_id = self._log(action, ctx, decision, result, dry_run=True)
         return RunResult(ExecutionOutcome.EXECUTED, decision, result, plan, audit_id=audit_id)
 
-    def _log(self, action: Action, ctx: ActionContext, decision: Decision, result: ActionResult, grant: bool = False, dry_run: bool = False) -> str:
+    def _record_execution(self, ctx: ActionContext) -> None:
+        if self.breaker is not None:
+            self.breaker.record(ctx.target.resource)
+
+    def _log(self, action: Action, ctx: ActionContext, decision: Decision, result: ActionResult, grant: bool = False, dry_run: bool = False, extra: Optional[Dict] = None) -> str:
+        base = {"grant": grant, "dry_run": dry_run}
+        if extra:
+            base.update(extra)
         return self.audit.append(
             action_id=action.spec.id,
             risk_tier=action.spec.risk_tier,
@@ -176,5 +204,5 @@ class Dispatcher:
             decision=decision,
             result=result,
             environment=ctx.target.environment,
-            extra={"grant": grant, "dry_run": dry_run},
+            extra=base,
         )

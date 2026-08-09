@@ -221,18 +221,18 @@ Build the entire §0b path end to end with everything faked: a hardcoded "crash-
 
 *Actual start date: Day 1 = 2026-08-09*
 
-| Day | Milestone | Depends on |
-|---|---|---|
-| 0 | Push existing local work to this repo | — |
-| 1–2 | **Walking skeleton with Aradhya** (see above), then harden the `Action` interface with docstrings/types — two other tracks build against it without asking you each time | Day 0 push |
-| 3–4 | **request-secret** end to end: prompt, store locally, retry the failed job. No dependencies — the fastest proof Prash *finishes* work | Skeleton |
-| 5–6 | **restart-pod** for real, against Aradhya's k8s connector (landing day 2) | Track B: k8s connector |
-| 7 | **Circuit breaker.** Hard cap on actions per resource per time window; on breach, stop and escalate to a human. **Also: every action prompt must name its exact target** — "restart pod `api-7f9d` in namespace `production`", never "restart the pod" | — |
-| 8–9 | Audit log: append-only, persisted, surfaced in the interface — every action, its risk tier, whether it was approved or auto-ran, and its outcome | — |
-| 10–12 | The interface layer — how a user reviews a finding and approves/denies, using `rich` for formatted CLI output (§8) | — |
-| 13 | Integration + fix whatever the skeleton's stubs were hiding | Both tracks |
-| 14 | **Demo, recorded.** The §0b sequence, on a live cluster, captured as a shareable video | Everything |
-| *stretch* | Cloud Run connector + **rollback** — grouped deliberately: rollback is your action and it needs `get_previous_revision()`, so you building the connector you depend on removes a cross-track dependency entirely | — |
+| Day | Milestone | Depends on | Status |
+|---|---|---|---|
+| 0 | Push existing local work to this repo | — | **DONE 2026-08-09** |
+| 1–2 | **Walking skeleton with Aradhya** (see above), then harden the `Action` interface with docstrings/types — two other tracks build against it without asking you each time | Day 0 push | Interface done; walking skeleton pending Aradhya |
+| 3–4 | **request-secret** end to end: prompt, store locally, retry the failed job. No dependencies — the fastest proof Prash *finishes* work | Skeleton | **DONE 2026-08-09** — prompt/store + job re-run wired through the GitHub runner |
+| 5–6 | **restart-pod** for real, against Aradhya's k8s connector (landing day 2) | Track B: k8s connector | Wired to `kubernetes.py` stub; needs Track B driver |
+| 7 | **Circuit breaker.** Hard cap on actions per resource per time window; on breach, stop and escalate to a human. **Also: every action prompt must name its exact target** — "restart pod `api-7f9d` in namespace `production`", never "restart the pod" | **DONE 2026-08-09** — breaker in `prash/circuit_breaker.py` (persistent, `prash circuit status/reset`), wired into the dispatcher before execution; prompts now print the exact target. |
+| 8–9 | Audit log: append-only, persisted, surfaced in the interface — every action, its risk tier, whether it was approved or auto-ran, and its outcome | — | **DONE 2026-08-09** — `prash audit` |
+| 10–12 | The interface layer — how a user reviews a finding and approves/denies, using `rich` for formatted CLI output (§8) | — | **DONE 2026-08-09** — basic rich CLI (`run`/`actions`/`audit`/`config`/`circuit`) |
+| 13 | Integration + fix whatever the skeleton's stubs were hiding | Both tracks | |
+| 14 | **Demo, recorded.** The §0b sequence, on a live cluster, captured as a shareable video | Everything | |
+| *stretch* | Cloud Run connector + **rollback** — grouped deliberately: rollback is your action and it needs `get_previous_revision()`, so you building the connector you depend on removes a cross-track dependency entirely | — | Rollback contract done, wired to `get_previous_revision()` stub |
 
 ### Track B + D + E — Aradhya
 
@@ -346,6 +346,8 @@ Smaller: `kind` (Kubernetes-in-Docker) added to CI, since GitHub Actions can't r
 
 **2026-08-09 — Cross-track alignment of Track C with Track B.** `restart-pod` now calls `connectors/kubernetes.restart_pod()` and `get_pod_status()`; `rollback` calls `get_previous_revision()`. Aryan's temporary `connectors/k8s.py` (class-based duplicate) was deleted. Both actions report honestly ("not implemented yet (Track B)") until Aradhya's driver lands — never a fake success. `open-pr` uses a small GitHub REST connector (Track A territory; GitHub is not in Track B's connector list).
 
+**2026-08-09 — Circuit breaker shipped (Track A day 7).** `prash/circuit_breaker.py`: persistent per-resource cap (default 5 actions / 60s, configurable via `PRASH_CIRCUIT_*`), checked by the dispatcher before every execution; on breach, the run stops, is audited with `reason=circuit_open`, and the CLI escalates to a human with `prash circuit status/reset`. Every action prompt now prints its exact target (`Target: <resource> (<env>)`). This closes the last open Tier-1 item Aryan could build alone; the remaining Track A/C work is shared (walking skeleton, integration, demo) or blocked on Track B.
+
 ---
 
 ## 10. Running log — bugs, improvements, suggestions, ideas
@@ -355,6 +357,8 @@ Add to this table, don't rewrite it. Newest at the top. Every entry gets a name 
 | Date | Who | Type | Note |
 |---|---|---|---|
 | 2026-08-09 | Claude (Sonnet) | Bug (fixed) | **`main` was broken: CI failing on all 3 OSes** (`ModuleNotFoundError: No module named 'prash'`). Root cause: `ci.yml`'s install step predates `pyproject.toml` and only ever handled `requirements.txt` — it never ran `pip install -e .`, so the moment Aryan's real code landed with `from prash.actions...` imports, every test failed to even collect. Fixed by adding `pip install -e ".[dev]"` when `pyproject.toml` is present. Verified locally in a clean venv before pushing: 28/28 tests pass. (Initially logged Aryan's two code commits as suspiciously "never triggering CI" — checked the timestamps, they're normal: `git push` fires one workflow run per push, not per commit, and all three commits arrived in one push. Not a bug, correcting the record rather than leaving a wrong claim standing.) |
+| 2026-08-09 | Aryan | Progress | **Circuit breaker + runner wiring done (Track A day 7, Tier 1 complete).** `prash/circuit_breaker.py` — persistent per-resource cap, dispatcher-enforced before execution, `prash circuit status/reset` to escalate/close. `request-secret` now actually re-runs the blocked GitHub job via `GitHubRunner` (`re_run_job` on the latest failed run). Exact-target prompts added (`Target: <resource> (<env>)` in every proposal). 39 tests passing. |
+| 2026-08-09 | Aryan | Setup | Added `PRASH_CIRCUIT_MAX_ACTIONS` / `PRASH_CIRCUIT_WINDOW_SECONDS` / `PRASH_CIRCUIT_STATE_PATH` to `.env.example` (schema owner is Track A). Logged per the §10 rule for new keys. |
 | 2026-08-09 | Aryan | Progress | **Track A + C landed on `main`.** Action registry (`open-pr`, `request-secret`, `restart-pod`, `rollback`) with risk tiers + reversibility; five-mode permission engine; append-only audit log (`.prash/audit.log`, configurable via `PRASH_AUDIT_LOG_PATH`); dry-run plans; `rich` CLI (`prash run/actions/audit/config`); 28 tests passing. `request-secret` closes the `needs_secret` dead end — asks for the value, stores it in the local `.env` only, re-triggers the job. |
 | 2026-08-09 | Aryan | Setup | Added `pyproject.toml` (runtime dep: `rich`), the first packaging file in this repo — per the §10 note that whoever adds one first must log it. Package name `prash`, so `python -m prash.cli` works as the docs specify. |
 | 2026-08-09 | Aryan | Cross-track | `restart-pod` + `rollback` wired to Aradhya's `connectors/kubernetes.py` stubs (cross-track deps #1/#2): restart calls `restart_pod()`/`get_pod_status()`, rollback calls `get_previous_revision()`. Deleted my duplicate `connectors/k8s.py`. Both report "not implemented yet (Track B)" honestly until the driver lands. `open-pr` uses a small GitHub REST connector kept in `connectors/github.py` (Track A; GitHub isn't in Track B's list). |

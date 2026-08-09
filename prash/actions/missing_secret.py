@@ -87,10 +87,16 @@ class RequestSecretAction(Action):
         re_run = "not triggered"
         if runner is not None:
             try:
-                runner.re_run(ctx.target.resource)
-                re_run = "triggered"
+                run_id = runner.re_run(ctx.target.resource)
+                re_run = f"triggered (run {run_id})"
             except NotImplementedError:
                 re_run = "queued (runner connector not wired)"
+            except Exception as exc:  # noqa: BLE001 - secret is stored; re-run failing is reported honestly
+                return ActionResult(
+                    status=ActionResultStatus.FAILED,
+                    summary=f"secret '{name}' stored locally, but job re-run failed: {exc}",
+                    detail={"secret_name": name, "re_run": "failed"},
+                )
 
         return ActionResult(
             status=ActionResultStatus.SUCCEEDED,

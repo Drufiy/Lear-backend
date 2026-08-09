@@ -91,3 +91,27 @@ class GitHubConnector(Connector):
         elif status[0] == "in_progress":
             state = ConnectorState.DEPLOYING
         return ResourceState(resource, state, {"latest_run": runs[0]})
+
+
+class GitHubRunner:
+    """Re-triggers the most recent failed run of a repo.
+
+    Wired to request-secret so that after the value is stored locally, Prash
+    actually re-runs the blocked job instead of reporting it needs manual
+    follow-up. This closes the v1 `needs_secret` dead end end to end.
+    """
+
+    def __init__(self, connector: GitHubConnector):
+        self.gh = connector
+
+    def re_run(self, repo: str) -> int:
+        runs = self.gh.workflow_runs(repo, limit=3)
+        failed = [
+            r for r in runs
+            if r.get("status") == "completed" and r.get("conclusion") == "failure"
+        ]
+        if not failed:
+            raise RuntimeError(f"no completed failed run found to re-run for {repo}")
+        run_id = int(failed[0]["id"])
+        self.gh.re_run_job(repo, run_id)
+        return run_id

@@ -36,11 +36,12 @@ from .actions.open_pr import OpenPrAction
 from .actions.restart_pod import RestartPodAction
 from .actions.rollback import RollbackAction
 from .audit import AuditLog
+from .circuit_breaker import CircuitBreaker
 from .connectors.base import Connector
-from .connectors.github import GitHubConnector
+from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
-from .dispatch import AskFn, Dispatcher
+from .dispatch import AskFn, Dispatcher, ExecutionOutcome
 from .permissions import PermissionMode
 
 console = Console()
@@ -65,7 +66,13 @@ def _make_connectors(creds: Dict[str, Any]) -> Dict[str, Connector]:
 
 class CliAsk(AskFn):
     def ask(self, action: Any, plan: Plan, ctx: ActionContext) -> bool:
-        console.print(Panel(plan.describe(), title=f"[bold]Prash proposes: {action.spec.id}[/bold]", border_style="cyan"))
+        console.print(
+            Panel(
+                f"[bold]Target:[/bold] {ctx.target.resource} ({ctx.target.environment})\n" + plan.describe(),
+                title=f"[bold]Prash proposes: {action.spec.id}[/bold]",
+                border_style="cyan",
+            )
+        )
         hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
         answer = Prompt.ask(
             f"Proceed with '{action.spec.id}'{hint}? [y/N]",
@@ -83,6 +90,11 @@ def _make_context(args: argparse.Namespace, store: CredentialStore, creds: Dict[
             prompt = f"Value for secret '{name}'" + (f" ({hint})" if hint else "")
             return Prompt.ask(prompt, password=True)
 
+    runner = None
+    github = connectors.get("github")
+    if github is not None and creds.get("GITHUB_TOKEN"):
+        runner = GitHubRunner(github)
+
     return ActionContext(
         target=Target(resource=args.resource, environment=args.env or creds.get("PRASH_ENVIRONMENT", "staging")),
         credentials=creds,
@@ -92,6 +104,7 @@ def _make_context(args: argparse.Namespace, store: CredentialStore, creds: Dict[
         extra={
             "store": store,
             "connectors": connectors,
+            "runner": runner,
             "secret_name": getattr(args, "secret_name", ""),
             "secret_hint": getattr(args, "secret_hint", ""),
             "secret_input": secret_input,
@@ -104,7 +117,7 @@ def _make_context(args: argparse.Namespace, store: CredentialStore, creds: Dict[
 
 
 def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
-    dispatcher = Dispatcher(mode=mode)
+    dispatcher = Dispatcher(mode=mode, breaker=CircuitBreaker.default())
     dispatcher.register_all(
         [OpenPrAction(), RequestSecretAction(), RestartPodAction(), RollbackAction()]
     )
@@ -131,6 +144,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     except MissingSecretError as exc:
         console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
         return 3
+
+    if result.outcome is ExecutionOutcome.CIRCUIT_OPEN:
+        console.print(
+            Panel(
+                result.result.summary,
+                title="[bold red]CIRCUIT OPEN — STOP AND ESCALATE TO A HUMAN[/bold red]",
+                border_style="red",
+            )
+        )
+        console.print("[yellow]Run `prash circuit status` to inspect, and `prash circuit reset <resource>` only after a human decides it is safe to continue.[/yellow]")
+        if result.audit_id:
+            console.print(f"[dim]audit id: {result.audit_id}[/dim]")
+        return 1
 
     console.print(Panel(f"{result.decision.value} / {result.result.status.value}: {result.result.summary}", title="outcome", border_style="green" if result.ok else "red"))
     if result.result.verification is not None:
@@ -203,6 +229,29 @@ def cmd_config(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_circuit(args: argparse.Namespace) -> int:
+    breaker = CircuitBreaker.default()
+    if args.circuit_action == "status":
+        open_resources = breaker.open_resources()
+        console.print(f"[bold]circuit state:[/bold] {breaker.path}")
+        console.print(f"[bold]limit:[/bold] {breaker.max_actions} actions per {breaker.window_seconds}s per resource")
+        if open_resources:
+            for resource in open_resources:
+                console.print(f"[red]OPEN[/red]  {resource}")
+        else:
+            console.print("[green]closed[/green]  no resource is over the cap")
+        return 0
+    if args.circuit_action == "reset":
+        breaker.reset(args.resource)
+        if args.resource:
+            console.print(f"[green]circuit reset for {args.resource}[/green]")
+        else:
+            console.print("[green]circuit fully reset[/green]")
+        return 0
+    console.print(f"[red]unknown circuit action: {args.circuit_action}[/red]")
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="prash", description="Prash v2 - local AI DevOps agent")
     parser.add_argument("--env-file", type=Path, help="override the local credentials file")
@@ -234,6 +283,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--tail", type=int, default=50)
     audit.set_defaults(func=cmd_audit)
     sub.add_parser("config", help="show local config (redacted)").set_defaults(func=cmd_config)
+    circuit = sub.add_parser("circuit", help="inspect or reset the action circuit breaker")
+    circuit.add_argument("circuit_action", choices=["status", "reset"])
+    circuit.add_argument("resource", nargs="?", help="reset only this resource (reset only)")
+    circuit.set_defaults(func=cmd_circuit)
 
     return parser
 
