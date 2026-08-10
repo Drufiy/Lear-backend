@@ -7,6 +7,8 @@ and where every approval prompt happens.
 
 Commands:
     prash run <action> <resource>   execute an action through the pipeline
+    prash fix <namespace>/<pod>     diagnose a pod, then run the brain's recommended action
+    prash fix <owner>/<repo> --ci --run-id <n>   multi-failure CI diagnosis (Track D tier 2)
     prash investigate <resource>    read-only state/logs via a connector
     prash actions                   list registered actions and risk tiers
     prash audit                     show the append-only audit log
@@ -17,6 +19,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -43,7 +46,7 @@ from .connectors.base import Connector
 from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
-from .dispatch import AskFn, Dispatcher, ExecutionOutcome
+from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
 from .permissions import PermissionMode
 
 console = Console()
@@ -109,7 +112,13 @@ class CliAsk(AskFn):
         return answer.lower().startswith("y")
 
 
-def _make_context(args: argparse.Namespace, store: CredentialStore, creds: Dict[str, Any]) -> ActionContext:
+def _make_context(
+    args: argparse.Namespace,
+    store: CredentialStore,
+    creds: Dict[str, Any],
+    resource: Optional[str] = None,
+    env: Optional[str] = None,
+) -> ActionContext:
     connectors = _make_connectors(creds)
     secret_input = None
     if not getattr(args, "noninteractive", False):
@@ -123,7 +132,7 @@ def _make_context(args: argparse.Namespace, store: CredentialStore, creds: Dict[
         runner = GitHubRunner(github)
 
     return ActionContext(
-        target=Target(resource=args.resource, environment=args.env or creds.get("PRASH_ENVIRONMENT", "staging")),
+        target=Target(resource=resource or args.resource, environment=env or args.env or creds.get("PRASH_ENVIRONMENT", "staging")),
         credentials=creds,
         secrets=store.secrets(),
         dry_run=getattr(args, "dry_run", False),
@@ -173,6 +182,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
         return 3
 
+    return _render_run_result(result)
+
+
+def _render_run_result(result: RunResult) -> int:
+    """Shared outcome rendering for cmd_run and cmd_fix: circuit-open gets the
+    STOP-AND-ESCALATE panel, everything else gets the decision/status line +
+    verification + audit id."""
     if result.outcome is ExecutionOutcome.CIRCUIT_OPEN:
         console.print(
             Panel(
@@ -194,6 +210,81 @@ def cmd_run(args: argparse.Namespace) -> int:
     if result.audit_id:
         console.print(f"[dim]audit id: {result.audit_id}[/dim]")
     return 0 if result.ok else 1
+
+
+def _render_no_auto_action(recommended_action: Optional[str], namespace: str) -> None:
+    if recommended_action == "rollback":
+        console.print("[yellow]brain recommends rollback — not auto-run from `prash fix` (needs the owning Deployment, which Track B doesn't derive from a pod); run `prash run rollback <deployment> --env <namespace>` to execute[/yellow]")
+    elif recommended_action == "scale":
+        console.print("[yellow]brain recommends scale — no scale action is registered this sprint (§7 out of scope); escalate to a human[/yellow]")
+    else:
+        console.print("[dim]brain did not recommend an automated action; review the diagnosis above[/dim]")
+
+
+def cmd_fix(args: argparse.Namespace) -> int:
+    from .fix import (
+        FixTargetError,
+        diagnose_ci_run,
+        diagnose_k8s_pod,
+        recommended_action_id,
+        render_diagnosis,
+        render_multi_failure,
+        split_k8s_target,
+    )
+
+    store = CredentialStore.from_env()
+    creds = store.load()
+    _export_cluster_env(creds)
+    mode_raw = args.mode or creds.get("PRASH_PERMISSION_MODE", "ask")
+    mode = _parse_mode(mode_raw)
+
+    if args.ci:
+        if not args.run_id:
+            console.print("[red]--run-id is required for CI diagnosis: `prash fix <owner>/<repo> --ci --run-id <n>`[/red]")
+            return 2
+        if not creds.get("GITHUB_TOKEN"):
+            console.print("[yellow]CI diagnosis needs GITHUB_TOKEN in local .env[/yellow]")
+            return 3
+        try:
+            result = asyncio.run(diagnose_ci_run(args.run_id, args.target, creds["GITHUB_TOKEN"]))
+        except Exception as exc:  # noqa: BLE001 — report honestly, never fake a diagnosis
+            console.print(f"[red]CI diagnosis failed: {exc}[/red]")
+            return 2
+        render_multi_failure(result, console)
+        return 0
+
+    try:
+        namespace, pod = split_k8s_target(args.target)
+    except FixTargetError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+
+    try:
+        diagnosis = asyncio.run(diagnose_k8s_pod(namespace, pod))
+    except FixTargetError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    except Exception as exc:  # noqa: BLE001 — report honestly, never fake a diagnosis
+        console.print(f"[red]pod diagnosis failed: {exc}[/red]")
+        return 2
+    render_diagnosis(diagnosis, console)
+
+    action_id = recommended_action_id(diagnosis.recommended_action)
+    if action_id is None:
+        _render_no_auto_action(diagnosis.recommended_action, namespace)
+        return 0
+
+    dispatcher = _build_dispatcher(mode)
+    ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
+    try:
+        result = dispatcher.run(action_id, ctx, ask=None if args.noninteractive else CliAsk())
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    except MissingSecretError as exc:
+        console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
+        return 3
+    return _render_run_result(result)
 
 
 def cmd_investigate(args: argparse.Namespace) -> int:
@@ -316,6 +407,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--title", help="PR title (open-pr)")
     run.add_argument("--body", help="PR body (open-pr)")
     run.set_defaults(func=cmd_run)
+
+    fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline")
+    fix.add_argument("target", help="<namespace>/<pod> for a Kubernetes problem, or <owner>/<repo> with --ci")
+    fix.add_argument("--ci", action="store_true", help="diagnose a CI run (multi-failure) instead of a pod")
+    fix.add_argument("--run-id", type=int, help="GitHub run id for CI diagnosis (requires GITHUB_TOKEN)")
+    fix.add_argument("--env", default=None, help="target environment (k8s: defaults to the pod's namespace)")
+    fix.add_argument("--mode", default=None, help="permission mode: read-only|ask|auto-safe|environment-scoped|bypass (default: PRASH_PERMISSION_MODE or ask)")
+    fix.add_argument("--dry-run", action="store_true", help="plan only; never touch infrastructure")
+    fix.add_argument("--noninteractive", action="store_true", help="never prompt; missing secrets return NEEDS_INPUT")
+    fix.set_defaults(func=cmd_fix)
 
     inv = sub.add_parser("investigate", help="read-only connector probe")
     inv.add_argument("resource")
