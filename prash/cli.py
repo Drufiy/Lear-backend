@@ -88,9 +88,22 @@ def _export_cluster_env(creds: Dict[str, Any]) -> None:
     A shell-exported value always wins over .env -- this only fills in what
     isn't already set, so power users overriding via their shell still work
     exactly as before.
+
+    Real bug, caught live (2026-08-13): a key left BLANK in .env (e.g.
+    `KUBECONFIG=`, matching .env.example's own "leave blank to use the
+    default" instructions) is present in creds with value "" -- not absent.
+    `key in creds` was True for it, so an empty string got exported into the
+    real process environment. That's not the same as unset: the kubernetes
+    client treats KUBECONFIG="" as an explicit (empty, invalid) path rather
+    than "not configured, use ~/.kube/config", producing "Invalid kube-config
+    file. No configuration found." for a setup that should have worked out of
+    the box. Checking creds.get(key) (truthy) instead of `key in creds`
+    treats a blank .env line the same as an absent one for every key here,
+    not just KUBECONFIG -- the same gap existed for KUBE_NAMESPACE, all the
+    KIMI_*/DEEPSEEK_* keys, etc.
     """
     for key in (*_CLUSTER_ENV_PASSTHROUGH, *_BRAIN_ENV_PASSTHROUGH):
-        if key in creds and key not in os.environ:
+        if creds.get(key) and key not in os.environ:
             os.environ[key] = str(creds[key])
 
 

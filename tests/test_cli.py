@@ -49,6 +49,20 @@ def test_missing_keys_are_a_no_op(monkeypatch):
     assert "KUBECONFIG" not in os.environ
 
 
+def test_blank_dotenv_value_is_also_a_no_op(monkeypatch):
+    """Real bug caught live (2026-08-13): a key left BLANK in .env (matching
+    .env.example's own 'leave blank to use the default' instructions) is
+    present in creds with value "" -- not absent. Exporting KUBECONFIG=""
+    into the real process env made the kubernetes client treat it as an
+    explicit empty path instead of 'not configured', breaking a
+    fresh .env.example-based setup out of the box."""
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    _export_cluster_env({"KUBECONFIG": ""})
+    import os
+
+    assert "KUBECONFIG" not in os.environ
+
+
 def test_exports_kimi_api_key_for_the_brain(monkeypatch):
     monkeypatch.delenv("KIMI_API_KEY", raising=False)
     _export_cluster_env({"KIMI_API_KEY": "sk-test-value"})
