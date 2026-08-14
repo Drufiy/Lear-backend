@@ -23,11 +23,11 @@ first real use and zero tests ever exercised.
 
 | # | Step | macOS | Windows |
 |---|---|---|---|
-| 0.1 | Fresh `git clone`, fresh venv, `pip install -e ".[dev]"` — no errors | [ ] | [ ] |
-| 0.2 | `prash` (bare console script) resolves and runs — not `python -m prash.cli` | [ ] | [ ] |
-| 0.3 | `cp .env.example .env`, fill in only `KIMI_API_KEY` (or `DEEPSEEK_API_KEY`) + `KUBE_CONTEXT`, leave everything else blank exactly as shipped | [ ] | [ ] |
-| 0.4 | `prash config` — runs clean, no crash, secrets shown as redacted not blank/error | [ ] | [ ] |
-| 0.5 | `prash watch` against a real (or `kind`) cluster — no `ConfigException`, no crash from any other blank `.env` field | [ ] | [ ] |
+| 0.1 | Fresh `git clone`, fresh venv, `pip install -e ".[dev]"` — no errors | [x] 2026-08-14 ✅ | [ ] |
+| 0.2 | `prash` (bare console script) resolves and runs — not `python -m prash.cli` | [x] 2026-08-14 ✅ resolves to `.venv/bin/prash`, prints usage (no subcommand given), no traceback | [ ] |
+| 0.3 | `cp .env.example .env`, fill in only `KIMI_API_KEY` (or `DEEPSEEK_API_KEY`) + `KUBE_CONTEXT`, leave everything else blank exactly as shipped | [ ] 2026-08-14 ⚠️ `KUBE_CONTEXT`/`KUBE_NAMESPACE` set, but **neither `KIMI_API_KEY` nor `DEEPSEEK_API_KEY` filled in yet** — blocks `prash fix` / diagnosis testing until Aradhya adds one to his own `.env` | [ ] |
+| 0.4 | `prash config` — runs clean, no crash, secrets shown as redacted not blank/error | [x] 2026-08-14 ✅ "secret values are never shown"; note: "keys present" lists key *names* from the file regardless of whether the value is blank (e.g. lists `KIMI_API_KEY` even though it's currently empty) — not a bug, just worth knowing when reading the output | [ ] |
+| 0.5 | `prash watch` against a real (or `kind`) cluster — no `ConfigException`, no crash from any other blank `.env` field | [x] 2026-08-14 ✅ ran 20s against live `kind-prash-dev`/`prash-demo`: detected real `broken-app` pod (CrashLoopBackOff, restart_count=97), notified once, next poll correctly said "no new problems" (dedup working). **The exact bug that started this phase is fixed.** | [ ] |
 
 ---
 
