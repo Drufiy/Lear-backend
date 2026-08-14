@@ -303,7 +303,7 @@ Aradhya chose the most ambitious option: a real conversational loop where you ty
 The plan originally said "hopefully we reach a satisfactory stage." That has no test, and that is exactly how 3 days becomes 2 weeks. Binary bar, all six:
 
 1. The §0b sequence runs end to end on **both** macOS and Windows.
-2. **Every** registered command has been run at least once on **both** platforms, with the result written down (checklist, not memory).
+2. **Every** registered command has been run at least once on **both** platforms, with the result written down (checklist, not memory) — see `TESTING_CHECKLIST.md`.
 3. Zero known-unfixed **P0** (wrong action taken, data loss, credential mishandling) or **P1** (crash, or a core path blocked) bugs.
 4. The eval baseline has **not** regressed — every brain/prompt change diffed via `evals/run_eval.py --baseline` before it counts as done.
 5. The "ask, don't quit" flow works end to end on at least one genuinely ambiguous real case.
