@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 
+from prash.actions.contract import ActionContext, ActionSpec, Plan, RiskTier, Target
 from prash.cli import _export_cluster_env, cmd_watch
 
 
@@ -115,3 +116,49 @@ def test_cmd_watch_cli_flag_wins_over_env(monkeypatch):
     args = Namespace(namespace="explicit-ns", interval=None)
     cmd_watch(args)
     assert seen_namespace["ns"] == "explicit-ns"
+
+
+def _fake_action(risk_tier=RiskTier.SAFE, approval_hint=""):
+    spec = ActionSpec(
+        id="restart-pod", summary="test", risk_tier=risk_tier, reversible=True, approval_hint=approval_hint
+    )
+    return type("FakeAction", (), {"spec": spec})()
+
+
+def test_cli_ask_eof_on_stdin_is_a_clean_decline_not_a_crash(monkeypatch):
+    """Real bug caught live (2026-08-14): running `prash run` with stdin
+    already closed (piped input exhausted, Ctrl+D, or a script that forgot
+    --noninteractive) raised an uncaught EOFError out of rich's Prompt.ask,
+    killing the process with a full Python traceback instead of a clean
+    outcome. No stdin available must be treated the same as the user saying
+    no -- never proceed with an action nobody actually confirmed."""
+    import prash.cli as cli_mod
+
+    def raise_eof(*args, **kwargs):
+        raise EOFError()
+
+    monkeypatch.setattr(cli_mod.Prompt, "ask", raise_eof)
+
+    action = _fake_action()
+    plan = Plan(action_id="restart-pod", steps=[], reversible=True, risk_tier=RiskTier.SAFE)
+    ctx = ActionContext(target=Target(resource="prash-demo/pod"), credentials={})
+
+    assert cli_mod.CliAsk().ask(action, plan, ctx) is False
+
+
+def test_cli_ask_ctrl_c_during_prompt_is_a_clean_decline_not_a_crash(monkeypatch):
+    """Same class of bug as the EOFError case above, for Ctrl+C at the
+    approval prompt specifically (as opposed to Ctrl+C elsewhere in the
+    program, which is out of scope here)."""
+    import prash.cli as cli_mod
+
+    def raise_interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli_mod.Prompt, "ask", raise_interrupt)
+
+    action = _fake_action()
+    plan = Plan(action_id="restart-pod", steps=[], reversible=True, risk_tier=RiskTier.SAFE)
+    ctx = ActionContext(target=Target(resource="prash-demo/pod"), credentials={})
+
+    assert cli_mod.CliAsk().ask(action, plan, ctx) is False

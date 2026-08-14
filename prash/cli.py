@@ -117,11 +117,20 @@ class CliAsk(AskFn):
             )
         )
         hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
-        answer = Prompt.ask(
-            f"Proceed with '{action.spec.id}'{hint}? [y/N]",
-            choices=["y", "n", "yes", "no"],
-            default="n",
-        )
+        try:
+            answer = Prompt.ask(
+                f"Proceed with '{action.spec.id}'{hint}? [y/N]",
+                choices=["y", "n", "yes", "no"],
+                default="n",
+            )
+        except (EOFError, KeyboardInterrupt):
+            # Real bug, caught live (2026-08-14): no stdin available (piped
+            # input closed, Ctrl+D, or a script that forgot --noninteractive)
+            # raised an uncaught EOFError with a full traceback instead of a
+            # clean decline. Treat "can't get an answer" the same as "no" --
+            # never proceed with an action nobody actually confirmed.
+            console.print("\n[yellow]No input received -- treating as decline.[/yellow]")
+            return False
         return answer.lower().startswith("y")
 
 
@@ -137,7 +146,14 @@ def _make_context(
     if not getattr(args, "noninteractive", False):
         def secret_input(name: str, hint: str) -> str:
             prompt = f"Value for secret '{name}'" + (f" ({hint})" if hint else "")
-            return Prompt.ask(prompt, password=True)
+            try:
+                return Prompt.ask(prompt, password=True)
+            except (EOFError, KeyboardInterrupt):
+                # Same class of bug as CliAsk.ask() above: no stdin available
+                # must not crash. An empty value here is already handled
+                # cleanly by RequestSecretAction.execute() -> NEEDS_INPUT.
+                console.print("\n[yellow]No input received for secret value.[/yellow]")
+                return ""
 
     runner = None
     github = connectors.get("github")
