@@ -50,6 +50,8 @@ If that sequence works, the sprint succeeded, even if connectors are missing and
 
 **Credentials:** `.env.example` is the schema; `.env` is gitignored and never committed. **Aryan owns the `.env.example` schema** (Track A owns config loading). Adding a key = log it in §10.
 
+**Bug tracking — standing rule, added 2026-08-14:** §10 is a chronological narrative log (decisions, root causes, lessons) — it is not built to hold live open/closed state, and with two people testing in parallel it will be outpaced immediately. **Anything that survives past the session it was found in gets a GitHub Issue** on this repo, labeled by severity (`P0`/`P1`/`P2`) and assigned an owner. A bug found and fixed within the same session can skip Issues and go straight to a §10 entry as usual. Rule of thumb: if you're about to close your laptop with it still open, it needs an Issue, not just a mention in this file — otherwise it gets lost.
+
 ---
 
 ## 1. Why we're pivoting (context for anyone reading this cold)
@@ -309,7 +311,7 @@ The plan originally said "hopefully we reach a satisfactory stage." That has no 
 
 ### Bug tracking during this phase
 
-Two people testing everything for 3 days will generate more findings than a chronological log can hold. §10 stays the *narrative* record (decisions, root causes, lessons). **Live open/closed bug state goes in GitHub Issues** on this repo — label by severity (`P0`/`P1`/`P2`) and by owner. A finding that is fixed same-session can skip Issues and go straight to §10; anything that stays open overnight gets an Issue, or it will be lost.
+Now a standing repo convention, not just a phase note — see §0c. Two people testing everything for 3 days is exactly the case it exists for: it will generate more findings than a chronological log can hold.
 
 
 ## 7. Explicitly out of scope for this sprint
