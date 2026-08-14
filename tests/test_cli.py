@@ -9,7 +9,7 @@ from __future__ import annotations
 from argparse import Namespace
 
 from prash.actions.contract import ActionContext, ActionSpec, Plan, RiskTier, Target
-from prash.cli import _export_cluster_env, cmd_watch
+from prash.cli import _export_cluster_env, cmd_investigate, cmd_watch
 
 
 def test_exports_kube_context_from_env_dict(monkeypatch):
@@ -144,6 +144,38 @@ def test_cli_ask_eof_on_stdin_is_a_clean_decline_not_a_crash(monkeypatch):
     ctx = ActionContext(target=Target(resource="prash-demo/pod"), credentials={})
 
     assert cli_mod.CliAsk().ask(action, plan, ctx) is False
+
+
+def test_cmd_investigate_stops_cleanly_when_unauthenticated(monkeypatch):
+    """Real bug caught live (2026-08-14): cmd_investigate printed "auth not
+    configured" for an unauthenticated connector but then fell through into
+    poll_state() anyway. GitHub's real connector crashed with an unhandled
+    KeyError indexing an empty API response; Vercel's connector happened not
+    to crash but silently returned a fake "not-found" result instead of
+    honestly stopping. poll_state() must never be called without a session."""
+    import prash.cli as cli_mod
+
+    poll_state_called = {"value": False}
+
+    def fake_poll_state(resource):
+        poll_state_called["value"] = True
+        raise AssertionError("poll_state must not be called when authenticate() is False")
+
+    fake_connector = type(
+        "FakeConnector",
+        (),
+        {"name": "github", "authenticate": lambda self: False, "poll_state": fake_poll_state},
+    )()
+    monkeypatch.setattr(cli_mod, "_make_connectors", lambda creds: {"github": fake_connector})
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+
+    args = Namespace(provider="github", resource="owner/repo")
+    exit_code = cmd_investigate(args)
+
+    assert poll_state_called["value"] is False
+    assert exit_code != 0
 
 
 def test_cli_ask_ctrl_c_during_prompt_is_a_clean_decline_not_a_crash(monkeypatch):

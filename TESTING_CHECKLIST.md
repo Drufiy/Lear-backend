@@ -98,9 +98,9 @@ first real use and zero tests ever exercised.
 
 | Provider | macOS | Windows |
 |---|---|---|
-| `--provider github` (default) | [ ] | [ ] |
-| `--provider vercel` | [ ] | [ ] |
-| No token configured for the provider | Clean "not configured" message, not a crash — [ ] | [ ] |
+| `--provider github` (default) | [ ] blocked — needs `GITHUB_TOKEN` in `.env` for a real authenticated call, only the no-token path tested so far | [ ] |
+| `--provider vercel` | [ ] blocked — needs `VERCEL_TOKEN`, same reason | [ ] |
+| No token configured for the provider | [x] 2026-08-14 ❌→✅ **found a real crash, fixed.** `cmd_investigate` printed "auth not configured" then fell through into `poll_state()` anyway with no session. GitHub's connector crashed with an unhandled `KeyError` indexing an empty API response (raw traceback, not a clean message); Vercel's connector happened not to crash but silently returned a fake "not-found" result instead of honestly stopping. Fixed: `cmd_investigate` now returns immediately after the warning for both providers. 1 regression test, 141/141 passing. | [ ] |
 
 ---
 
@@ -108,16 +108,16 @@ first real use and zero tests ever exercised.
 
 | Command | What to verify | macOS | Windows |
 |---|---|---|---|
-| `prash actions` | Lists all 4 actions with correct risk tier + reversibility | [ ] | [ ] |
-| `prash audit` | Shows real entries after the above; `--tail N` actually limits | [ ] | [ ] |
-| `prash config` | Secrets shown as redacted, never in plaintext | [ ] | [ ] |
-| `prash circuit status` | Shows real breaker state | [ ] | [ ] |
-| `prash circuit reset` (no resource) | Resets everything | [ ] | [ ] |
-| `prash circuit reset <resource>` | Resets only that resource | [ ] | [ ] |
-| `prash watch` | Detects a real new problem, notifies once, stays silent on repeat polls (§10, already verified once on macOS — re-verify after any watcher changes) | [ ] | [ ] |
-| `prash watch --namespace` / `--interval` | Both flags actually take effect | [ ] | [ ] |
-| Desktop notification actually fires (not just logged) | **macOS: verified via `osascript` fallback. Windows: never verified live — only mocked. Priority item.** | [ ] | [ ] |
-| `--env-file` (top-level flag) | Points `prash` at a non-default `.env` location correctly | [ ] | [ ] |
+| `prash actions` | Lists all 4 actions with correct risk tier + reversibility | [x] 2026-08-14 ✅ matches action registry exactly | [ ] |
+| `prash audit` | Shows real entries after the above; `--tail N` actually limits | [x] 2026-08-14 ✅ `--tail 5` returned exactly the 5 most recent real entries | [ ] |
+| `prash config` | Secrets shown as redacted, never in plaintext | [x] 2026-08-14 ✅ (see §0.4) | [ ] |
+| `prash circuit status` | Shows real breaker state | [x] 2026-08-14 ✅ | [ ] |
+| `prash circuit reset` (no resource) | Resets everything | [x] 2026-08-14 ✅ | [ ] |
+| `prash circuit reset <resource>` | Resets only that resource | [x] 2026-08-14 ✅ | [ ] |
+| `prash watch` | Detects a real new problem, notifies once, stays silent on repeat polls (§10, already verified once on macOS — re-verify after any watcher changes) | [x] 2026-08-14 ✅ re-verified against a fresh cluster session (see §0.5) | [ ] |
+| `prash watch --namespace` / `--interval` | Both flags actually take effect | [x] 2026-08-14 ✅ `--namespace default` correctly overrode `.env`'s `prash-demo`; `--interval 5` measured at ~5.02s between polls via timestamped output | [ ] |
+| Desktop notification actually fires (not just logged) | **macOS: verified via `osascript` fallback. Windows: never verified live — only mocked. Priority item.** | [x] 2026-08-14 ✅ macOS confirmed: direct `osascript display notification` call exits 0, and no "notification failed" warning appeared in any real watch run today (which would have logged if the fallback failed) | [ ] still the priority item |
+| `--env-file` (top-level flag) | Points `prash` at a non-default `.env` location correctly | [x] 2026-08-14 ✅ pointed at an alternate file with a different `KUBE_NAMESPACE` — watcher correctly used the alternate value, not the default `.env` | [ ] |
 
 ---
 

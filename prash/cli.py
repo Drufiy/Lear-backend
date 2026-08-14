@@ -324,7 +324,15 @@ def cmd_investigate(args: argparse.Namespace) -> int:
         console.print(f"[red]unknown provider: {args.provider}[/red]")
         return 2
     if not connector.authenticate():
+        # Real bug, caught live (2026-08-14): this warning printed, then
+        # execution fell through into poll_state() anyway with no valid
+        # session. GitHub's connector crashed with an unhandled KeyError
+        # indexing an empty response; Vercel's connector happened not to
+        # crash, but silently returned a "not-found" result that looked like
+        # a real answer instead of "we never actually asked." Neither is the
+        # clean, honest "not configured" outcome this message promises.
         console.print(f"[yellow]{connector.name}: auth not configured (missing token in local .env)[/yellow]")
+        return 1
     state = connector.poll_state(args.resource)
     console.print(f"[bold]{args.resource}[/bold] -> {state.state.value}")
     console.print(f"[dim]{state.detail}[/dim]")
