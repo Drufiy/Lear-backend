@@ -125,11 +125,11 @@ first real use and zero tests ever exercised.
 
 | Item | macOS | Windows |
 |---|---|---|
-| Path handling (`pathlib`, not raw string paths) breaks nothing | [ ] | [ ] |
-| Shell quoting in any subprocess call (`osascript`, `kubectl` via the client lib, `kind`) | [ ] | [ ] |
-| `kind` / Docker Desktop cluster setup works from a clean machine | [ ] | [ ] |
-| Line endings don't break `.env` parsing (CRLF vs LF) | [ ] | [ ] |
-| Ctrl+C during a running command (`watch`, an in-progress `fix`) exits cleanly, no orphaned process | [ ] | [ ] |
+| Path handling (`pathlib`, not raw string paths) breaks nothing | [x] 2026-08-14 ✅ no path issues across the entire §0/§1/§4/§5 pass; codebase uses `pathlib.Path` consistently, not raw string concatenation | [ ] |
+| Shell quoting in any subprocess call (`osascript`, `kubectl` via the client lib, `kind`) | [x] 2026-08-14 ✅ `osascript` call uses `subprocess.run([...])` as a list (no `shell=True`, no shell-injection surface) plus its own `_applescript_escape()` for the AppleScript string literal itself — tested directly with a title/message containing embedded `"` and `\` characters, notification still fired correctly, no broken script | [ ] |
+| `kind` / Docker Desktop cluster setup works from a clean machine | [x] 2026-08-14 ✅ **actually torn down and rebuilt from scratch** (`kind delete cluster --name prash-dev` → `kind create cluster --name prash-dev`) to verify this for real, not from memory. Node Ready in ~22s, kubectl context auto-set to `kind-prash-dev` exactly as PRASH_V2.md documents, `testdata/broken-pod.yaml` reapplied and reached `CrashLoopBackOff` within ~15s, `prash watch` smoke-tested clean against the fresh cluster immediately after | [ ] |
+| Line endings don't break `.env` parsing (CRLF vs LF) | [x] 2026-08-14 ✅ built a real CRLF-terminated `.env` file (`\r\n` line endings, matching what a Windows editor would produce) and loaded it through `CredentialStore` directly — `str.splitlines()` already handles CRLF/LF/CR uniformly, confirmed no stray `\r` leaking into any parsed value | [ ] |
+| Ctrl+C during a running command (`watch`, an in-progress `fix`) exits cleanly, no orphaned process | [x] 2026-08-14 ✅ verified via a direct subprocess + `SIGINT` (not a shell-backgrounded job, which masks SIGINT for background jobs by shell convention and gave a false "hung" reading on the first attempt) — exits cleanly with code 130, prints "interrupted", no orphaned process left behind | [ ] |
 
 ---
 
@@ -139,4 +139,4 @@ Track severity/owner in GitHub Issues per `PRASH_V2.md` §0c. List them here too
 
 | Issue | Severity | Found by | Link |
 |---|---|---|---|
-| `--dry-run` bypasses the permission engine's REFUSE/PROMPT gate for every mode; terminal output can read e.g. "refuse / succeeded" under `--mode read-only --dry-run` (self-contradictory at a glance, though the audit log's `dry_run: true` field makes it reconstructable). No safety impact — real infra is never touched either way. | P2 | Aradhya, §1c, 2026-08-14 | *(GitHub Issue not yet opened — open before end of session per §0c if still unfixed)* |
+| `--dry-run` bypasses the permission engine's REFUSE/PROMPT gate for every mode; terminal output can read e.g. "refuse / succeeded" under `--mode read-only --dry-run` (self-contradictory at a glance, though the audit log's `dry_run: true` field makes it reconstructable). No safety impact — real infra is never touched either way. | P2 | Aradhya, §1c, 2026-08-14 | [#1](https://github.com/Drufiy/prash-v2-backend/issues/1) |
