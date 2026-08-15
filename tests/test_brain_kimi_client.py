@@ -44,6 +44,18 @@ def test_kimi_client_constructed_lazily_on_first_call(monkeypatch):
     assert kc._kimi is client  # cached singleton, not rebuilt
 
 
+def test_kimi_client_raises_a_clear_error_naming_kimi_api_key_when_blank(monkeypatch):
+    """Real bug, caught live (2026-08-15): a blank KIMI_API_KEY reached the
+    bare AsyncOpenAI(api_key=None, ...) construction and raised the SDK's
+    own generic "Missing credentials... set OPENAI_API_KEY" error -- true,
+    but it never once names KIMI_API_KEY, the actual local config gap.
+    Issue #5, PRASH_V2.md §10."""
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    importlib.reload(kc)
+    with pytest.raises(kc.DiagnosisValidationError, match="KIMI_API_KEY"):
+        kc._kimi_client()
+
+
 def test_deepseek_client_is_none_when_no_key_configured(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     importlib.reload(kc)

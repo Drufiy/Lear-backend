@@ -55,8 +55,21 @@ def _primary_model() -> str:
 def _kimi_client() -> AsyncOpenAI:
     global _kimi
     if _kimi is None:
+        api_key = os.environ.get("KIMI_API_KEY")
+        if not api_key:
+            # Real bug, caught live (2026-08-15): a blank KIMI_API_KEY reached
+            # here through the DeepSeek-failed -> Kimi-fallback path and the
+            # bare AsyncOpenAI(api_key=None, ...) construction raised the
+            # SDK's own generic error ("Missing credentials... set
+            # OPENAI_API_KEY") -- true, but useless, since the actual gap is
+            # KIMI_API_KEY specifically and that name never appeared anywhere
+            # in the message. See PRASH_V2.md §10, issue #5.
+            raise DiagnosisValidationError(
+                "KIMI_API_KEY is not set in your local .env -- needed for Kimi calls "
+                "(as the primary model, or as DeepSeek's fallback)."
+            )
         _kimi = AsyncOpenAI(
-            api_key=os.environ.get("KIMI_API_KEY"),
+            api_key=api_key,
             base_url=os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
             timeout=90.0,
         )
