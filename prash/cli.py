@@ -485,6 +485,12 @@ def cmd_tui(_args: argparse.Namespace) -> int:
     return run_tui()
 
 
+def cmd_repl(_args: argparse.Namespace) -> int:
+    from .repl import run_repl
+
+    return run_repl()
+
+
 def cmd_circuit(args: argparse.Namespace) -> int:
     breaker = CircuitBreaker.default()
     if args.circuit_action == "status":
@@ -574,6 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch.set_defaults(func=cmd_watch)
 
     sub.add_parser("tui", help="open the dashboard-style terminal UI (textual)", formatter_class=formatter_class).set_defaults(func=cmd_tui)
+    sub.add_parser("repl", help="persistent interactive session (stage 1)", formatter_class=formatter_class).set_defaults(func=cmd_repl)
 
     return parser
 
