@@ -89,7 +89,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Deploy the broken-pod fixture
-        run: kubectl apply -f prash/connectors/testdata/broken-pod.yaml
+        # DELIBERATE, TEMPORARY breakage (failure #2 of 2, unrelated cause to
+        # the pytest failure in the `test` job) for a live test of
+        # `prash fix --ci`. See tests/test_deliberate_ci_failure_fixture.py.
+        run: kubectl apply -f prash/connectors/testdata/this-path-does-not-exist.yaml
 
       - name: Wait for real CrashLoopBackOff
         # Manually verified during development to land in ~15-30s (PRASH_V2.md
