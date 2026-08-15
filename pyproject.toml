@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.27",
     "openai>=1.0",
     "plyer>=2.1",
+    "textual>=8.0",
     # plyer's macOS notification backend needs pyobjus (a PyObjC-style bridge)
     # that isn't pulled in automatically -- without it, notify() raises and
     # _notify() falls back to console-only, which is silent-but-safe, not a

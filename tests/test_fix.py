@@ -184,6 +184,72 @@ def test_cmd_fix_k8s_unknown_pod_returns_error(monkeypatch, capsys):
     assert "not found" in capsys.readouterr().out
 
 
+# ── the "ask, don't quit" options flow (PRASH_V2.md §9, 2026-08-15) ──────────
+
+_OPTIONS_DIAGNOSIS = {
+    "recommended_action": None,
+    "options": [
+        {"action": "restart_pod", "rationale": "pod may be wedged; a fresh pod likely clears it", "is_default": True},
+        {"action": None, "rationale": "could be a deterministic config error; escalate to a human", "is_default": False},
+    ],
+}
+
+
+def test_render_options_shows_ranked_menu(capsys):
+    from rich.console import Console
+
+    d = _diagnosis(**_OPTIONS_DIAGNOSIS)
+    fix_mod.render_options(d, Console())
+    out = capsys.readouterr().out
+    assert "restart_pod" in out
+    assert "escalate to a human" in out
+    assert "default" in out
+
+
+def test_cmd_fix_options_noninteractive_reports_and_takes_no_action(tmp_path, monkeypatch, capsys):
+    _patch_store(monkeypatch)
+    _patch_brain(monkeypatch, diagnosis=_diagnosis(**_OPTIONS_DIAGNOSIS))
+    dispatches = []
+    monkeypatch.setattr(cli_mod, "_build_dispatcher", lambda mode: dispatches.append(mode) or Dispatcher(mode=mode, breaker=None, audit=cli_mod.AuditLog(path=tmp_path / "audit.log")))
+
+    rc = cli_mod.cmd_fix(_args(noninteractive=True))
+    assert rc == 0
+    assert dispatches == []
+    assert "no automated action" in capsys.readouterr().out
+
+
+def test_cmd_fix_options_picks_and_dispatches_selected_action(tmp_path, monkeypatch, capsys):
+    _patch_store(monkeypatch)
+    _patch_brain(monkeypatch, diagnosis=_diagnosis(**_OPTIONS_DIAGNOSIS))
+    monkeypatch.setenv("PRASH_CIRCUIT_STATE_PATH", str(tmp_path / "circuit.json"))
+    monkeypatch.setenv("PRASH_AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
+    monkeypatch.setattr("prash.actions.restart_pod.k8s_restart_pod", lambda ns, name: True)
+    monkeypatch.setattr(
+        "prash.actions.restart_pod.get_pod_status",
+        lambda ns, name: [PodStatus(name=name, namespace=ns, phase="Running", problem=None, restart_count=1, ready=True)],
+    )
+    monkeypatch.setattr(cli_mod.Prompt, "ask", lambda *a, **k: "1")
+
+    rc = cli_mod.cmd_fix(_args(noninteractive=False, mode="bypass"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "restart issued" in out
+    assert "verified" in out
+
+
+def test_cmd_fix_options_escalate_choice_takes_no_action(tmp_path, monkeypatch, capsys):
+    _patch_store(monkeypatch)
+    _patch_brain(monkeypatch, diagnosis=_diagnosis(**_OPTIONS_DIAGNOSIS))
+    dispatches = []
+    monkeypatch.setattr(cli_mod, "_build_dispatcher", lambda mode: dispatches.append(mode) or Dispatcher(mode=mode, breaker=None, audit=cli_mod.AuditLog(path=tmp_path / "audit.log")))
+    monkeypatch.setattr(cli_mod.Prompt, "ask", lambda *a, **k: "2")
+
+    rc = cli_mod.cmd_fix(_args(noninteractive=False))
+    assert rc == 0
+    assert dispatches == []
+    assert "escalating to a human" in capsys.readouterr().out
+
+
 # ── cmd_fix: CI multi-failure mode ──────────────────────────────────────────
 
 def test_cmd_fix_ci_requires_run_id(monkeypatch, capsys):

@@ -14,8 +14,8 @@ seam Aradhya's schema built for us (§6 cross-track, schemas.py docstring).
 from __future__ import annotations
 
 from rich.panel import Panel
-from rich.table import Table
 
+from . import ui
 from .brain.diagnosis_agent import diagnose_failure, format_k8s_context
 from .brain.log_fetcher import fetch_workflow_logs
 from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
@@ -85,37 +85,61 @@ async def diagnose_ci_run(run_id: int, repo_full_name: str, access_token: str) -
 def render_diagnosis(diagnosis: Diagnosis, console) -> None:
     console.print(
         Panel(
-            f"[bold]{diagnosis.problem_summary}[/bold]\n\n"
-            f"[dim]category:[/dim] {diagnosis.category}   "
-            f"[dim]fix type:[/dim] {diagnosis.fix_type}   "
-            f"[dim]confidence:[/dim] {diagnosis.confidence:.0%}   "
-            f"[dim]recommended action:[/dim] {diagnosis.recommended_action or 'none'}\n\n"
+            f"[bold yellow]{diagnosis.problem_summary}[/bold yellow]\n\n"
+            f"[dim]category[/dim] {diagnosis.category}   "
+            f"[dim]fix type[/dim] {diagnosis.fix_type}   "
+            f"[dim]confidence[/dim] {diagnosis.confidence:.0%}   "
+            f"[dim]recommended action[/dim] {diagnosis.recommended_action or 'none'}\n\n"
             f"[bold]root cause[/bold]\n{diagnosis.root_cause}\n\n"
             f"[bold]proposed fix[/bold]\n{diagnosis.fix_description}",
             title="diagnosis",
-            border_style="cyan",
+            border_style=ui.ACCENT,
         )
     )
     if diagnosis.files_changed:
-        table = Table(title="proposed file changes")
-        table.add_column("path")
-        table.add_column("explanation")
+        table = ui.make_table("proposed file changes")
+        table.add_column("path", style="bold")
+        table.add_column("explanation", style=ui.META)
         for fc in diagnosis.files_changed:
             table.add_row(fc.path, fc.explanation)
         console.print(table)
+    render_options(diagnosis, console)
+
+
+def render_options(diagnosis: Diagnosis, console) -> None:
+    """Render the ranked options menu — the Track A half of the "ask, don't
+    quit" flow (PRASH_V2.md §9, 2026-08-15). Purely presentational: every
+    option carries its own rationale and exactly one is marked the default
+    (what Prash would pick if forced). The actual pick happens in cli.py and
+    whatever gets picked still runs through the normal permission pipeline.
+    """
+    if not diagnosis.options:
+        return
+    lines = []
+    for i, opt in enumerate(diagnosis.options, start=1):
+        default = "  [green](default — what Prash would pick)[/green]" if opt.is_default else ""
+        action = opt.action or "escalate to a human (no automated action)"
+        lines.append(f"[bold]{i}.[/bold] {action}{default}\n    [dim]{opt.rationale}[/dim]")
+    console.print(
+        Panel(
+            "\n\n".join(lines),
+            title="[bold yellow]Prash is unsure — choose how to proceed[/bold yellow]",
+            border_style=ui.WARN,
+        )
+    )
 
 
 def render_multi_failure(result: MultiFailureResult, console) -> None:
     console.print(
         Panel(
-            f"[bold]{result.summary()}[/bold]"
+            f"[bold yellow]{result.summary()}[/bold yellow]"
             + (
-                "\n\n[red]still broken:[/red]\n" + "\n".join(f"- {s}" for s in result.unresolved_summaries())
+                "\n\n[bold red]still broken:[/bold red]\n" + "\n".join(f"- {s}" for s in result.unresolved_summaries())
                 if result.unresolved_summaries()
                 else ""
             ),
             title="multi-failure diagnosis",
-            border_style="cyan",
+            border_style=ui.ACCENT,
         )
     )
     for job, diagnosis in zip(result.job_names, result.diagnoses, strict=False):

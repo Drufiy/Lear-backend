@@ -25,18 +25,17 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.table import Table
 
+from . import ui
+from .actions.apply_ci_fix import ApplyCiFixAction
 from .actions.contract import (
     ActionContext,
     MissingSecretError,
     Plan,
     Target,
 )
-from .actions.apply_ci_fix import ApplyCiFixAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
 from .actions.restart_pod import RestartPodAction
@@ -50,7 +49,7 @@ from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
 from .permissions import PermissionMode
 
-console = Console()
+console = ui.console
 
 PROVIDERS = {
     "github": GitHubConnector,
@@ -112,9 +111,9 @@ class CliAsk(AskFn):
     def ask(self, action: Any, plan: Plan, ctx: ActionContext) -> bool:
         console.print(
             Panel(
-                f"[bold]Target:[/bold] {ctx.target.resource} ({ctx.target.environment})\n" + plan.describe(),
-                title=f"[bold]Prash proposes: {action.spec.id}[/bold]",
-                border_style="cyan",
+                f"[bold]Target[/bold] [yellow]{ctx.target.resource}[/yellow]  [dim]({ctx.target.environment})[/dim]\n\n{plan.describe()}",
+                title=f"[bold]PRASH proposes · {action.spec.id}[/bold]",
+                border_style=ui.ACCENT,
             )
         )
         hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
@@ -232,13 +231,18 @@ def _render_run_result(result: RunResult) -> int:
             console.print(f"[dim]audit id: {result.audit_id}[/dim]")
         return 1
 
-    console.print(Panel(f"{result.decision.value} / {result.result.status.value}: {result.result.summary}", title="outcome", border_style="green" if result.ok else "red"))
+    console.print(
+        Panel(
+            f"[bold]{result.decision.value}[/bold] / {result.result.status.value}: {result.result.summary}",
+            title="outcome",
+            border_style=ui.GOOD if result.ok else ui.BAD,
+        )
+    )
     if result.result.verification is not None:
         v = result.result.verification
-        label = "[green]verified[/green]" if v.ok else "[red]NOT verified[/red]"
-        console.print(f"{label}: {v.detail}")
+        console.print(f"{ui.verified(v.ok)}: {v.detail}")
     if result.audit_id:
-        console.print(f"[dim]audit id: {result.audit_id}[/dim]")
+        console.print(f"[{ui.META}]audit id: {result.audit_id}[/{ui.META}]")
     return 0 if result.ok else 1
 
 
@@ -249,6 +253,22 @@ def _render_no_auto_action(recommended_action: Optional[str], namespace: str) ->
         console.print("[yellow]brain recommends scale — no scale action is registered this sprint (§7 out of scope); escalate to a human[/yellow]")
     else:
         console.print("[dim]brain did not recommend an automated action; review the diagnosis above[/dim]")
+
+
+def _pick_option(diagnosis: Any) -> Optional[str]:
+    """Interactive picker for the "ask, don't quit" menu (PRASH_V2.md §9,
+    2026-08-15). Returns the chosen option's action value, or None for the
+    explicit "escalate to a human" choice and for a declined/no-input prompt.
+    Never auto-picks on the user's behalf — the whole point of the menu."""
+    options = diagnosis.options or []
+    choices = [str(i) for i in range(1, len(options) + 1)]
+    default = str(next((i for i, o in enumerate(options, start=1) if o.is_default), 1))
+    try:
+        raw = Prompt.ask("Which option should Prash execute?", choices=choices, default=default)
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]No input received — treating as decline.[/yellow]")
+        return None
+    return options[int(raw) - 1].action
 
 
 def cmd_fix(args: argparse.Namespace) -> int:
@@ -313,6 +333,38 @@ def cmd_fix(args: argparse.Namespace) -> int:
         return 2
     render_diagnosis(diagnosis, console)
 
+    if diagnosis.options:
+        # The "ask, don't quit" flow (PRASH_V2.md §9, 2026-08-15): the brain
+        # genuinely couldn't commit to a single action, so it presented a
+        # ranked menu. Handle it here explicitly -- never silently.
+        if args.noninteractive:
+            # Unattended run: report the menu and take zero automated action.
+            # Auto-picking the top-ranked option with nobody to ask is exactly
+            # the blast-radius risk the circuit breaker exists to prevent.
+            console.print("[yellow]--noninteractive: options were reported above; taking no automated action (never auto-pick in unattended mode)[/yellow]")
+            return 0
+        chosen = _pick_option(diagnosis)
+        if chosen is None:
+            console.print("[dim]no automated action taken — escalating to a human[/dim]")
+            return 0
+        action_id = recommended_action_id(chosen)
+        if action_id is None:
+            _render_no_auto_action(chosen, namespace)
+            return 0
+        dispatcher = _build_dispatcher(mode)
+        ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
+        try:
+            # Whatever the user picked still runs through the normal pipeline:
+            # risk tiers, circuit breaker, and the audit log all apply.
+            result = dispatcher.run(action_id, ctx, ask=CliAsk())
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except MissingSecretError as exc:
+            console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
+            return 3
+        return _render_run_result(result)
+
     action_id = recommended_action_id(diagnosis.recommended_action)
     if action_id is None:
         _render_no_auto_action(diagnosis.recommended_action, namespace)
@@ -356,22 +408,27 @@ def cmd_investigate(args: argparse.Namespace) -> int:
 
 def cmd_actions(_args: argparse.Namespace) -> int:
     dispatcher = _build_dispatcher(PermissionMode.ASK)
-    table = Table(title="registered actions")
-    table.add_column("action")
+    table = ui.make_table("registered actions", caption="run one with: prash run <action> <resource> [--mode ...] [--dry-run]")
+    table.add_column("action", style="bold")
     table.add_column("risk tier")
     table.add_column("reversible")
-    table.add_column("summary")
+    table.add_column("summary", style=ui.META)
     for aid, action in dispatcher.available.items():
-        table.add_row(aid, action.spec.risk_tier.value, str(action.spec.reversible), action.spec.summary)
+        table.add_row(
+            aid,
+            ui.tier(action.spec.risk_tier.value),
+            ui.reversible(action.spec.reversible),
+            action.spec.summary,
+        )
     console.print(table)
     return 0
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
     audit = AuditLog()
-    table = Table(title="audit log (append-only)")
-    table.add_column("ts")
-    table.add_column("action")
+    table = ui.make_table("audit log (append-only)", caption="every action, its tier, the decision, and the outcome")
+    table.add_column("when", style=ui.META)
+    table.add_column("action", style="bold")
     table.add_column("tier")
     table.add_column("decision")
     table.add_column("status")
@@ -380,10 +437,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
         table.add_row(
             entry["ts"],
             entry["action"],
-            entry["risk_tier"],
-            entry["decision"],
-            entry["status"],
-            str(entry["verification_ok"]),
+            ui.tier(entry["risk_tier"]),
+            ui.decision(entry["decision"]),
+            ui.status(entry["status"]),
+            ui.verified(entry["verification_ok"]),
         )
     console.print(table)
     return 0
@@ -393,10 +450,16 @@ def cmd_config(_args: argparse.Namespace) -> int:
     store = CredentialStore.from_env()
     creds = store.sanitized()
     secrets = store.secrets()
-    console.print(f"[bold]credentials file:[/bold] {store.path}")
-    console.print("[bold]keys present:[/bold] " + (", ".join(creds) if creds else "(none)"))
-    console.print(f"[bold]secrets stored:[/bold] {', '.join(sorted(secrets)) if secrets else '(none)'}")
-    console.print("[dim]secret values are never shown[/dim]")
+    console.print(
+        Panel(
+            f"[bold]credentials file[/bold]   {store.path}\n"
+            f"[bold]keys present[/bold]       {', '.join(creds) if creds else '(none)'}\n"
+            f"[bold]secrets stored[/bold]     {', '.join(sorted(secrets)) if secrets else '(none)'}\n"
+            f"[{ui.META}]secret values are never shown[/{ui.META}]",
+            title="local config",
+            border_style=ui.ACCENT,
+        )
+    )
     return 0
 
 
@@ -414,6 +477,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
     console.print(f"[bold]Watching namespace '{namespace}' for CrashLoopBackOff / OOMKilled / ImagePullBackOff / stuck pods...[/bold] (Ctrl+C to stop)")
     run_watch_loop(namespace, interval=args.interval, console=console)
     return 0
+
+
+def cmd_tui(_args: argparse.Namespace) -> int:
+    from .tui import run_tui
+
+    return run_tui()
 
 
 def cmd_circuit(args: argparse.Namespace) -> int:
@@ -439,12 +508,26 @@ def cmd_circuit(args: argparse.Namespace) -> int:
     return 2
 
 
+class _BrandedHelp(argparse.HelpFormatter):
+    """argparse's help is branding-hostile by default; prepend the masthead so
+    `prash --help` and every subcommand's help carry the same yellow header."""
+
+    def format_help(self) -> str:
+        return ui.masthead_text() + "\n\n" + super().format_help()
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="prash", description="Prash v2 - local AI DevOps agent")
+    formatter_class = _BrandedHelp
+    parser = argparse.ArgumentParser(
+        prog="prash",
+        description="Prash v2 — local AI DevOps agent",
+        epilog="credentials stay on your machine; Drufiy's servers never see them.",
+        formatter_class=formatter_class,
+    )
     parser.add_argument("--env-file", type=Path, help="override the local credentials file")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="execute an action through the permission pipeline")
+    run = sub.add_parser("run", help="execute an action through the permission pipeline", formatter_class=formatter_class)
     run.add_argument("action", help="action id (see `prash actions`)")
     run.add_argument("resource", help="target resource, e.g. owner/repo or ns/name")
     run.add_argument("--mode", default=None, help="permission mode: read-only|ask|auto-safe|environment-scoped|bypass (default: PRASH_PERMISSION_MODE or ask)")
@@ -460,7 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--body", help="PR body (open-pr)")
     run.set_defaults(func=cmd_run)
 
-    fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline")
+    fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)
     fix.add_argument("target", help="<namespace>/<pod> for a Kubernetes problem, or <owner>/<repo> with --ci")
     fix.add_argument("--ci", action="store_true", help="diagnose a CI run (multi-failure) instead of a pod")
     fix.add_argument("--run-id", type=int, help="GitHub run id for CI diagnosis (requires GITHUB_TOKEN)")
@@ -470,25 +553,27 @@ def build_parser() -> argparse.ArgumentParser:
     fix.add_argument("--noninteractive", action="store_true", help="never prompt; missing secrets return NEEDS_INPUT")
     fix.set_defaults(func=cmd_fix)
 
-    inv = sub.add_parser("investigate", help="read-only connector probe")
+    inv = sub.add_parser("investigate", help="read-only connector probe", formatter_class=formatter_class)
     inv.add_argument("resource")
     inv.add_argument("--provider", choices=list(PROVIDERS), default="github")
     inv.set_defaults(func=cmd_investigate)
 
-    sub.add_parser("actions", help="list registered actions").set_defaults(func=cmd_actions)
-    audit = sub.add_parser("audit", help="show the audit log")
+    sub.add_parser("actions", help="list registered actions", formatter_class=formatter_class).set_defaults(func=cmd_actions)
+    audit = sub.add_parser("audit", help="show the audit log", formatter_class=formatter_class)
     audit.add_argument("--tail", type=int, default=50)
     audit.set_defaults(func=cmd_audit)
-    sub.add_parser("config", help="show local config (redacted)").set_defaults(func=cmd_config)
-    circuit = sub.add_parser("circuit", help="inspect or reset the action circuit breaker")
+    sub.add_parser("config", help="show local config (redacted)", formatter_class=formatter_class).set_defaults(func=cmd_config)
+    circuit = sub.add_parser("circuit", help="inspect or reset the action circuit breaker", formatter_class=formatter_class)
     circuit.add_argument("circuit_action", choices=["status", "reset"])
     circuit.add_argument("resource", nargs="?", help="reset only this resource (reset only)")
     circuit.set_defaults(func=cmd_circuit)
 
-    watch = sub.add_parser("watch", help="poll a namespace for CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck pods, notify on new problems")
+    watch = sub.add_parser("watch", help="poll a namespace for CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck pods, notify on new problems", formatter_class=formatter_class)
     watch.add_argument("--namespace", default=None, help="default: KUBE_NAMESPACE from .env, or 'default'")
     watch.add_argument("--interval", type=int, default=None, help="poll interval in seconds (default: PRASH_WATCH_INTERVAL_SECONDS or 30)")
     watch.set_defaults(func=cmd_watch)
+
+    sub.add_parser("tui", help="open the dashboard-style terminal UI (textual)", formatter_class=formatter_class).set_defaults(func=cmd_tui)
 
     return parser
 
@@ -496,6 +581,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    ui.masthead(console)
     if getattr(args, "env_file", None):
         os.environ["PRASH_ENV"] = str(args.env_file)
     try:
