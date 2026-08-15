@@ -119,5 +119,5 @@ def render_multi_failure(result: MultiFailureResult, console) -> None:
         )
     )
     for job, diagnosis in zip(result.job_names, result.diagnoses, strict=False):
-        verdict = "[red]not fixed[/red]" if not diagnosis.files_changed else "[green]fix proposed[/green]"
+        verdict = "[red]no fix proposed[/red]" if not diagnosis.files_changed else "[green]fix proposed[/green]"
         console.print(f"  {verdict}  [bold]{job}[/bold] — {diagnosis.problem_summary}")

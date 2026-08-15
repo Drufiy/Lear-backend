@@ -36,6 +36,7 @@ from .actions.contract import (
     Plan,
     Target,
 )
+from .actions.apply_ci_fix import ApplyCiFixAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
 from .actions.restart_pod import RestartPodAction
@@ -184,7 +185,7 @@ def _make_context(
 def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
     dispatcher = Dispatcher(mode=mode, breaker=CircuitBreaker.default())
     dispatcher.register_all(
-        [OpenPrAction(), RequestSecretAction(), RestartPodAction(), RollbackAction()]
+        [OpenPrAction(), RequestSecretAction(), RestartPodAction(), RollbackAction(), ApplyCiFixAction()]
     )
     return dispatcher
 
@@ -280,7 +281,21 @@ def cmd_fix(args: argparse.Namespace) -> int:
             console.print(f"[red]CI diagnosis failed: {exc}[/red]")
             return 2
         render_multi_failure(result, console)
-        return 0
+
+        changes = result.combined_files_changed()
+        if not changes:
+            return 0
+
+        dispatcher = _build_dispatcher(mode)
+        ctx = _make_context(args, store, creds, resource=args.target, env=args.env)
+        ctx.extra["file_changes"] = changes
+        ctx.extra["run_id"] = args.run_id
+        try:
+            run_result = dispatcher.run("apply-ci-fix", ctx, ask=None if args.noninteractive else CliAsk())
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        return _render_run_result(run_result)
 
     try:
         namespace, pod = split_k8s_target(args.target)

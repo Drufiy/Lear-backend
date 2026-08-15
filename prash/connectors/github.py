@@ -24,7 +24,7 @@ class GitHubError(RuntimeError):
 class GitHubConnector(Connector):
     name = "github"
     read_capabilities = ("workflow_logs", "repo", "check_runs")
-    write_capabilities = ("open_pr", "re_run_job")
+    write_capabilities = ("open_pr", "re_run_job", "apply_fix")
 
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
@@ -68,6 +68,34 @@ class GitHubConnector(Connector):
     def create_pr(self, repo: str, title: str, head: str, base: str, body: str = "") -> Dict[str, Any]:
         payload = {"title": title, "head": head, "base": base, "body": body}
         return self._request("POST", f"/repos/{repo}/pulls", payload)
+
+    def get_repo(self, repo: str) -> Dict[str, Any]:
+        return self._request("GET", f"/repos/{repo}")
+
+    def get_branch_head_sha(self, repo: str, branch: str) -> str:
+        ref = self._request("GET", f"/repos/{repo}/git/ref/heads/{branch}")
+        return ref["object"]["sha"]
+
+    def get_commit_tree_sha(self, repo: str, commit_sha: str) -> str:
+        commit = self._request("GET", f"/repos/{repo}/git/commits/{commit_sha}")
+        return commit["tree"]["sha"]
+
+    def create_blob(self, repo: str, content: str) -> str:
+        blob = self._request("POST", f"/repos/{repo}/git/blobs", {"content": content, "encoding": "utf-8"})
+        return blob["sha"]
+
+    def create_tree(self, repo: str, base_tree_sha: str, entries: list[Dict[str, Any]]) -> str:
+        tree = self._request("POST", f"/repos/{repo}/git/trees", {"base_tree": base_tree_sha, "tree": entries})
+        return tree["sha"]
+
+    def create_commit(self, repo: str, message: str, tree_sha: str, parent_sha: str) -> str:
+        commit = self._request(
+            "POST", f"/repos/{repo}/git/commits", {"message": message, "tree": tree_sha, "parents": [parent_sha]}
+        )
+        return commit["sha"]
+
+    def create_ref(self, repo: str, branch: str, commit_sha: str) -> None:
+        self._request("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit_sha})
 
     def get_pr(self, repo: str, number: int) -> Dict[str, Any]:
         return self._request("GET", f"/repos/{repo}/pulls/{number}")

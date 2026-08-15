@@ -198,6 +198,12 @@ def test_cmd_fix_ci_requires_github_token(monkeypatch, capsys):
 
 
 def test_cmd_fix_ci_reports_partial_success(monkeypatch, capsys):
+    """Diagnosis renders and reports honestly regardless of what happens
+    next. noninteractive=True (the _args() default) means the apply-ci-fix
+    dispatch that follows can't get an approval, so it reports
+    needs_approval rather than silently proceeding or crashing -- this test
+    is about the diagnosis summary wording, dispatch behavior is covered
+    separately below and in test_actions.py."""
     _patch_store(monkeypatch, creds={"GITHUB_TOKEN": "gh-token"})
     fixed = _diagnosis(files_changed=[FileChange(path="backend/app.py", new_content="x = 1", explanation="fix ruff")])
     _patch_brain(
@@ -208,10 +214,26 @@ def test_cmd_fix_ci_reports_partial_success(monkeypatch, capsys):
         ),
     )
     rc = cli_mod.cmd_fix(_args(target="acme/api", ci=True, run_id=456))
+    out = capsys.readouterr().out
+    assert "Diagnosed 1 of 2 independent failures with a proposed fix" in out
+    assert "still broken" in out
+    assert rc == 1
+    assert "needs_approval" in out
+
+
+def test_cmd_fix_ci_skips_dispatch_when_nothing_is_fixable(monkeypatch, capsys):
+    _patch_store(monkeypatch, creds={"GITHUB_TOKEN": "gh-token"})
+    _patch_brain(
+        monkeypatch,
+        multi=MultiFailureResult(
+            diagnoses=[_diagnosis(problem_summary="Frontend bundle error persists", files_changed=[])],
+            job_names=["frontend"],
+        ),
+    )
+    rc = cli_mod.cmd_fix(_args(target="acme/api", ci=True, run_id=456))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Fixed 1 of 2 independent failures" in out
-    assert "still broken" in out
+    assert "Diagnosed 0 of 1 independent failures" in out
 
 
 # ── diagnose_ci_run ─────────────────────────────────────────────────────────

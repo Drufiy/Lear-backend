@@ -100,7 +100,7 @@ def test_agentcore_shaped_case_reports_partial_success(monkeypatch):
 
     assert result.total_count == 4
     assert result.fixed_count == 3
-    assert result.summary() == "Fixed 3 of 4 independent failures"
+    assert result.summary() == "Diagnosed 3 of 4 independent failures with a proposed fix"
     assert len(result.unresolved_summaries()) == 1
     assert "parity" in result.unresolved_summaries()[0]
     combined_paths = {fc.path for fc in result.combined_files_changed()}

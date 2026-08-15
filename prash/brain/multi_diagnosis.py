@@ -95,7 +95,13 @@ class MultiFailureResult:
         return list(combined.values())
 
     def summary(self) -> str:
-        return f"Fixed {self.fixed_count} of {self.total_count} independent failures"
+        # Deliberately not "Fixed X of N": this class only diagnoses and
+        # proposes file changes -- nothing here has opened a PR or changed
+        # anything in the real repository yet. Real bug, caught live
+        # (2026-08-15): the old wording said "Fixed" and every reader of
+        # `prash fix --ci` reasonably believed their CI was unblocked when
+        # it was exactly as broken as before. See PRASH_V2.md §9.
+        return f"Diagnosed {self.fixed_count} of {self.total_count} independent failures with a proposed fix"
 
     def unresolved_summaries(self) -> list[str]:
         return [d.problem_summary for d in self.diagnoses if not d.files_changed]

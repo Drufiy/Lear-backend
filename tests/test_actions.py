@@ -1,8 +1,10 @@
+from prash.actions.apply_ci_fix import ApplyCiFixAction
 from prash.actions.contract import ActionContext, ActionResultStatus, Decision, Target
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
 from prash.actions.restart_pod import RestartPodAction
 from prash.actions.rollback import RollbackAction
+from prash.brain.schemas import FileChange
 from prash.circuit_breaker import CircuitBreaker
 from prash.credentials import CredentialStore
 from prash.dispatch import AskFn, Dispatcher, ExecutionOutcome
@@ -22,6 +24,9 @@ class FakeAsk(AskFn):
 class FakeGitHub:
     def __init__(self, creds=None):
         self.pulls = {}
+        self.refs = {}
+        self.default_branch = "main"
+        self.raise_ref_exists = False
 
     def authenticate(self):
         return True
@@ -33,6 +38,29 @@ class FakeGitHub:
 
     def get_pr(self, repo, number):
         return self.pulls.get(number, {})
+
+    def get_repo(self, repo):
+        return {"default_branch": self.default_branch}
+
+    def get_branch_head_sha(self, repo, branch):
+        return "base-sha"
+
+    def get_commit_tree_sha(self, repo, commit_sha):
+        return "base-tree-sha"
+
+    def create_blob(self, repo, content):
+        return f"blob-sha-{abs(hash(content))}"
+
+    def create_tree(self, repo, base_tree_sha, entries):
+        return "new-tree-sha"
+
+    def create_commit(self, repo, message, tree_sha, parent_sha):
+        return "new-commit-sha"
+
+    def create_ref(self, repo, branch, commit_sha):
+        if self.raise_ref_exists:
+            raise RuntimeError(f"GitHub API 422: Reference already exists for {branch}")
+        self.refs[branch] = commit_sha
 
 
 def _store(tmp_path):
@@ -110,6 +138,71 @@ def test_open_pr_skipped_when_user_declines(tmp_path):
     result = dispatcher.run("open-pr", ctx, ask=FakeAsk(answer=False))
     assert result.outcome.value == "skipped"
     assert result.result.status is ActionResultStatus.SKIPPED
+
+
+def test_apply_ci_fix_runs_end_to_end_with_prompt(tmp_path):
+    changes = [FileChange(path="backend/app.py", new_content="x = 1\n", explanation="fix ruff violation")]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": FakeGitHub()}, "file_changes": changes, "run_id": 456},
+        resource="acme/widget",
+    )
+    dispatcher = Dispatcher(mode=PermissionMode.ASK)
+    dispatcher.register_all([ApplyCiFixAction()])
+    ask = FakeAsk(answer=True)
+    result = dispatcher.run("apply-ci-fix", ctx, ask=ask)
+    assert ask.called is True
+    assert result.ok
+    assert result.result.verification.ok
+    assert result.result.detail["pr_number"] == 1
+    assert result.result.detail["branch"] == "prash/fix-run-456"
+
+
+def test_apply_ci_fix_skipped_when_user_declines(tmp_path):
+    changes = [FileChange(path="backend/app.py", new_content="x = 1\n", explanation="fix ruff violation")]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": FakeGitHub()}, "file_changes": changes, "run_id": 456},
+        resource="acme/widget",
+    )
+    dispatcher = Dispatcher(mode=PermissionMode.ASK)
+    dispatcher.register_all([ApplyCiFixAction()])
+    result = dispatcher.run("apply-ci-fix", ctx, ask=FakeAsk(answer=False))
+    assert result.outcome.value == "skipped"
+    assert result.result.status is ActionResultStatus.SKIPPED
+
+
+def test_apply_ci_fix_fails_cleanly_with_no_file_changes(tmp_path):
+    """Defense in depth: if the action is ever dispatched with an empty
+    file_changes list (a caller bug upstream), it must fail honestly rather
+    than open an empty PR or crash."""
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": FakeGitHub()}, "file_changes": [], "run_id": 456},
+        resource="acme/widget",
+    )
+    action = ApplyCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "no file changes" in result.summary
+
+
+def test_apply_ci_fix_fails_cleanly_when_branch_already_exists(tmp_path):
+    """Real risk this guards against: re-running `prash fix --ci --run-id
+    N` for a run already fixed once must report clearly, not crash with a
+    raw GitHub API exception."""
+    changes = [FileChange(path="backend/app.py", new_content="x = 1\n", explanation="fix ruff violation")]
+    github = FakeGitHub()
+    github.raise_ref_exists = True
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": github}, "file_changes": changes, "run_id": 456},
+        resource="acme/widget",
+    )
+    action = ApplyCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "already proposed" in result.summary
 
 
 def test_restart_pod_reports_failure_honestly_when_pod_missing(tmp_path, monkeypatch):
