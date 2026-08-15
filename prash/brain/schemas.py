@@ -62,6 +62,27 @@ class FileChange(BaseModel):
         return self
 
 
+class DiagnosisOption(BaseModel):
+    """One candidate in a ranked menu of options, for genuinely ambiguous
+    runtime cases. Added 2026-08-15 (PRASH_V2.md §9, "ask, don't quit"):
+    when the brain can't confidently commit to one action, it should present
+    ranked choices with reasoning instead of either guessing or dead-ending
+    on recommended_action=None."""
+
+    action: Literal["restart_pod", "rollback", "scale"] | None = Field(
+        default=None,
+        description=(
+            "The action id for this option, or null for 'take no automated "
+            "action, escalate to a human' as an explicit ranked choice."
+        ),
+    )
+    rationale: str = Field(..., min_length=10, max_length=500, description="Why this specific option, given this specific evidence.")
+    is_default: bool = Field(
+        default=False,
+        description="True for exactly one option in the list: what the brain would pick if forced to choose one.",
+    )
+
+
 class Diagnosis(BaseModel):
     problem_summary: str = Field(..., min_length=10, max_length=500)
     root_cause: str = Field(..., min_length=20, max_length=2000)
@@ -93,7 +114,19 @@ class Diagnosis(BaseModel):
             "pods, rollback for a bad deployment, scale for capacity problems. None if "
             "no action can be determined from the available logs/events. This is a "
             "recommendation for the dispatcher, not an instruction to execute — it still "
-            "goes through the normal permission/approval pipeline (PRASH_V2.md §5)."
+            "goes through the normal permission/approval pipeline (PRASH_V2.md §5). "
+            "Leave unset (null) when `options` is populated instead — see below."
+        ),
+    )
+    options: list[DiagnosisOption] | None = Field(
+        default=None,
+        description=(
+            "A ranked menu of 2+ candidate actions with rationale, for genuinely "
+            "ambiguous runtime cases only — where more than one action is plausible "
+            "and you cannot honestly commit to a single confident recommendation. "
+            "Leave null and use recommended_action alone for confident single-action "
+            "cases; do not use options as a way to avoid committing when you actually "
+            "know the answer (PRASH_V2.md §9, 2026-08-14)."
         ),
     )
 
@@ -110,6 +143,40 @@ class Diagnosis(BaseModel):
         if isinstance(v, str) and v.strip().lower() in ("null", "none", ""):
             return None
         return v
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _normalize_options(cls, v):
+        """Same cross-model quirk as recommended_action above (a literal
+        string "null"/"none" instead of a real JSON null), plus models
+        sometimes emit an empty array instead of omitting an unused
+        optional field -- both mean "no menu here", same as recommended_action
+        alone being used."""
+        if isinstance(v, str) and v.strip().lower() in ("null", "none", ""):
+            return None
+        if isinstance(v, list) and len(v) == 0:
+            return None
+        return v
+
+    @model_validator(mode="after")
+    def validate_options_menu(self) -> "Diagnosis":
+        """A menu needs at least 2 real choices (a 1-option 'menu' should
+        just be recommended_action) and exactly one default pick -- and,
+        for every existing call site that only ever reads recommended_action
+        (the whole CLI/dispatcher today, until Track A's rendering+dispatch
+        side of the options flow lands), recommended_action is auto-derived
+        from the default option so today's behavior degrades gracefully
+        instead of silently going quiet. See PRASH_V2.md §9, 2026-08-15."""
+        if self.options is None:
+            return self
+        if len(self.options) < 2:
+            raise ValueError("options must have at least 2 entries — use recommended_action alone for a single confident choice")
+        defaults = [o for o in self.options if o.is_default]
+        if len(defaults) != 1:
+            raise ValueError(f"exactly one option must be marked is_default, found {len(defaults)}")
+        if self.recommended_action is None:
+            self.recommended_action = defaults[0].action
+        return self
 
     @model_validator(mode="after")
     def coerce_fix_type(self) -> "Diagnosis":

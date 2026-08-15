@@ -142,10 +142,44 @@ DIAGNOSIS_TOOL = {
                     "does NOT help if the image or command is genuinely broken, it will just "
                     "crash-loop again), rollback (the last deployment introduced the problem). "
                     "Leave null if no action can help (e.g. ImagePullBackOff needs a human to "
-                    "fix the image reference — no available action fixes that). Always leave "
-                    "files_changed=[] and fix_type=manual_required for category='runtime' — "
+                    "fix the image reference — no available action fixes that), OR if you are "
+                    "instead populating `options` below for a genuinely ambiguous case. Always "
+                    "leave files_changed=[] and fix_type=manual_required for category='runtime' — "
                     "this is an action recommendation, not a code fix."
                 ),
+            },
+            "options": {
+                "type": ["array", "null"],
+                "description": (
+                    "ONLY for category='runtime' cases genuinely ambiguous between two or more "
+                    "plausible actions — where you cannot honestly commit to one confident "
+                    "recommended_action. A ranked menu the user picks from instead of Prash "
+                    "guessing for them. Leave null/omit for every other case, including "
+                    "confident single-action recommendations (use recommended_action alone) AND "
+                    "confident 'no action helps' cases (recommended_action: null, options: null — "
+                    "do not manufacture a menu out of one real option and a token alternative). "
+                    "Must have at least 2 entries if present. Exactly one entry must have "
+                    "is_default=true — the one you would pick if forced to choose."
+                ),
+                "items": {
+                    "type": "object",
+                    "required": ["rationale", "is_default"],
+                    "properties": {
+                        "action": {
+                            "type": ["string", "null"],
+                            "enum": ["restart_pod", "rollback", "scale", None],
+                            "description": "This option's action id, or null for 'no automated action, escalate to a human' as one of the ranked choices.",
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "1-2 sentences: why THIS option, specifically, given the actual evidence — not a generic description of what the action does.",
+                        },
+                        "is_default": {
+                            "type": "boolean",
+                            "description": "True for exactly one option: what you would pick if forced to choose a single action.",
+                        },
+                    },
+                },
             },
             "files_changed": {
                 "type": "array",
@@ -644,6 +678,79 @@ POD EVENTS: "Failed to pull image \"myapp:v2.1.0\": not found"
   root_cause: "Kubernetes cannot pull myapp:v2.1.0 — the tag doesn't exist in the registry (typo, or the build/push step for this tag never completed)."
   fix_description: "No available action fixes this — restarting the pod would retry pulling the exact same missing tag and fail identically. Verify the image tag was actually pushed, or that the Deployment references the correct tag."
   ← WRONG would be recommended_action="restart_pod" — this is exactly the state restart can never fix; recommending it anyway would waste a real action and give false hope.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ASK, DON'T QUIT — WHEN TO OFFER OPTIONS INSTEAD OF ONE GUESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every example above picks ONE answer: a confident recommended_action, a confident \
+null, or (rarely) a low-confidence tentative restart_pod. Most runtime cases genuinely \
+have one right call and you should keep making it exactly as shown above — the options \
+menu below is not a replacement for that judgment, it's for the narrower case where \
+you cannot honestly make that call.
+
+Use `options` ONLY when two or more actions are actually plausible from the evidence \
+and picking one would mean hiding real uncertainty behind a single number. A textbook \
+case: a CrashLoopBackOff with restart_count=1, empty logs, and events showing BOTH a \
+recent OOM-adjacent memory pressure warning AND a "Back-off restarting" with no other \
+signal — restart_pod (clear the current state) and doing nothing yet (too little \
+evidence, restart_count=1 could just be normal startup jitter) are both genuinely \
+defensible, and choosing between them is exactly what the user should weigh in on, not \
+a coin flip you make for them.
+
+Do NOT use `options` for:
+- Any case matching the four states above cleanly — those have one right call, make it.
+- Padding a real recommendation with a token "or do nothing" alternative just to look \
+  thorough. If you would rank one option far above the other, that's recommended_action \
+  with a lower confidence score, not a menu.
+- Avoiding a low-confidence call you're allowed to make. EXAMPLE 21 above \
+  (recommended_action: "restart_pod", confidence 0.55) is still the right shape when \
+  restart is your one real candidate — options is for when there's a genuine SECOND \
+  candidate, not a way to dodge committing to your best single guess.
+
+Every option needs its own specific rationale — not a generic description of what the \
+action does. Exactly one option is marked is_default: what you'd pick if forced to \
+choose one, same reasoning you'd otherwise put in recommended_action.
+
+EXAMPLE 24 — Genuinely ambiguous CrashLoopBackOff (options, not one guess)
+POD STATUS: problem=CrashLoopBackOff, restart_count=1, ready=false
+POD LOGS: (empty)
+POD EVENTS: "Warning BackOff: Back-off restarting failed container", "Normal Pulled: \
+Successfully pulled image" — no OOM signal, no scheduling failure, restart_count=1
+  category: "runtime", fix_type: "manual_required", confidence: 0.5
+  recommended_action: null (auto-derived from the default option below)
+  options: [
+    {action: "restart_pod", rationale: "Empty logs and a single restart is consistent \
+      with a transient startup wedge — restarting is low-cost and plausibly clears it.", \
+      is_default: true},
+    {action: null, rationale: "restart_count=1 is also consistent with completely normal \
+      first-boot jitter that would resolve on its own within a minute — restarting now \
+      is premature and there's genuinely not enough signal yet to tell these apart.", \
+      is_default: false}
+  ]
+  root_cause: "Pod crash-looped once with no log output and no events beyond a generic \
+  back-off warning — genuinely insufficient evidence to distinguish a wedged startup \
+  from ordinary first-boot behavior at restart_count=1."
+  ← CORRECT: two real, differently-reasoned candidates, honestly presented as a choice \
+  instead of forcing a single confidence number to carry that ambiguity alone.
+
+EXAMPLE 25 — Same symptom shape, NOT ambiguous (recommended_action alone — anti-crutch)
+POD STATUS: problem=CrashLoopBackOff, restart_count=12, ready=false
+POD LOGS: (empty on every attempt)
+POD EVENTS: "Warning BackOff: Back-off restarting failed container" x11, no OOM, no \
+scheduling failure, no other signal — same shape as EXAMPLE 21, just far more restarts
+  category: "runtime", fix_type: "manual_required", confidence: 0.55
+  recommended_action: "restart_pod"
+  options: null
+  root_cause: "Pod has crash-looped 12 times with no log output and no revealing event — \
+  consistent with a wedged process, and 12 consecutive identical failures with zero \
+  variation rules out ordinary startup jitter as the explanation."
+  ← WRONG would be reaching for `options` here just because the surface symptom \
+  (empty logs, generic BackOff) resembles EXAMPLE 24 — restart_count=12 with zero \
+  variation is real evidence AGAINST "maybe just normal startup," not a second \
+  candidate. This is EXAMPLE 21's case, restated: one honest, low-confidence call, not \
+  a menu. Never use options as a way to avoid making the call you're actually equipped \
+  to make.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MATRIX BUILD FAILURES
