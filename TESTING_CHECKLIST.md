@@ -83,14 +83,14 @@ first real use and zero tests ever exercised.
 
 | Case | Command shape | macOS | Windows |
 |---|---|---|---|
-| Real k8s pod, brain declines (`recommended_action: none`) | `prash fix <ns>/<pod>` on a deterministically-broken pod | [ ] | [ ] |
-| Real k8s pod, brain recommends `restart_pod` | Same, on a genuinely wedged pod | [ ] | [ ] |
-| Unknown/missing pod | `prash fix prash-demo/does-not-exist` — clean error, not a stack trace | [ ] | [ ] |
-| CI multi-failure path | `prash fix <owner>/<repo> --ci --run-id <n>` against a real GitHub Actions run (needs `GITHUB_TOKEN`) — **never tested live through the actual CLI, only as a bare function call** | [ ] | [ ] |
-| `--ci` without `--run-id` | Clean error, not a crash | [ ] | [ ] |
-| `--ci` without `GITHUB_TOKEN` set | Clean error naming what's missing | [ ] | [ ] |
-| `rollback` recommended | Confirm it surfaces as a manual next-step message, not a silent no-op or a guess | [ ] | [ ] |
-| `--dry-run` / `--noninteractive` / `--mode` / `--env` | Same checks as 1d, but through `fix` | [ ] | [ ] |
+| Real k8s pod, brain declines (`recommended_action: none`) | `prash fix <ns>/<pod>` on a deterministically-broken pod | [x] 2026-08-15 ✅ real model call against `broken-app`, correctly read the container's actual error message, category=runtime, recommended_action=none, reasoning was accurate (deterministic missing-config failure, restart won't help) | [ ] |
+| Real k8s pod, brain recommends `restart_pod` | Same, on a genuinely wedged pod | [ ] not yet — needs a purpose-built "wedged, not deterministically broken" fixture (a prior session's ConfigMap-flag trick from 2026-08-13), not rebuilt this pass | [ ] |
+| Unknown/missing pod | `prash fix prash-demo/does-not-exist` — clean error, not a stack trace | [x] 2026-08-15 ✅ `pod prash-demo/does-not-exist not found`, exit 2, no traceback | [ ] |
+| CI multi-failure path | `prash fix <owner>/<repo> --ci --run-id <n>` against a real GitHub Actions run (needs `GITHUB_TOKEN`) — **never tested live through the actual CLI, only as a bare function call** | [x] 2026-08-15 ❌→✅ **found the path was diagnosis-only (headline said "Fixed X of N" when nothing was ever fixed — no PR, no dispatch, mode/dry-run/noninteractive all silently ignored). Built the real fix: new `apply-ci-fix` action, logged as a CROSS-TRACK design decision in PRASH_V2.md §9 before writing code. Live-verified twice**: once diagnosing a real 2-independent-failure run, once end-to-end with a real planted bug — real branch, real commit, real PR (#4) opened with the exact correct fix, approved at the real interactive prompt, then closed without merging (throwaway verification). 146/146 passing. | [ ] |
+| `--ci` without `--run-id` | Clean error, not a crash | [x] 2026-08-15 ✅ | [ ] |
+| `--ci` without `GITHUB_TOKEN` set | Clean error naming what's missing | [x] 2026-08-15 ✅ `CI diagnosis needs GITHUB_TOKEN in local .env`, exit 3 | [ ] |
+| `rollback` recommended | Confirm it surfaces as a manual next-step message, not a silent no-op or a guess | [ ] not reachable via `prash fix` today — Track B has no pod→Deployment lookup, so the k8s brain never actually recommends `rollback` from a pod diagnosis (by design, §10 2026-08-09). `_render_no_auto_action`'s rollback-message branch exists in code but has no live path to trigger it through `fix` specifically; `prash run rollback` directly was verified in §1 instead | [ ] |
+| `--dry-run` / `--noninteractive` / `--mode` / `--env` | Same checks as 1d, but through `fix` | [x] 2026-08-15 ⚠️ partially — `--noninteractive` verified live (real CI run, real `NEEDS_APPROVAL` outcome, no hang, no crash) and covered by 2 new unit tests; `--dry-run`/`--mode`/`--env` through `fix` specifically not yet re-verified live (covered indirectly by the same dispatcher code path already proven in §1, but not re-run live through `fix` itself this pass) | [ ] |
 
 ---
 
@@ -140,3 +140,4 @@ Track severity/owner in GitHub Issues per `PRASH_V2.md` §0c. List them here too
 | Issue | Severity | Found by | Link |
 |---|---|---|---|
 | `--dry-run` bypasses the permission engine's REFUSE/PROMPT gate for every mode; terminal output can read e.g. "refuse / succeeded" under `--mode read-only --dry-run` (self-contradictory at a glance, though the audit log's `dry_run: true` field makes it reconstructable). No safety impact — real infra is never touched either way. | P2 | Aradhya, §1c, 2026-08-14 | [#1](https://github.com/Drufiy/prash-v2-backend/issues/1) |
+| Kimi fallback's missing-credentials error names `OPENAI_API_KEY`, never `KIMI_API_KEY` — confusing when both the primary model and the fallback fail in the same run. Doesn't crash, correctly excluded that one sub-diagnosis and reported the rest honestly. | P2 | Aradhya, §2, 2026-08-15 | [#5](https://github.com/Drufiy/prash-v2-backend/issues/5) |
