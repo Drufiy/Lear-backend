@@ -1,0 +1,46 @@
+# Deliberately WEDGED (not deterministically broken) deployment, built to
+# test the "brain recommends restart_pod" path in prash fix. Container runs
+# `sleep infinity` -- it never exits, never restarts, writes nothing to logs
+# -- but its readinessProbe points at a port nothing listens on, so it never
+# becomes Ready. No scheduling-failure event, no crash, no descriptive error
+# anywhere -- just a pod that looks like it might be a slow/stuck startup.
+#
+# Live-tested 2026-08-15 (PRASH_V2.md §10): the brain read this correctly as
+# a deterministic wrong-image config issue (busybox has no HTTP server, so
+# the probe can never pass) and declined to recommend restart_pod -- a
+# defensible, well-reasoned call, not a bug. This is the second fixture
+# (after the 2026-08-13 ConfigMap-flag one) built specifically to probe the
+# ambiguous "restart might help" case and get a confident, correct decline
+# instead. Kept as a reusable fixture regardless -- still exercises the
+# StuckPending classification path -- but don't expect it alone to produce
+# a live restart_pod recommendation; that needs either a genuinely
+# recoverable-by-restart failure (hard to construct reliably) or the
+# "ask, don't quit" options-flow work (§9, 2026-08-14) to make the case moot.
+#
+# Apply:  kubectl apply -f prash/connectors/testdata/wedged-pod.yaml
+# Watch:  kubectl get pods -n prash-demo -w
+# Clean:  kubectl delete -f prash/connectors/testdata/wedged-pod.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wedged-app
+  namespace: prash-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wedged-app
+  template:
+    metadata:
+      labels:
+        app: wedged-app
+    spec:
+      containers:
+        - name: wedged-app
+          image: busybox:latest
+          command: ["sleep", "infinity"]
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
