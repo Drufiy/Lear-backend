@@ -119,6 +119,39 @@ def test_request_secret_dry_run_stores_nothing(tmp_path):
     assert _store(tmp_path).secrets() == {}
 
 
+def test_dry_run_under_read_only_mode_refuses_instead_of_showing_a_plan(tmp_path):
+    """Real bug, caught live (2026-08-14): --dry-run always reported
+    SUCCEEDED with a plan regardless of the permission decision, so
+    `--mode read-only --dry-run` printed "refuse / succeeded" -- the
+    decision label said refused, the status said it worked. execute() was
+    never called either way (so --dry-run's own "never touches real
+    infrastructure" contract always held), but read-only's whole point is
+    "refused outright" and that must be true under --dry-run too."""
+    ctx = _ctx(tmp_path, extra={"connectors": {"github": FakeGitHub()}}, resource="acme/widget")
+    ctx.dry_run = True
+    dispatcher = Dispatcher(mode=PermissionMode.READ_ONLY)
+    dispatcher.register_all([OpenPrAction()])
+    result = dispatcher.run("open-pr", ctx)
+    assert result.outcome is ExecutionOutcome.REFUSED
+    assert result.result.status is ActionResultStatus.SKIPPED
+    assert "refused by permission engine" in result.result.summary
+
+
+def test_dry_run_under_ask_mode_still_shows_a_plan(tmp_path):
+    """The common case must keep working: previewing what WOULD happen
+    before a real approval prompt is the entire point of --dry-run under
+    the default ask mode. Only an actual REFUSE decision should block the
+    plan, not a PROMPT decision."""
+    ctx = _ctx(tmp_path, extra={"connectors": {"github": FakeGitHub()}}, resource="acme/widget")
+    ctx.dry_run = True
+    dispatcher = Dispatcher(mode=PermissionMode.ASK)
+    dispatcher.register_all([OpenPrAction()])
+    result = dispatcher.run("open-pr", ctx)
+    assert result.outcome is ExecutionOutcome.EXECUTED
+    assert result.result.status is ActionResultStatus.SUCCEEDED
+    assert "dry-run plan prepared" in result.result.summary
+
+
 def test_open_pr_runs_end_to_end_with_prompt(tmp_path):
     ctx = _ctx(tmp_path, extra={"connectors": {"github": FakeGitHub()}}, resource="acme/widget")
     dispatcher = Dispatcher(mode=PermissionMode.ASK)

@@ -182,6 +182,25 @@ class Dispatcher:
             environment=ctx.target.environment,
             grant=ctx.grant,
         )
+        if decision is Decision.REFUSE:
+            # Real bug, caught live (2026-08-14): this used to always report
+            # SUCCEEDED with a plan regardless of decision, so `--mode
+            # read-only --dry-run` printed "refuse / succeeded" -- the label
+            # said refused, the status said it worked. --dry-run's own
+            # contract ("never touches real infrastructure") always held
+            # either way since execute() is never called here, but a mode
+            # whose entire point is "refused outright, no prompt" (read-only)
+            # must not quietly show a plan as if that guarantee didn't apply
+            # under --dry-run. PROMPT is deliberately left alone below --
+            # dry-run under ask mode previewing before a real prompt is
+            # exactly the point of the flag.
+            result = ActionResult(
+                status=ActionResultStatus.SKIPPED,
+                summary=f"refused by permission engine ({action.spec.risk_tier.value} tier, mode {self.mode.value})",
+            )
+            audit_id = self._log(action, ctx, decision, result, dry_run=True)
+            return RunResult(ExecutionOutcome.REFUSED, decision, result, plan, audit_id=audit_id)
+
         result = ActionResult(
             status=ActionResultStatus.SUCCEEDED,
             summary=f"dry-run plan prepared ({len(plan.steps)} steps)",
