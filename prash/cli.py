@@ -475,7 +475,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # alone would silently ignore a shell-only override.
     namespace = args.namespace or os.environ.get("KUBE_NAMESPACE", "default")
     console.print(f"[bold]Watching namespace '{namespace}' for CrashLoopBackOff / OOMKilled / ImagePullBackOff / stuck pods...[/bold] (Ctrl+C to stop)")
-    run_watch_loop(namespace, interval=args.interval, console=console)
+    try:
+        run_watch_loop(namespace, interval=args.interval, console=console)
+    except Exception as exc:  # noqa: BLE001 — no cluster configured / unreachable must be a clean stop, not a traceback
+        console.print(f"[red]watch stopped: {exc}[/red]")
+        return 2
     return 0
 
 

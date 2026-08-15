@@ -118,6 +118,35 @@ def test_cmd_watch_cli_flag_wins_over_env(monkeypatch):
     assert seen_namespace["ns"] == "explicit-ns"
 
 
+def test_cmd_watch_no_cluster_is_a_clean_stop_not_a_traceback(monkeypatch, capsys):
+    """Real bug caught live (2026-08-15, Windows §5 probe): `prash watch`
+    with no kube-config raised the kubernetes client's ConfigException out of
+    run_watch_loop uncaught, dying with a raw traceback instead of a clean
+    message like `prash fix`'s. No cluster must stop the watch cleanly."""
+    import prash.cli as cli_mod
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+
+    def raise_config_exception(ns, **kw):
+        from kubernetes.config.config_exception import ConfigException
+
+        raise ConfigException("Invalid kube-config file. No configuration found.")
+
+    monkeypatch.setattr(watcher_mod, "run_watch_loop", raise_config_exception)
+
+    args = Namespace(namespace="prash-demo", interval=None)
+    rc = cmd_watch(args)
+    assert rc == 2
+    captured = capsys.readouterr().out
+    assert "watch stopped:" in captured
+    assert "Invalid kube-config" in captured
+    assert "Traceback" not in captured
+
+
 def _fake_action(risk_tier=RiskTier.SAFE, approval_hint=""):
     spec = ActionSpec(
         id="restart-pod", summary="test", risk_tier=risk_tier, reversible=True, approval_hint=approval_hint
