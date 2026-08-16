@@ -133,6 +133,21 @@ first real use and zero tests ever exercised.
 
 ---
 
+## 6. `prash repl` (REPL stage 1, §6b exit criterion #6)
+
+Built by Aryan (`prash/repl.py`), tested on macOS by Aradhya per §6b's "nobody signs off on their own interface" rule.
+
+| Item | macOS | Windows |
+|---|---|---|
+| Bare `help`/`?` and `exit`/`quit`/`q` | [x] 2026-08-15 ✅ `help` prints full parser usage, session stays alive; `exit` prints "bye" and returns cleanly | [x] built by Aryan on Windows (own commit) |
+| A malformed/unknown command | [x] 2026-08-15 ✅ `bogus-garbage-command` → clean argparse "invalid choice" error, session stays alive (does not exit) | [x] |
+| Context carried into `fix`: bare pod name resolves against the remembered namespace | [x] 2026-08-15 ✅ live-verified against the real cluster — `fix prash-demo/<pod>` then `fix <pod>` (no namespace) produced the identical real diagnosis both times | [ ] |
+| Context carried into `run restart-pod`: bare pod name resolves the same way | [x] 2026-08-15 ✅ live-verified — after establishing context via `fix`, `run restart-pod <pod> --dry-run` (no namespace) correctly resolved and produced a real dry-run plan + audit id | [ ] |
+| Context carried into `watch`: no `--namespace` needed if context is set | [x] 2026-08-15 ✅ live-verified — after `fix prash-demo/<pod>`, `watch --interval 5` (no `--namespace`) printed "Watching namespace 'prash-demo'", detected the real broken pod, deduped correctly on repeat polls | [ ] |
+| Ctrl+C / Ctrl+D ends the session cleanly, no orphaned process | [x] 2026-08-15 ✅ confirmed no orphaned process after a forced terminate mid-`watch` (`ps aux` clean) | [x] 2026-08-15 ✅ (Aryan, `CTRL_C_EVENT` → clean exit 0, "bye", no traceback — see §5 row above) |
+
+---
+
 ## Open issues found during this pass
 
 Track severity/owner in GitHub Issues per `PRASH_V2.md` §0c. List them here too, just as a pointer — don't duplicate the write-up:
