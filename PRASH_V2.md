@@ -351,9 +351,27 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 **UI direction (decided 2026-08-09):** stays CLI/terminal-based — a richer TUI (live-updating panels, better formatting, possibly an actual TUI framework), **not** a desktop/web app. The GUI stays explicitly deferred (§7) — Aradhya confirmed this when asked directly, consistent with §4's original reasoning for why CLI-first matched developer trust expectations (the same reasoning that made "your keys never touch our servers" credible).
 
 **What is NOT decided, and shouldn't be assumed:**
-- Which of the categories above ship first, or in what order. This list is breadth-of-intent, not a priority-ranked backlog — turning it into one is a planning exercise for after the demo, informed by what the demo and any real outside user actually reveal is missing (the same evidence-driven method that produced this pivot, §1).
+- ~~Which of the categories above ship first, or in what order~~ → **SUPERSEDED 2026-08-17, see "Sprint 2 kickoff — tiered plan" below.** The demo/real-user evidence this was meant to wait for still doesn't exist; Aradhya made the sequencing call anyway rather than leave sprint 2 unstarted indefinitely, on the explicit condition that it stays tiered (not flat) precisely to avoid the spreading-thin failure mode this paragraph warns about.
 - Whether every category becomes a full read+write connector or some stay read-only/investigate-only (the same distinction §5's inclusion rule already draws for existing connectors).
 - Timeline. This is explicitly "sprint 2" — no day-by-day breakdown exists for it, unlike §6's table for the current sprint, and none should be invented before the current sprint's demo actually lands.
+
+**Sprint 2 kickoff — tiered plan (decided 2026-08-17, Aradhya).** The hardening-phase exit criteria for Windows testing and the ask-don't-quit live trigger moved to backlog (§9, 2026-08-17) rather than block sprint 2 indefinitely — but the *this* section's own warning about spreading thin still applies, so sprint 2 itself starts tiered, not flat. All ~15 categories from the table above got a Notion task card (workspace: DrufiyAI → Software Development Sprint Board), but only 5 are actually in flight:
+
+*Tier 1 — nothing in Tier 2 starts until one of these lands:*
+- Aradhya — **Diagnosis Brain: depth-of-agency.** Answers the "propose confidently vs. propose cautiously" question from the 2026-08-13 entry below once, before it has to be re-answered for every future connector.
+- Aradhya — Kubernetes Depth (already assigned, in progress)
+- Aryan — REPL Stage 1 + 2 (already assigned, in progress)
+- Anant — Config Wizard (already assigned, in progress)
+- Aradhya — Recorded demo (§6 day 14, deferred 2026-08-14) — now cheap: every `§0b` step is already individually live-verified, this is chaining + recording, not new engineering. Doubles as the evidence source §7b originally wanted before ranking Tier 2/3.
+
+*Tier 2 — starts once a Tier 1 item lands, one connector per person, not a batch:*
+- Aradhya — GitLab CI only (not CircleCI/Jenkins yet — highest overlap, proven connector pattern)
+- Anant — AWS write actions (connector + `execute_command` already exist, just needs wiring + the write-action layer)
+- Aryan — Slack/Discord notifications (closes the exact "one laptop's desktop notification" gap this section already flagged)
+
+*Tier 3 — captured in Notion, deliberately unassigned, discuss as a team before assigning:* CircleCI, Jenkins, Terraform, standalone Docker, Datadog, Grafana, Snyk, gitleaks, PagerDuty, Dependabot, k6/Cypress/Playwright (this last one may collide semantically with the hardening-phase "Testing" checklist task in Notion — same word, different scope, flagged not resolved).
+
+**Also found and fixed while reconciling Notion against real repo state:** `evals/run_eval.py` never loads `.env` (unlike `cmd_fix`, which does via `_export_cluster_env`) — running it without the shell already having `DEEPSEEK_API_KEY`/`KIMI_API_KEY` exported silently falls back to Kimi and can misreport as near-total failure. Logged as a Notion bug card (Impact Area: Backend/Testing), not yet fixed in code — whoever picks up eval-harness ergonomics next should see it there.
 
 **Sharpened 2026-08-13 — this is about depth of agency, not just breadth of platforms.** The list above is *which systems* Prash touches. A separate axis, raised explicitly by Aradhya after the wedged-pod finding (§10, 2026-08-13): *how willing* Prash is to actually act once it's looked at a problem. His words: **"the whole point of prash is that prash actually solves the problem... if Prash just quits then there is no point"** and the bar is to **"replace a company's whole DevOps layer"** — not flag issues for a human to triage, actually carry them through. This reframes the in-progress "should the brain recommend restart_pod more readily" question (§10) as one instance of a bigger, standing question that will come up again for every future platform in the table above: is Prash's default posture "propose confidently, let the permission system be the safety net" or "propose cautiously, only when sure"? Not resolved yet — more live testing planned first (§10) before deciding even the narrow k8s case, let alone the general principle. Aradhya has more ideas here not yet captured — to be added when discussed.
 
@@ -374,6 +392,9 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 ---
 
 ## 9. Decision log
+
+**2026-08-17 — Sprint 2 kickoff finalized: tiered, not flat. Full plan in §7b, not duplicated here.**
+First draft (agent-proposed) assigned all ~11 §7b categories across 3 people simultaneously — caught on review as directly contradicting §7b's own warning two paragraphs above it ("expanding before the demo risks spreading thin instead of deep"), and as missing the Diagnosis Brain track entirely (zero Notion tasks existed for it, despite the 2026-08-13 depth-of-agency question below being arguably the highest-leverage open item — it gates every future connector's default posture). Revised to 5 things in flight (Tier 1) instead of 15, each person with exactly one primary, Tier 2 gated on a Tier 1 landing, Tier 3 explicitly parked. Reduces Anant's load per Aradhya's explicit ask (rebalanced toward Aryan, whose Track C write-action ownership was a better fit for several items than the first draft's assignment anyway). Notion Sprint Board updated to match; `k6/Cypress/Playwright` deliberately left unassigned pending a team discussion about whether it collides with the hardening-phase "Testing" task.
 
 **2026-08-17 — Hardening-phase exit criteria #2 (Windows checklist) and #5 (ask-don't-quit live trigger) moved to backlog. Sprint 2 starts now, not blocked on them.**
 Aradhya's call. §6b originally gated all of §7b on both criteria being met first; ~37 rows of the Windows column in `TESTING_CHECKLIST.md` are still unchecked (blocked on Aryan's machine/cluster access, not on anything Aradhya can close), and the ask-don't-quit live trigger has no forcing function beyond real usage happening to surface a genuinely ambiguous case (already decided 2026-08-15 not to chase via more synthetic fixtures). Rather than let sprint 2 stay blocked indefinitely on two items neither of which has a clear path to closing on a timeline, they're backlog now — still tracked (Notion: "Testing" and "Test Documentation" tasks, both unassigned), not dropped. Sprint 2 division starts this entry.
