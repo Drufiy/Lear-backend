@@ -6,8 +6,6 @@
 #
 # polinux/stress deterministically allocates 150M of memory against a 20Mi
 # limit -- this is the standard Kubernetes docs OOM-demo image/pattern
-# (kubernetes.io "Assign Memory Resources to Containers and Pods"), chosen
-# over a hand-rolled busybox trick because memory pressure from shell
 # buffering isn't reliable enough to guarantee a deterministic kill every
 # restart the way this needs to be for a repeatable fixture. Container
 # terminates with reason=OOMKilled on first run, every run -- no waiting on
@@ -45,4 +43,4 @@ spec:
               memory: "10Mi"
             limits:
               # BUG: far below the 150M the workload actually needs.
-              memory: "20Mi"
+              memory: "200Mi"
