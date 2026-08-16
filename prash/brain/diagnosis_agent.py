@@ -8,6 +8,7 @@ functionality was dropped (see prash/brain/repo_memory.py) -- diagnose_failure()
 already treats repo_memory as optional (defaults to None) everywhere it's used, so
 this port required zero logic changes to accommodate that.
 """
+import asyncio
 import base64
 import hashlib
 import json
@@ -141,11 +142,12 @@ DIAGNOSIS_TOOL = {
                     "addresses this failure: restart_pod (clears a wedged/stuck container — "
                     "does NOT help if the image or command is genuinely broken, it will just "
                     "crash-loop again), rollback (the last deployment introduced the problem). "
-                    "Leave null if no action can help (e.g. ImagePullBackOff needs a human to "
-                    "fix the image reference — no available action fixes that), OR if you are "
-                    "instead populating `options` below for a genuinely ambiguous case. Always "
-                    "leave files_changed=[] and fix_type=manual_required for category='runtime' — "
-                    "this is an action recommendation, not a code fix."
+                    "Leave null if no action can help, OR if you are instead populating `options` "
+                    "below for a genuinely ambiguous case, OR — importantly — if you are proposing "
+                    "a corrected Deployment manifest in files_changed (the manifest change IS the "
+                    "fix; a restart on top of it is noise). Only leave files_changed=[] for "
+                    "category='runtime' when you have no manifest repo available, or when the fix "
+                    "genuinely isn't in the manifest. See the KUBERNETES / RUNTIME FAILURES section."
                 ),
             },
             "options": {
@@ -589,10 +591,36 @@ You'll recognize this from the input format — it looks like this instead of
   - Warning BackOff: Back-off restarting failed container (x15)
   - Normal Pulled: Successfully pulled image "myapp:v2"
 
-There is NO code diff for a running pod. category MUST be "runtime",
-files_changed MUST be [] (fix_type will auto-resolve to manual_required),
-and you communicate what to do via recommended_action instead: "restart_pod",
-"rollback", or null if no available action can help.
+category MUST be "runtime". How you express the fix depends on whether you
+have been given access to the repository holding the Deployment manifest:
+
+**WITHOUT a manifest repo** (no investigation tools available): there is no
+code diff you can write. files_changed MUST be [] (fix_type auto-resolves to
+manual_required) and you communicate what to do via recommended_action:
+"restart_pod", "rollback", or null if no available action can help.
+
+**WITH a manifest repo** (fetch_file / list_directory / search_code are
+available to you): most real Kubernetes failures are NOT fixed by restarting —
+they are fixed by editing the Deployment. A missing config file, a wrong image
+tag, an unmounted ConfigMap, an OOM that needs a higher memory limit, a bad
+command: every one of these is a manifest change. In that case DO produce
+files_changed with the corrected manifest, exactly as you would for a CI fix:
+  1. Find the manifest — search_code for the Deployment's name, or
+     list_directory the usual homes (k8s/, manifests/, deploy/, charts/,
+     .k8s/). The pod name is usually "<deployment>-<replicaset>-<random>", so
+     strip the last two dash-segments to get the Deployment name to search for.
+  2. fetch_file it, so you are editing the real current content, not a guess.
+  3. Return the COMPLETE corrected file in files_changed[].new_content —
+     changing ONLY what fixes this failure, preserving all other fields,
+     comments, and formatting exactly.
+Set recommended_action: null when you are proposing a manifest fix — the
+manifest change IS the fix; a restart on top of it would be noise (the new
+rollout replaces the pod anyway).
+
+Still return files_changed=[] with an honest explanation when the fix genuinely
+is not in the manifest — a bug in the application's own source that happens to
+crash on boot, or a cluster-capacity problem no file change addresses. And a
+transient/wedged pod is still a restart_pod case, not a manifest edit.
 
 CRITICAL — restart_pod is not a universal fix. It only helps a pod that's
 STUCK or WEDGED (a transient hang, a bad connection that needs a fresh
@@ -641,15 +669,32 @@ THE FOUR STATES:
   scheduling failure event at all (possibly just slow-starting —
   recommended_action: "restart_pod", low confidence ~0.5).
 
-EXAMPLE 20 — CrashLoopBackOff, broken image (manual_required, no action)
+EXAMPLE 20 — CrashLoopBackOff, missing config, NO manifest repo (no action available)
 POD STATUS: problem=CrashLoopBackOff, restart_count=23
 POD LOGS: "FileNotFoundError: [Errno 2] No such file or directory: '/app/config.yaml'"
 (identical on every restart attempt — this is deterministic, not transient)
+No investigation tools available — you cannot see or edit the Deployment.
   category: "runtime", fix_type: "manual_required", confidence: 0.9
   recommended_action: null, files_changed: []
   root_cause: "Container exits on startup because /app/config.yaml is missing from the image — the same FileNotFoundError repeats on every restart attempt, so this is not a transient/wedged process."
   fix_description: "The image build is missing config.yaml. Restarting the pod will not help — it will hit the identical error immediately. The Dockerfile or build pipeline needs to include this file."
   ← WRONG would be recommended_action="restart_pod" — the error is 100% deterministic, restart changes nothing.
+
+EXAMPLE 20b — THE SAME FAILURE, but WITH a manifest repo (propose the real fix)
+Identical pod state and logs as EXAMPLE 20. This time fetch_file/search_code ARE
+available, so the Deployment is readable and editable.
+  Investigation: search_code("name: broken-app") → k8s/broken-app.yaml;
+  fetch_file("k8s/broken-app.yaml") → the Deployment mounts no ConfigMap, and
+  the container expects /app/config.yaml.
+  category: "runtime", fix_type: "review_recommended", confidence: 0.8
+  recommended_action: null
+  files_changed: [{path: "k8s/broken-app.yaml", new_content: "<the COMPLETE manifest, unchanged except for an added ConfigMap volume + volumeMount putting config.yaml at /app/config.yaml>", explanation: "Mount the app-config ConfigMap at /app/config.yaml, which the container requires at startup and which nothing currently provides."}]
+  root_cause: "The container requires /app/config.yaml at startup but the Deployment mounts no volume providing it, so every replica exits immediately with FileNotFoundError."
+  fix_description: "Adds the missing ConfigMap volume + mount to the Deployment so config.yaml exists at the path the container reads. Restarting was never going to help — nothing in the pod spec supplied this file."
+  ← THIS is the difference that matters. Same evidence, same correct reasoning about restart
+    being useless — but instead of stopping at "a human must fix the Deployment", you hand the
+    human the corrected Deployment. Do not fall back to files_changed=[] just because the
+    category is "runtime"; if you can read the manifest, fix the manifest.
 
 EXAMPLE 21 — CrashLoopBackOff, no clear cause (manual_required, tentative restart)
 POD STATUS: problem=CrashLoopBackOff, restart_count=4
@@ -1019,6 +1064,7 @@ async def diagnose_failure(
     similar_fixes: list[dict] | None = None,        # Legacy: past verified fixes for this repo
     repo_memory: RepoMemory | None = None,          # Structured repo-specific memory context
     investigation_context: dict | None = None,
+    investigation_max_steps: int = 2,
 ) -> Diagnosis:
     """
     Run CI log diagnosis via the configured primary model (DeepSeek V4 Pro or Kimi K2.6).
@@ -1112,6 +1158,7 @@ async def diagnose_failure(
             run_id=run_id,
             call_type=call_type,
             model=model,
+            max_steps=investigation_max_steps,
         )
     else:
         raw_args = await call_with_tool(
@@ -1684,6 +1731,104 @@ def _gh_headers(token: str) -> dict:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+# ── Deployment manifest discovery (PRASH_V2.md §9, 2026-08-16) ────────────────
+
+# Bounded so a huge monorepo can't turn one diagnosis into hundreds of API
+# calls. Ordered heuristically: conventional manifest homes first.
+_MANIFEST_HINT_DIRS = ("k8s", "kubernetes", "manifests", "deploy", "deployment", "charts", "testdata", "infra")
+_MAX_MANIFEST_CANDIDATES = 25
+_MAX_MANIFEST_BYTES = 100_000
+
+
+def deployment_name_from_pod(pod_name: str) -> str:
+    """`broken-app-6b58dc6d7b-fphhd` -> `broken-app`.
+
+    Deployment-managed pods are named `<deployment>-<replicaset>-<random>`, so
+    dropping the last two dash-segments recovers the Deployment name. Falls
+    back to the full name for pods that don't match that shape (bare pods,
+    StatefulSet members), which is still the right thing to search for.
+    """
+    parts = pod_name.rsplit("-", 2)
+    return parts[0] if len(parts) == 3 else pod_name
+
+
+async def find_deployment_manifest(
+    repo: str,
+    access_token: str,
+    deployment: str,
+    default_branch: str = "main",
+) -> tuple[str | None, str | None]:
+    """Locate the YAML manifest defining ``deployment``. Returns (path, content).
+
+    Uses the git tree API, NOT the code search API. Found the hard way on the
+    first live run (2026-08-16): GitHub's code search returned 0 results for a
+    file that provably exists in the repo -- its index lags and is unreliable
+    for private/recent repos -- so the model correctly-but-wrongly concluded
+    "the manifest is not in this repository" and declined. The tree API is
+    deterministic: it lists every file, with no index in the path.
+
+    Deliberately done BEFORE the model call rather than left to the model's own
+    search: discovery is a mechanical lookup, and handing over the real content
+    beats hoping the model guesses the right query.
+    """
+    headers = _gh_headers(access_token)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
+                headers=headers,
+                params={"recursive": "1"},
+            )
+            if resp.status_code != 200:
+                logger.info(f"manifest discovery: tree fetch returned {resp.status_code} for {repo}")
+                return None, None
+            tree = resp.json().get("tree", [])
+        except Exception as exc:  # noqa: BLE001 — discovery is best-effort, never fatal
+            logger.info(f"manifest discovery: tree fetch failed for {repo}: {exc}")
+            return None, None
+
+        candidates = [
+            item["path"]
+            for item in tree
+            if item.get("type") == "blob"
+            and item.get("path", "").endswith((".yaml", ".yml"))
+            and (item.get("size") or 0) <= _MAX_MANIFEST_BYTES
+        ]
+        # Conventional manifest locations first, then everything else.
+        candidates.sort(key=lambda p: (not any(d in p.lower() for d in _MANIFEST_HINT_DIRS), len(p)))
+        candidates = candidates[:_MAX_MANIFEST_CANDIDATES]
+
+        async def _read(path: str) -> tuple[str, str] | None:
+            try:
+                r = await client.get(
+                    f"https://api.github.com/repos/{repo}/contents/{path}",
+                    headers=headers,
+                    params={"ref": default_branch},
+                )
+                if r.status_code != 200:
+                    return None
+                raw = r.json().get("content", "")
+                return path, base64.b64decode(raw.replace("\n", "")).decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                return None
+
+        results = await asyncio.gather(*(_read(p) for p in candidates))
+
+    for found in results:
+        if not found:
+            continue
+        path, content = found
+        # Must both name the deployment and actually be a Deployment-ish
+        # object -- a ConfigMap that merely mentions the name isn't the file
+        # whose spec needs editing.
+        if f"name: {deployment}" in content and "kind: Deployment" in content:
+            logger.info(f"manifest discovery: {deployment} -> {path}")
+            return path, content
+
+    logger.info(f"manifest discovery: no manifest found for {deployment} in {repo}")
+    return None, None
 
 
 def _build_user_prompt(

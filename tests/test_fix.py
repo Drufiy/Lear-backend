@@ -65,7 +65,9 @@ def _patch_store(monkeypatch, creds=None):
 
 
 def _patch_brain(monkeypatch, diagnosis=None, multi=None):
-    async def fake_diagnose_k8s_pod(namespace, pod):
+    async def fake_diagnose_k8s_pod(namespace, pod, **kwargs):
+        # **kwargs absorbs repo/access_token/default_branch, added 2026-08-16
+        # when the k8s path gained manifest-repo access (PRASH_V2.md §9).
         if diagnosis is None:
             raise fix_mod.FixTargetError(f"pod {namespace}/{pod} not found")
         return diagnosis
@@ -320,3 +322,136 @@ def test_diagnose_ci_run_passes_logs_to_multi_diagnosis(monkeypatch):
     assert seen["repo_full_name"] == "acme/api"
     assert "=== backend/1_Run tests.txt ===" in seen["logs"]
     assert seen["workflow_name"] == "github run 456"
+
+
+# ── the manifest-fix path (PRASH_V2.md §9, 2026-08-16) ──────────────────────
+
+_MANIFEST_FIX = {
+    "recommended_action": None,
+    "fix_type": "review_recommended",
+    "files_changed": [
+        FileChange(
+            path="k8s/broken-app.yaml",
+            new_content="apiVersion: apps/v1\nkind: Deployment\n# corrected\n",
+            explanation="Mount the missing config.yaml the container requires at startup",
+        )
+    ],
+}
+
+
+def _patch_k8s_gather(monkeypatch, captured):
+    """Mock only Track B's connector reads, so diagnose_k8s_pod's real body
+    (including the investigation_context wiring) is what's under test."""
+    pod = PodStatus(name="api-7f9d", namespace="production", phase="Running", problem="CrashLoopBackOff", restart_count=9, ready=False)
+    monkeypatch.setattr(fix_mod, "get_pod_status", lambda ns, name: [pod])
+    monkeypatch.setattr(fix_mod, "get_pod_logs", lambda ns, name: "config file missing")
+    monkeypatch.setattr(fix_mod, "get_pod_events", lambda ns, name: [])
+
+    async def fake_diagnose_failure(**kwargs):
+        captured.update(kwargs)
+        return _diagnosis()
+
+    monkeypatch.setattr(fix_mod, "diagnose_failure", fake_diagnose_failure)
+
+
+def test_diagnose_k8s_pod_without_repo_gets_no_investigation_tools(monkeypatch):
+    """No manifest repo => no investigation_context => the brain physically
+    cannot read a manifest, and per the prompt must fall back to
+    recommended_action only. This is the pre-2026-08-16 behavior, preserved."""
+    captured = {}
+    _patch_k8s_gather(monkeypatch, captured)
+    asyncio.run(fix_mod.diagnose_k8s_pod("production", "api-7f9d"))
+    assert captured["investigation_context"] is None
+    assert captured["repo_full_name"] == "production/api-7f9d"
+
+
+def test_diagnose_k8s_pod_with_repo_wires_investigation_context(monkeypatch):
+    """The root-cause fix (§9, 2026-08-16): with a manifest repo the brain gets
+    fetch_file/list_directory/search_code pointed at it, and repo_full_name
+    must name that repo -- otherwise the prompt would claim one identity while
+    the investigation tools read from another."""
+    captured = {}
+    _patch_k8s_gather(monkeypatch, captured)
+    asyncio.run(fix_mod.diagnose_k8s_pod("production", "api-7f9d", repo="acme/infra", access_token="gh-token"))
+    ctx = captured["investigation_context"]
+    assert ctx == {"repo_full_name": "acme/infra", "access_token": "gh-token", "default_branch": "main"}
+    assert captured["repo_full_name"] == "acme/infra"
+
+
+def test_diagnose_k8s_pod_repo_without_token_stays_unwired(monkeypatch):
+    """A repo with no token can't call the GitHub API — must not half-wire."""
+    captured = {}
+    _patch_k8s_gather(monkeypatch, captured)
+    asyncio.run(fix_mod.diagnose_k8s_pod("production", "api-7f9d", repo="acme/infra"))
+    assert captured["investigation_context"] is None
+
+
+def test_cmd_fix_manifest_changes_dispatch_apply_manifest_fix(tmp_path, monkeypatch, capsys):
+    """The whole point of the 2026-08-16 work: a runtime diagnosis carrying a
+    corrected manifest opens a real PR instead of dead-ending on 'a human must
+    edit the Deployment'."""
+    _patch_store(monkeypatch, creds={"GITHUB_TOKEN": "gh-token", "PRASH_MANIFEST_REPO": "acme/infra"})
+    _patch_brain(monkeypatch, diagnosis=_diagnosis(**_MANIFEST_FIX))
+    monkeypatch.setenv("PRASH_CIRCUIT_STATE_PATH", str(tmp_path / "circuit.json"))
+    monkeypatch.setenv("PRASH_AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
+
+    seen = {}
+
+    class FakeGitHub:
+        def authenticate(self):
+            return True
+
+        def get_repo(self, repo):
+            seen["repo"] = repo
+            return {"default_branch": "main"}
+
+        def get_branch_head_sha(self, repo, branch):
+            return "base-sha"
+
+        def get_commit_tree_sha(self, repo, sha):
+            return "tree-sha"
+
+        def create_blob(self, repo, content):
+            seen["content"] = content
+            return "blob-sha"
+
+        def create_tree(self, repo, base, entries):
+            seen["paths"] = [e["path"] for e in entries]
+            return "new-tree"
+
+        def create_commit(self, repo, message, tree, parent):
+            return "commit-sha"
+
+        def create_ref(self, repo, branch, sha):
+            seen["branch"] = branch
+
+        def create_pr(self, repo, title, head, base, body=""):
+            seen["title"] = title
+            return {"number": 7, "html_url": "https://github.com/acme/infra/pull/7", "state": "open"}
+
+        def get_pr(self, repo, number):
+            return {"number": number, "state": "open"}
+
+    monkeypatch.setattr(cli_mod, "_make_connectors", lambda creds: {"github": FakeGitHub(), "k8s": None})
+
+    rc = cli_mod.cmd_fix(_args(mode="bypass", noninteractive=True))
+    assert rc == 0
+    assert seen["repo"] == "acme/infra"          # the manifest repo, not the pod
+    assert seen["paths"] == ["k8s/broken-app.yaml"]
+    assert seen["branch"] == "prash/fix-production-api-7f9d"
+    assert "Kubernetes manifest diagnosis" in seen["title"]
+    assert "opened PR #7" in capsys.readouterr().out
+
+
+def test_cmd_fix_manifest_changes_without_repo_reports_instead_of_dropping(monkeypatch, capsys):
+    """Defensive: the prompt forbids files_changed with no repo, but if it ever
+    happens the fix must be surfaced, never silently discarded."""
+    _patch_store(monkeypatch)
+    _patch_brain(monkeypatch, diagnosis=_diagnosis(**_MANIFEST_FIX))
+    dispatches = []
+    monkeypatch.setattr(cli_mod, "_build_dispatcher", lambda mode: dispatches.append(mode) or None)
+
+    rc = cli_mod.cmd_fix(_args())
+    assert rc == 0
+    assert dispatches == []
+    assert "no manifest repo is configured" in capsys.readouterr().out

@@ -13,10 +13,17 @@ seam Aradhya's schema built for us (§6 cross-track, schemas.py docstring).
 
 from __future__ import annotations
 
+from typing import Optional
+
 from rich.panel import Panel
 
 from . import ui
-from .brain.diagnosis_agent import diagnose_failure, format_k8s_context
+from .brain.diagnosis_agent import (
+    deployment_name_from_pod,
+    diagnose_failure,
+    find_deployment_manifest,
+    format_k8s_context,
+)
 from .brain.log_fetcher import fetch_workflow_logs
 from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
 from .brain.schemas import Diagnosis
@@ -49,11 +56,32 @@ def recommended_action_id(recommended_action: str | None) -> str | None:
     return _AUTO_ACTIONS.get(recommended_action)
 
 
-async def diagnose_k8s_pod(namespace: str, pod: str) -> Diagnosis:
+async def diagnose_k8s_pod(
+    namespace: str,
+    pod: str,
+    repo: Optional[str] = None,
+    access_token: Optional[str] = None,
+    default_branch: str = "main",
+) -> Diagnosis:
     """Gather Track B's status/logs/events for a pod, feed them to Track D's
     brain, and return the Diagnosis. Raises FixTargetError if the pod isn't
     there — get_pod_status() is 404-as-empty-list by contract, so an empty
-    list is the not-found signal, not an exception."""
+    list is the not-found signal, not an exception.
+
+    When ``repo`` + ``access_token`` are supplied, the brain additionally gets
+    the investigation tools (fetch_file / list_directory / search_code) pointed
+    at the repository holding the Deployment manifest, so it can read the
+    manifest and propose a corrected one.
+
+    Why this exists (root cause found 2026-08-16, PRASH_V2.md §9): without a
+    repo, a runtime diagnosis can only ever answer restart_pod / rollback /
+    scale -- and since most real Kubernetes failures (missing config, bad image
+    tag, OOM limits, unmounted ConfigMap) are fixed by editing a manifest, not
+    by restarting, Prash correctly declined essentially every real case. Six
+    live diagnoses, six honest "no action can help" verdicts. Correct every
+    time, and useless every time. Reading the manifest is what turns that into
+    a fix.
+    """
     pods = get_pod_status(namespace, pod)
     if not pods:
         raise FixTargetError(f"pod {namespace}/{pod} not found")
@@ -61,11 +89,52 @@ async def diagnose_k8s_pod(namespace: str, pod: str) -> Diagnosis:
     logs = get_pod_logs(namespace, pod)
     events = get_pod_events(namespace, pod)
     context = format_k8s_context(pod_status, logs, events)
+
+    investigation_context = None
+    if repo and access_token:
+        investigation_context = {
+            "repo_full_name": repo,
+            "access_token": access_token,
+            "default_branch": default_branch,
+        }
+        # Resolve the Deployment manifest deterministically and hand the model
+        # its real content, rather than leaving discovery to search_code --
+        # which returned zero results for a file that provably exists when this
+        # was first run live (2026-08-16). See find_deployment_manifest().
+        deployment = deployment_name_from_pod(pod)
+        manifest_path, manifest_content = await find_deployment_manifest(
+            repo, access_token, deployment, default_branch
+        )
+        if manifest_path:
+            context += (
+                f"\n\n=== DEPLOYMENT MANIFEST ({manifest_path}) ===\n"
+                f"{manifest_content}\n"
+                f"(This is the live content of the manifest defining Deployment "
+                f"'{deployment}', already fetched for you from {repo}. If the fix is a "
+                f"manifest change, return the COMPLETE corrected file in files_changed "
+                f"with path exactly '{manifest_path}'.)"
+            )
+
     return await diagnose_failure(
         logs=context,
-        repo_full_name=f"{namespace}/{pod}",
+        # With a manifest repo wired up, the brain's investigation tools read
+        # from it, so repo_full_name must name that repo -- otherwise the
+        # prompt would claim one identity while fetch_file used another. The
+        # pod's own identity is already carried in the POD STATUS block.
+        repo_full_name=repo or f"{namespace}/{pod}",
         commit_message="(no commit — Kubernetes pod diagnosis)",
         workflow_name="kubernetes",
+        investigation_context=investigation_context,
+        # CI diagnosis arrives with the failing logs already in the prompt, so
+        # investigation there is a bonus lookup or two and 2 steps is plenty.
+        # Finding a Deployment manifest is the opposite: the model starts with
+        # no idea where it lives, so it needs search_code -> (list_directory)
+        # -> fetch_file BEFORE it can write anything. Caught live on the first
+        # real run (2026-08-16): at max_steps=2 the model was cut off
+        # mid-investigation and the forced final call came back still asking
+        # for a file (a fetch_file tool call where submit_diagnosis was
+        # required), which then burned the whole diagnosis.
+        investigation_max_steps=5 if investigation_context else 2,
     )
 
 

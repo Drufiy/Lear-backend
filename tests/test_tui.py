@@ -60,7 +60,15 @@ def test_actions_table_shows_registered_actions():
             await pilot.press("a")
             await pilot.pause()
             table = pilot.app.query_one("#actions-table")
-            assert len(table.rows) == 5  # open-pr, request-secret, restart-pod, rollback, apply-ci-fix
+            # Derived from the real registry rather than hardcoded: this
+            # asserted == 5 and broke the moment apply-manifest-fix was
+            # registered (2026-08-16). The table showing every registered
+            # action is the actual invariant; the count is incidental.
+            from prash.cli import _build_dispatcher
+            from prash.permissions import PermissionMode
+
+            expected = len(_build_dispatcher(PermissionMode.ASK).available)
+            assert len(table.rows) == expected
             row = table.get_row(next(iter(table.rows)))
             assert row[0] == "[bold]open-pr[/]"
             assert "safe" in row[1]

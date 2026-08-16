@@ -31,22 +31,23 @@ from .contract import (
 )
 
 
-class ApplyCiFixAction(Action):
-    spec = ActionSpec(
-        id="apply-ci-fix",
-        summary="Apply a diagnosed CI fix as a real branch + commit, then open a pull request",
-        risk_tier=RiskTier.SAFE,
-        reversible=True,
-        capabilities=("repo", "apply_fix", "open_pr"),
-        approval_hint="Writes a new branch and commit under the GITHUB_TOKEN in your local credentials file, then opens a PR. Nothing merges without a separate human review on GitHub.",
-    )
+class _ApplyFixBase(Action):
+    """Shared implementation: turn a diagnosis's proposed file changes into a
+    real branch + commit + pull request, entirely over GitHub's Git Data API.
+
+    Subclasses differ only in identity (action id, so the audit log says
+    honestly what happened), branch naming, and the wording of the PR. The
+    actual write path is identical -- a CI fix and a Kubernetes manifest fix
+    are the same operation on different files.
+    """
+
+    _source_label = "diagnosis"
 
     def _github(self, ctx: ActionContext) -> GitHubConnector:
         return ctx.extra["connectors"]["github"]
 
     def _branch_name(self, ctx: ActionContext) -> str:
-        run_id = ctx.extra.get("run_id")
-        return f"prash/fix-run-{run_id}" if run_id else "prash/fix"
+        return "prash/fix"
 
     def _file_changes(self, ctx: ActionContext) -> list[Any]:
         # FileChange.new_content is guaranteed non-empty by its own model
@@ -92,7 +93,7 @@ class ApplyCiFixAction(Action):
                 entries.append({"path": fc.path, "mode": "100644", "type": "blob", "sha": blob_sha})
             new_tree_sha = gh.create_tree(repo, base_tree_sha, entries)
 
-            message = ctx.extra.get("commit_message") or f"Prash: fix {len(changes)} file(s) from CI diagnosis"
+            message = ctx.extra.get("commit_message") or f"Prash: fix {len(changes)} file(s) from {self._source_label}"
             commit_sha = gh.create_commit(repo, message, new_tree_sha, base_sha)
 
             gh.create_ref(repo, branch, commit_sha)
@@ -105,9 +106,9 @@ class ApplyCiFixAction(Action):
                 )
             return ActionResult(status=ActionResultStatus.FAILED, summary=f"could not write the fix commit: {exc}")
 
-        title = ctx.extra.get("title") or f"Prash: fix {len(changes)} file(s) from CI diagnosis"
+        title = ctx.extra.get("title") or f"Prash: fix {len(changes)} file(s) from {self._source_label}"
         body = ctx.extra.get("body") or (
-            "Automated fix by Prash, from a CI diagnosis.\n\n"
+            f"Automated fix by Prash, from a {self._source_label}.\n\n"
             + "\n".join(f"- `{fc.path}`: {fc.explanation}" for fc in changes)
         )
         try:
@@ -134,3 +135,50 @@ class ApplyCiFixAction(Action):
             return VerificationResult(ok=False, detail="could not confirm PR exists")
         ok = pr.get("state") == "open"
         return VerificationResult(ok=ok, detail=f"PR #{pr['number']} state={pr.get('state')}")
+
+
+class ApplyCiFixAction(_ApplyFixBase):
+    _source_label = "CI diagnosis"
+    spec = ActionSpec(
+        id="apply-ci-fix",
+        summary="Apply a diagnosed CI fix as a real branch + commit, then open a pull request",
+        risk_tier=RiskTier.SAFE,
+        reversible=True,
+        capabilities=("repo", "apply_fix", "open_pr"),
+        approval_hint="Writes a new branch and commit under the GITHUB_TOKEN in your local credentials file, then opens a PR. Nothing merges without a separate human review on GitHub.",
+    )
+
+    def _branch_name(self, ctx: ActionContext) -> str:
+        run_id = ctx.extra.get("run_id")
+        return f"prash/fix-run-{run_id}" if run_id else "prash/fix"
+
+
+class ApplyManifestFixAction(_ApplyFixBase):
+    """The Kubernetes counterpart (PRASH_V2.md §9, 2026-08-16).
+
+    Same write path as apply-ci-fix, different identity so the audit log
+    doesn't claim a Kubernetes manifest fix came from a CI run. Exists because
+    the runtime path previously had no way to express "the fix is a manifest
+    change" -- only restart_pod / rollback / scale -- which is why six
+    consecutive live diagnoses correctly, and uselessly, declined.
+    """
+
+    _source_label = "Kubernetes manifest diagnosis"
+    spec = ActionSpec(
+        id="apply-manifest-fix",
+        summary="Apply a diagnosed Kubernetes manifest fix as a real branch + commit, then open a pull request",
+        risk_tier=RiskTier.SAFE,
+        reversible=True,
+        capabilities=("repo", "apply_fix", "open_pr"),
+        approval_hint="Writes a new branch and commit to the manifest repository under the GITHUB_TOKEN in your local credentials file, then opens a PR. Nothing is applied to the cluster and nothing merges without a separate human review on GitHub.",
+    )
+
+    def _branch_name(self, ctx: ActionContext) -> str:
+        # Namespaced by the pod being fixed, so two different broken pods don't
+        # collide on one branch. ctx.target.resource is the repo here, so the
+        # pod identity comes in via extra.
+        pod = ctx.extra.get("pod")
+        namespace = ctx.extra.get("namespace")
+        if namespace and pod:
+            return f"prash/fix-{namespace}-{pod}"
+        return "prash/fix-manifest"

@@ -29,7 +29,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 from . import ui
-from .actions.apply_ci_fix import ApplyCiFixAction
+from .actions.apply_ci_fix import ApplyCiFixAction, ApplyManifestFixAction
 from .actions.contract import (
     ActionContext,
     MissingSecretError,
@@ -184,7 +184,14 @@ def _make_context(
 def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
     dispatcher = Dispatcher(mode=mode, breaker=CircuitBreaker.default())
     dispatcher.register_all(
-        [OpenPrAction(), RequestSecretAction(), RestartPodAction(), RollbackAction(), ApplyCiFixAction()]
+        [
+            OpenPrAction(),
+            RequestSecretAction(),
+            RestartPodAction(),
+            RollbackAction(),
+            ApplyCiFixAction(),
+            ApplyManifestFixAction(),
+        ]
     )
     return dispatcher
 
@@ -323,8 +330,14 @@ def cmd_fix(args: argparse.Namespace) -> int:
         console.print(f"[red]{exc}[/red]")
         return 2
 
+    manifest_repo = getattr(args, "repo", None) or creds.get("PRASH_MANIFEST_REPO") or None
+    gh_token = creds.get("GITHUB_TOKEN") or None
+    if manifest_repo and not gh_token:
+        console.print("[yellow]--repo given but GITHUB_TOKEN is not set — diagnosing without manifest access[/yellow]")
+        manifest_repo = None
+
     try:
-        diagnosis = asyncio.run(diagnose_k8s_pod(namespace, pod))
+        diagnosis = asyncio.run(diagnose_k8s_pod(namespace, pod, repo=manifest_repo, access_token=gh_token))
     except FixTargetError as exc:
         console.print(f"[red]{exc}[/red]")
         return 2
@@ -332,6 +345,31 @@ def cmd_fix(args: argparse.Namespace) -> int:
         console.print(f"[red]pod diagnosis failed: {exc}[/red]")
         return 2
     render_diagnosis(diagnosis, console)
+
+    if diagnosis.files_changed:
+        # The manifest-fix path (PRASH_V2.md §9, 2026-08-16). Checked FIRST and
+        # deliberately: a concrete corrected manifest is strictly more useful
+        # than either a restart or a menu, and per the prompt the brain sets
+        # recommended_action=null when it proposes one. This is the path that
+        # turns "no available action fixes this, a human must edit the
+        # Deployment" -- correct but useless, six live diagnoses running -- into
+        # an actual reviewable fix.
+        if not manifest_repo:
+            # Defensive: the brain shouldn't produce files_changed without a
+            # repo (the prompt forbids it), but never silently drop a real fix.
+            console.print("[yellow]brain proposed file changes but no manifest repo is configured — pass --repo <owner/repo> or set PRASH_MANIFEST_REPO to open a PR[/yellow]")
+            return 0
+        dispatcher = _build_dispatcher(mode)
+        ctx = _make_context(args, store, creds, resource=manifest_repo, env=args.env or namespace)
+        ctx.extra["file_changes"] = diagnosis.files_changed
+        ctx.extra["namespace"] = namespace
+        ctx.extra["pod"] = pod
+        try:
+            run_result = dispatcher.run("apply-manifest-fix", ctx, ask=None if args.noninteractive else CliAsk())
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        return _render_run_result(run_result)
 
     if diagnosis.options:
         # The "ask, don't quit" flow (PRASH_V2.md §9, 2026-08-15): the brain
@@ -557,6 +595,15 @@ def build_parser() -> argparse.ArgumentParser:
     fix.add_argument("target", help="<namespace>/<pod> for a Kubernetes problem, or <owner>/<repo> with --ci")
     fix.add_argument("--ci", action="store_true", help="diagnose a CI run (multi-failure) instead of a pod")
     fix.add_argument("--run-id", type=int, help="GitHub run id for CI diagnosis (requires GITHUB_TOKEN)")
+    fix.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "owner/repo holding this pod's Deployment manifest (k8s only). Lets Prash read the "
+            "manifest and propose a corrected one as a PR instead of only offering restart. "
+            "Defaults to PRASH_MANIFEST_REPO. Requires GITHUB_TOKEN."
+        ),
+    )
     fix.add_argument("--env", default=None, help="target environment (k8s: defaults to the pod's namespace)")
     fix.add_argument("--mode", default=None, help="permission mode: read-only|ask|auto-safe|environment-scoped|bypass (default: PRASH_PERMISSION_MODE or ask)")
     fix.add_argument("--dry-run", action="store_true", help="plan only; never touch infrastructure")
