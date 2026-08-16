@@ -1,0 +1,48 @@
+# Deliberately broken deployment for stress-testing apply-manifest-fix
+# (PRASH_V2.md §9, 2026-08-16) against an OOMKilled failure shape -- the
+# third failure class alongside the already-verified image-tag typo
+# (ImagePullBackOff, sample-app.yaml) and configmap-mismatch.yaml
+# (StuckPending).
+#
+# polinux/stress deterministically allocates 150M of memory against a 20Mi
+# limit -- this is the standard Kubernetes docs OOM-demo image/pattern
+# (kubernetes.io "Assign Memory Resources to Containers and Pods"), chosen
+# over a hand-rolled busybox trick because memory pressure from shell
+# buffering isn't reliable enough to guarantee a deterministic kill every
+# restart the way this needs to be for a repeatable fixture. Container
+# terminates with reason=OOMKilled on first run, every run -- no waiting on
+# an age threshold the way StuckPending needs. Correct fix is a one-line
+# increase to spec.containers[0].resources.limits.memory, same shape as the
+# image-tag and configmap fixes.
+#
+# Apply:  kubectl apply -f prash/connectors/testdata/oom-limit.yaml
+# Watch:  kubectl get pods -n prash-demo -w
+# Clean:  kubectl delete -f prash/connectors/testdata/oom-limit.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-app
+  namespace: prash-demo
+  labels:
+    app: oom-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-app
+  template:
+    metadata:
+      labels:
+        app: oom-app
+    spec:
+      containers:
+        - name: oom-app
+          image: polinux/stress
+          command: ["stress"]
+          args: ["--vm", "1", "--vm-bytes", "150M", "--vm-hang", "1"]
+          resources:
+            requests:
+              memory: "10Mi"
+            limits:
+              # BUG: far below the 150M the workload actually needs.
+              memory: "20Mi"
