@@ -45,15 +45,17 @@ from .circuit_breaker import CircuitBreaker
 from .connectors.base import Connector
 from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.vercel import VercelConnector
+from .connectors.aws import AWSConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
 from .permissions import PermissionMode
 
 console = ui.console
 
-PROVIDERS = {
+PROVIDERS: Dict[str, Type[Connector]] = {
     "github": GitHubConnector,
     "vercel": VercelConnector,
+    "aws": AWSConnector,
 }
 
 
