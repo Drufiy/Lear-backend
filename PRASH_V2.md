@@ -378,6 +378,9 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 **2026-08-16 — AWS EC2 Connector promoted to Execution (Anant)**
 Added `execute_command` to the `AWSConnector` (breaking the strict read-only scope for AWS). This includes native SSM execution and a robust SSH fallback mechanism when SSM fails. The fallback is designed to integrate nicely with the future REPL system by throwing a specific `SSMFailedNeedsSSH` exception rather than hard-blocking with an `input()` call in the core logic. Additionally, `*.pem` has been added to `.gitignore` to secure local credentials, and the verification script now supports Gemini 3.5/3.1 fallbacks.
 
+**2026-08-16 — Security Audit: Hardcoded Secret Removal (Anant)**
+Removed a hardcoded Gemini API key from `test_live_infra.py` and rewrote the local git history (`git commit --amend`) to resolve a GitHub push protection (`GH013`) rule violation. Secrets are strictly managed through `os.getenv` via the local `.env` file, and `.env.example` has been updated with the corresponding templates. This reinforces the "user keys never touch our servers" product stance.
+
 **2026-08-16 — AWS EC2 Read-Only Connector initiated (Track B).**
 Per sprint 1 stretch goals (§6) and user request, we are adding an AWS EC2 read-only connector. Decided to stick strictly to the `.env` local credential loading via `prash/credentials.py` instead of relying implicitly on `~/.aws/credentials` to uphold the local-first security posture. The connector will use `boto3` (new dependency added to `pyproject.toml`) and implement the standard `authenticate -> locate -> fetch_logs -> poll_state` pattern.
 **2026-08-16 — ROOT CAUSE FOUND: Prash wasn't being cautious, it was structurally unable to fix Kubernetes. Fixed. CROSS-TRACK — Aryan, PLEASE READ (new action).**
