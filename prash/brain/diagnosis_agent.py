@@ -89,8 +89,8 @@ DIAGNOSIS_TOOL = {
                 "type": "number",
                 "description": (
                     "Float 0.0-1.0. Reflects certainty about BOTH the diagnosis AND the completeness "
-                    "of the proposed fix. If you cannot see the current file contents to write a complete "
-                    "replacement, confidence must be below 0.85 even if you know the problem. "
+                    "of the proposed fix. If you cannot see the current file contents to write a precise, "
+                    "exact-match edit, confidence must be below 0.85 even if you know the problem. "
                     "0.9-1.0: seen this exact pattern 100s of times (wrong Node version, obvious typo). "
                     "0.7-0.89: confident but fix touches logic. "
                     "0.5-0.69: plausible but uncertain. "
@@ -188,7 +188,9 @@ DIAGNOSIS_TOOL = {
                 "description": (
                     "Files to modify. MUST be empty [] if fix_type=manual_required. "
                     "MUST have at least one entry if fix_type=safe_auto_apply or review_recommended. "
-                    "Each entry MUST include 'new_content' with the COMPLETE file. Do NOT use 'patch'."
+                    "For a file that ALREADY EXISTS (the overwhelming majority of fixes): use 'edits', "
+                    "never 'new_content' — see its description below for why. Only use 'new_content' "
+                    "when the file is genuinely brand new."
                 ),
                 "items": {
                     "type": "object",
@@ -202,12 +204,42 @@ DIAGNOSIS_TOOL = {
                                 "Example: '.github/workflows/ci.yml', 'package.json', 'src/auth.py'"
                             ),
                         },
+                        "edits": {
+                            "type": "array",
+                            "description": (
+                                "USE THIS for any file that already exists — this is the normal case. "
+                                "One or more exact-match search/replace edits. Each old_content must be "
+                                "copied VERBATIM (exact whitespace, exact surrounding lines) from the real "
+                                "current file content you were shown or fetched — never paraphrased or "
+                                "reconstructed from memory — and must appear exactly ONCE in the file; "
+                                "include enough surrounding context in old_content to make it unique if "
+                                "the changed line alone could match more than one place. Everything in the "
+                                "file outside what old_content matches is left completely untouched — this "
+                                "is what guarantees comments, unrelated code, and formatting survive, which "
+                                "regenerating the whole file cannot guarantee."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "required": ["old_content", "new_content"],
+                                "properties": {
+                                    "old_content": {
+                                        "type": "string",
+                                        "description": "Exact text to find, copied verbatim from the current file. Must match exactly once.",
+                                    },
+                                    "new_content": {
+                                        "type": "string",
+                                        "description": "Text to replace it with.",
+                                    },
+                                },
+                            },
+                        },
                         "new_content": {
                             "type": "string",
                             "description": (
-                                "The COMPLETE new content of this file as it should exist on disk. "
-                                "NOT a diff. NOT a snippet. The entire file. "
-                                "Change ONLY what's needed — preserve style, indentation, unrelated code."
+                                "ONLY for a file that does NOT exist yet — the complete content of the new "
+                                "file. Do NOT use this for an existing file, even a small one: it silently "
+                                "risks dropping content you didn't attend to. If the file already exists, "
+                                "use 'edits' instead, even for what looks like a one-line change."
                             ),
                         },
                         "explanation": {
@@ -244,8 +276,9 @@ Be precise and minimal. Do not over-explain. Every token costs money.
 • root_cause: 2-3 sentences max. Symptom → cause → why. No repetition of problem_summary.
 • fix_description: 2-3 sentences max. What changes and why it works. No code.
 • explanation (per file): 1 sentence. "Added X to Y because Z." Nothing more.
-• new_content: Write ONLY what is needed. Do not add comments, blank lines, or \
-  reformatting beyond the fix. Keep the file identical except for the changed lines.
+• edits: old_content should be the smallest span that's still uniquely identifying —
+  usually one line, occasionally a few for context. Do not paste the whole file into
+  old_content. new_content (per edit) should be just the replacement for that span.
 • Do NOT repeat the error message verbatim across multiple fields.
 • Do NOT write preambles like "Based on the logs..." or "Looking at the error...".
 
@@ -359,29 +392,46 @@ FIXES YOU MUST NOT ATTEMPT (return manual_required, files_changed=[])
 FILE CONTENT RULES — READ CAREFULLY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-When writing new_content or patch for a file, you MUST follow these rules without exception:
+For any file that already exists, you MUST follow these rules without exception:
 
-1. PRESERVE ALL UNRELATED CODE. Every function, class, import, and variable that \
-   existed in the file and is NOT the cause of the failure MUST remain unchanged. \
-   Do NOT delete, truncate, or simplify them.
+1. USE edits, NOT new_content, FOR EXISTING FILES. This is the most important rule in \
+   this section. Regenerating a whole file and calling it new_content depends on you \
+   perfectly reproducing every line you didn't mean to touch — and live testing proved \
+   this fails in practice: two separate real fixes (2026-08-17) each contained the \
+   correct change PLUS unrelated deleted comment lines, silently, with no way to catch \
+   it before the PR shipped. edits cannot have this failure mode BY CONSTRUCTION — \
+   content outside what old_content matches is never touched, because it's never even \
+   regenerated. (This is not the "patch" field you may have seen warnings about \
+   elsewhere — that was traditional line-numbered unified-diff hunks, which really are \
+   fragile against whitespace drift. edits use exact substring matching instead: no \
+   line numbers, no context-window fuzziness, just "this exact text becomes that exact \
+   text." It either matches or it fails loudly — it cannot silently apply wrong.)
 
-2. SURGICAL EDITS ONLY. If the error is on line 10, change line 10. \
-   Lines 1-9 and 11+ stay identical. The output file should be nearly the same \
-   length as the input file.
+2. old_content MUST BE COPIED VERBATIM from the real file content you were shown or \
+   fetched — exact whitespace, exact indentation, exact surrounding characters. Do not \
+   retype it from memory or "clean it up." If you paraphrase even slightly, the edit \
+   will fail to match and the whole fix is rejected.
 
-3. NEVER STRIP A FILE DOWN. If the original file has 40 lines, your new_content \
-   must have ~40 lines. A fix that produces a 5-line file from a 40-line file is \
-   WRONG — you deleted working code.
+3. old_content MUST BE UNIQUE in the file. If the line you're changing could appear \
+   more than once (a common variable name, a repeated pattern), include enough \
+   surrounding lines in old_content to make the match unambiguous. An edit that matches \
+   zero times OR more than once fails — it does not guess.
 
-4. INCLUDE ALL IMPORTS. Do not remove any import statement that was in the original \
-   file unless that import itself is the cause of the error.
+4. KEEP EACH EDIT SMALL. old_content should be the smallest span that still uniquely \
+   identifies the right spot — usually the single changed line plus a line or two of \
+   context, not the whole surrounding function. If two separate spots in the same file \
+   need to change, submit two separate edits in the `edits` array rather than one giant \
+   old_content spanning both.
 
-5. CHECK YOUR OUTPUT. Before submitting, mentally verify: does the new_content or patch \
-   preserve every function/class from the original that isn't broken? If not, add \
-   them back.
+5. new_content (ONLY when the file is genuinely BRAND NEW, i.e. it does not exist yet): \
+   write the complete file content. This is the one case where there's no existing \
+   content to accidentally lose. If you're not certain the file already exists, check \
+   first (fetch_file / list_directory / search_code, or the CURRENT FILE CONTENTS \
+   already given to you below) rather than guessing — treating an existing file as new \
+   would overwrite it with only what you wrote, not merge with what's there.
 
-6. ALWAYS USE new_content. Never use the patch field — always provide the complete \
-   file content in new_content. Patches are fragile and break on whitespace differences.
+6. CHECK YOUR OUTPUT. Before submitting, mentally verify each edit: does old_content \
+   match the real file exactly, and does the edit change only what's actually broken?
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FEW-SHOT EXAMPLES
@@ -390,22 +440,23 @@ FEW-SHOT EXAMPLES
 EXAMPLE 1 — F821 undefined name (safe_auto_apply)
 Log: "NameError: name 'calculate_total' is not defined"
   fix_type: "safe_auto_apply", confidence: 0.92, category: "code"
-  files_changed: [{path: "src/billing.py", new_content: "<complete file with calculate_total defined or imported>"}]
+  files_changed: [{path: "src/billing.py", edits: [{old_content: "<the exact line(s) around where calculate_total is called, verbatim from the fetched file>", new_content: "<same line(s) with calculate_total defined or imported>"}]}]
 
 EXAMPLE 2 — Deliberate failing test (safe_auto_apply)
 Log: "AssertionError: assert False" in test_placeholder.py line 12
   fix_type: "safe_auto_apply", confidence: 0.95, category: "code"
-  files_changed: [{path: "tests/test_placeholder.py", new_content: "<complete file with @pytest.mark.skip added>"}]
+  files_changed: [{path: "tests/test_placeholder.py", edits: [{old_content: "def test_placeholder():\n    assert False", new_content: "@pytest.mark.skip(reason=\"Skipped by Drufiy — needs implementation\")\ndef test_placeholder():\n    assert False"}]}]
 
 EXAMPLE 3 — Missing import (safe_auto_apply)
 Log: "ModuleNotFoundError: No module named 'requests'"
   fix_type: "safe_auto_apply", confidence: 0.97, category: "dependency"
-  files_changed: [{path: "requirements.txt", new_content: "<complete requirements.txt with requests added>"}]
+  files_changed: [{path: "requirements.txt", edits: [{old_content: "<the exact last line of the current requirements.txt>", new_content: "<that same line>\nrequests==2.31.0"}]}]
+  ← If requirements.txt genuinely doesn't exist at all yet, new_content is correct instead — but check first.
 
 EXAMPLE 4 — Node version unavailable (safe_auto_apply)
 Log: "Unable to find Node version '12' for platform linux"
   fix_type: "safe_auto_apply", confidence: 0.97, category: "workflow_config"
-  files_changed: [{path: ".github/workflows/ci.yml", new_content: "<complete file with node-version: '20'>"}]
+  files_changed: [{path: ".github/workflows/ci.yml", edits: [{old_content: "node-version: '12'", new_content: "node-version: '20'"}]}]
 
 EXAMPLE 5 — Missing environment secret (manual_required)
 Log: "Error: STRIPE_SECRET_KEY is not defined"
@@ -421,15 +472,18 @@ Log: "connect ETIMEDOUT 34.198.56.12:443" in jest test
 EXAMPLE 7 — Ambiguous code bug (review_recommended)
 Log: "TypeError: Cannot read property 'user' of undefined" in src/api/auth.ts
   fix_type: "review_recommended", confidence: 0.72, category: "code"
-  files_changed: [{path: "src/api/auth.ts", new_content: "<complete file with null check added>"}]
+  files_changed: [{path: "src/api/auth.ts", edits: [{old_content: "<the exact line accessing .user, verbatim>", new_content: "<same line with a null/undefined check added>"}]}]
 
 EXAMPLE 9 — TypeScript type mismatch (safe_auto_apply) — CORRECT pattern
 Log: "TS2322: Type 'number' is not assignable to type 'string'" in src/lib/utils.ts line 10
 Original file has 40 lines with functions: cn, formatCurrency, formatDate, formatTime, formatDateTime, getInitials.
   fix_type: "safe_auto_apply", confidence: 0.95, category: "code"
-  files_changed: [{path: "src/lib/utils.ts", new_content: "<ALL 40 lines, only formatCurrency body changed>"}]
-  ← CORRECT: all other functions preserved, only the broken return statement fixed.
-  ← WRONG would be: new_content with only cn() and nothing else — that deletes 5 working functions.
+  files_changed: [{path: "src/lib/utils.ts", edits: [{old_content: "<just formatCurrency's broken return statement, verbatim, a few lines>", new_content: "<the corrected return statement>"}]}]
+  ← CORRECT: an edits entry targeting only the broken return statement — cn, formatDate, formatTime,
+    formatDateTime, and getInitials are never even regenerated, so there is no way for them to be lost.
+  ← WRONG would be: new_content with all 40 lines retyped — this is what a live PR actually did in
+    practice (2026-08-17) and it silently deleted unrelated comments the model didn't attend to while
+    regenerating the "unchanged" parts. edits cannot have that failure mode.
 
 EXAMPLE 8 — Cascading failures from one root cause
 Log: 5 test files failing with "Cannot find module 'bcryptjs'"
@@ -442,13 +496,16 @@ requirements.txt contains: httpx, pyobjc>=10.0, pygetwindow, pywinauto, numpy
 CI runs on Ubuntu Linux.
   fix_type: "safe_auto_apply", confidence: 0.95, category: "dependency"
   files_changed: [
-    {path: ".github/workflows/ci.yml", new_content: "<workflow with 'pip install -r requirements.txt'>"},
-    {path: "requirements.txt", new_content: "<requirements.txt with platform markers added:
-      pyobjc>=10.0; sys_platform == 'darwin'
-      pygetwindow>=0.0.9; sys_platform == 'win32'
-      pywinauto>=0.6.8; sys_platform == 'win32'>"}
+    {path: ".github/workflows/ci.yml", edits: [{old_content: "pip install numpy", new_content: "pip install -r requirements.txt"}]},
+    {path: "requirements.txt", edits: [
+      {old_content: "pyobjc>=10.0", new_content: "pyobjc>=10.0; sys_platform == 'darwin'"},
+      {old_content: "pygetwindow", new_content: "pygetwindow>=0.0.9; sys_platform == 'win32'"},
+      {old_content: "pywinauto", new_content: "pywinauto>=0.6.8; sys_platform == 'win32'"},
+    ]}
   ]
-  ← CORRECT: fixes BOTH the install command AND the platform deps in one PR.
+  ← CORRECT: fixes BOTH the install command AND the platform deps in one PR, each as its own
+    small edit rather than one regenerated file — three separate one-line changes in
+    requirements.txt, submitted as three edits in that file's edits array.
   ← WRONG would be: only fixing ci.yml — that causes pyobjc to fail on Ubuntu in the next run.
 
 EXAMPLE 11 — Workflow wrong for project type (MOST IMPORTANT PATTERN)
@@ -457,20 +514,23 @@ The repo is a vanilla HTML/CSS/JS static site. No package.json, no package-lock.
 Workflow runs: setup-node with cache: npm, then npm ci, then npx tsc --noEmit.
   fix_type: "safe_auto_apply", confidence: 0.95, category: "workflow_config"
   files_changed: [
-    {path: ".github/workflows/ci.yml", new_content: "name: ci\non: [push, pull_request]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Check HTML\n        run: echo 'Static site — no build step required'"}
+    {path: ".github/workflows/ci.yml", edits: [{old_content: "<the exact setup-node/npm ci/npx tsc step block, verbatim from the fetched workflow>", new_content: "      - name: Check HTML\n        run: echo 'Static site — no build step required'"}]}
   ]
-  ← CORRECT: edits the workflow to remove the npm steps entirely. Ships a PR.
+  ← CORRECT: an edit replacing just the npm step block, verbatim old_content copied from the real
+    file — everything else in the workflow (name:, on:, other jobs) is left completely alone.
   ← WRONG: returning manual_required with no files. You know the fix — write it.
   ← WRONG: saying "add a package.json" when the project doesn't use npm at all.
+  ← WRONG: regenerating the whole workflow file as new_content — risks losing an unrelated job
+    elsewhere in the same file that this fix has no reason to touch.
 
 EXAMPLE 12 — Workflow caches lock file that doesn't exist
 Log: "Error: Dependencies lock file is not found in /home/runner/work/..."
 Workflow uses setup-node with cache: npm but there is no package-lock.json.
   fix_type: "safe_auto_apply", confidence: 0.97, category: "workflow_config"
   files_changed: [
-    {path: ".github/workflows/ci.yml", new_content: "<same workflow but with 'cache: npm' line removed>"}
+    {path: ".github/workflows/ci.yml", edits: [{old_content: "          cache: npm\n", new_content: ""}]}
   ]
-  ← One-line fix. Never escalate this to manual_required.
+  ← One-line fix, one small edit. Never escalate this to manual_required.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEPENDENCY CONFLICT RESOLUTION
@@ -488,10 +548,11 @@ FIX STRATEGY:
 3. For pip: adjust version pins in requirements.txt/pyproject.toml to find a compatible set. \
    If pkg A needs X>=2.0 and pkg B needs X<2.0, check if either has a newer release.
 4. For peer dependency warnings: add the peer dep explicitly to package.json.
-5. ALWAYS provide the complete manifest file in new_content — not just the changed line.
+5. Use one edits entry per version line you're changing — old_content is that one line \
+   (e.g. `"react": "^17.0.2"`) copied verbatim from the file content you were shown.
 6. These are safe_auto_apply with high confidence when the conflict message is clear.
 7. DEPENDENCY CHAIN COMPLETENESS — when a package has known peer or type companions, bump ALL of \
-   them together in the SAME package.json edit, matching major versions:
+   them together in the SAME package.json fix, matching major versions:
      react ↔ react-dom ↔ @types/react ↔ @types/react-dom
      vue ↔ @vue/compiler-sfc ↔ @vue/runtime-core
      @angular/core ↔ @angular/common ↔ @angular/compiler
@@ -499,16 +560,22 @@ FIX STRATEGY:
    naive check but break the type build or runtime. A deterministic guardrail checks major-version \
    alignment across these pairs and downgrades to review_recommended if you miss one, so get it \
    right the first time: read every companion package's current version in the provided file \
-   content before writing new_content, and bump every one that's out of sync with the package \
+   content, and submit a separate edit bumping every one that's out of sync with the package \
    you're actually fixing — not just the one named in the error message.
 
 EXAMPLE 13b — Peer dependency bump with type packages (safe_auto_apply) — CORRECT pattern
 Log: "npm ERR! peer react@'^18.0.0' from react-dom@18.2.0"
 package.json (excerpt) BEFORE: react ^17.0.2, react-dom ^18.2.0, @types/react ^17.0.39, @types/react-dom ^17.0.11
   fix_type: "safe_auto_apply", confidence: 0.93, category: "dependency"
-  files_changed: [{path: "package.json", new_content: "<complete package.json with react ^18.2.0, react-dom ^18.2.0, @types/react ^18.2.0, @types/react-dom ^18.2.0 — ALL FOUR bumped together>"}]
-  ← Bumping only "react" here and leaving @types/react on ^17 would be WRONG — the type packages
-    would then disagree with the runtime packages about the React major version.
+  files_changed: [{path: "package.json", edits: [
+    {old_content: "\"react\": \"^17.0.2\"", new_content: "\"react\": \"^18.2.0\""},
+    {old_content: "\"@types/react\": \"^17.0.39\"", new_content: "\"@types/react\": \"^18.2.0\""},
+    {old_content: "\"@types/react-dom\": \"^17.0.11\"", new_content: "\"@types/react-dom\": \"^18.2.0\""},
+  ]}]
+  ← Four separate small edits, ALL FOUR companion packages bumped together — react-dom was already
+    on ^18.2.0 so it needs no edit. Bumping only "react" here and leaving @types/react on ^17 would
+    be WRONG — the type packages would then disagree with the runtime packages about the React
+    major version.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ROOT CAUSE VS SUPPRESSION — when a linter, type checker, or static analyzer fails
@@ -539,15 +606,13 @@ FIX STRATEGY — in this order:
 EXAMPLE 18 — PHPStan level 9 type error (real fix, PREFERRED)
 Log: "PHPStan level 9: Cannot cast mixed to string in functions.php:42"
   fix_type: "safe_auto_apply", confidence: 0.90, category: "code"
-  files_changed: [{path: "functions.php", new_content: "<complete file with the mixed value \
-explicitly cast/validated at line 42 before use, e.g. (string) with an is_string() guard>"}]
+  files_changed: [{path: "functions.php", edits: [{old_content: "<the exact line 42, verbatim from the fetched file>", new_content: "<same line with the mixed value explicitly cast/validated, e.g. (string) with an is_string() guard>"}]}]
   fix_description: "Added an explicit string cast and type guard around the mixed value at line \
 42, satisfying PHPStan level 9 by resolving the actual type-safety gap it flagged."
 
 EXAMPLE 19 — Same failure, suppression fallback (only when the real fix is out of scope)
   fix_type: "review_recommended", confidence: 0.75, category: "workflow_config"
-  files_changed: [{path: ".github/workflows/ci.yml", new_content: "<workflow with PHPStan level \
-lowered from 9 to 5>"}]
+  files_changed: [{path: ".github/workflows/ci.yml", edits: [{old_content: "level: 9", new_content: "level: 5"}]}]
   fix_description: "Note: this relaxes the analyzer rather than fixing the underlying issue — \
 lowered PHPStan from level 9 to 5 because the flagged type-safety gaps span many legacy files \
 beyond the scope of this CI failure. The 2 underlying type errors in functions.php are still \
@@ -610,9 +675,14 @@ files_changed with the corrected manifest, exactly as you would for a CI fix:
      .k8s/). The pod name is usually "<deployment>-<replicaset>-<random>", so
      strip the last two dash-segments to get the Deployment name to search for.
   2. fetch_file it, so you are editing the real current content, not a guess.
-  3. Return the COMPLETE corrected file in files_changed[].new_content —
-     changing ONLY what fixes this failure, preserving all other fields,
-     comments, and formatting exactly.
+  3. Return an edits entry (files_changed[].edits) with old_content copied
+     VERBATIM from the fetched manifest — just the field(s) that need to
+     change, not the whole file. This is a YAML file already, so a mismatched
+     brace or quote never enters into it the way it might in code; the risk
+     edits actually protects against here is a much simpler one, proven live
+     (PRASH_V2.md §9, 2026-08-17): regenerating the whole manifest and
+     silently dropping a comment or line elsewhere in the same file that
+     had nothing to do with the fix.
 Set recommended_action: null when you are proposing a manifest fix — the
 manifest change IS the fix; a restart on top of it would be noise (the new
 rollout replaces the pod anyway).
@@ -688,7 +758,10 @@ available, so the Deployment is readable and editable.
   the container expects /app/config.yaml.
   category: "runtime", fix_type: "review_recommended", confidence: 0.8
   recommended_action: null
-  files_changed: [{path: "k8s/broken-app.yaml", new_content: "<the COMPLETE manifest, unchanged except for an added ConfigMap volume + volumeMount putting config.yaml at /app/config.yaml>", explanation: "Mount the app-config ConfigMap at /app/config.yaml, which the container requires at startup and which nothing currently provides."}]
+  files_changed: [{path: "k8s/broken-app.yaml", edits: [{old_content: "          image: myapp:v2\n          command: [\"python\", \"app.py\"]", new_content: "          image: myapp:v2\n          command: [\"python\", \"app.py\"]\n          volumeMounts:\n            - name: config-volume\n              mountPath: /app/config.yaml\n              subPath: config.yaml\n      volumes:\n        - name: config-volume\n          configMap:\n            name: app-config"}], explanation: "Mount the app-config ConfigMap at /app/config.yaml, which the container requires at startup and which nothing currently provides."}]
+  ← edits can ADD content too, not just replace it line-for-line — old_content is the exact anchor
+    text (verbatim from fetch_file) to insert after; everything else in the manifest — other env
+    vars, labels, probes, unrelated containers — is never touched because it was never regenerated.
   root_cause: "The container requires /app/config.yaml at startup but the Deployment mounts no volume providing it, so every replica exits immediately with FileNotFoundError."
   fix_description: "Adds the missing ConfigMap volume + mount to the Deployment so config.yaml exists at the path the container reads. Restarting was never going to help — nothing in the pod spec supplied this file."
   ← THIS is the difference that matters. Same evidence, same correct reasoning about restart
@@ -816,23 +889,23 @@ Log: "npm ERR! ERESOLVE unable to resolve dependency tree"
      "npm ERR! peer react@'^17.0.0' from react-dom@17.0.2"
      "npm ERR! Could not resolve dependency: react@18.2.0"
   fix_type: "safe_auto_apply", confidence: 0.90, category: "dependency"
-  files_changed: [{path: "package.json", new_content: "<complete package.json with react-dom bumped to ^18.2.0>"}]
+  files_changed: [{path: "package.json", edits: [{old_content: "\"react-dom\": \"^17.0.2\"", new_content: "\"react-dom\": \"^18.2.0\""}]}]
 
 EXAMPLE 14 — pip version conflict (safe_auto_apply)
 Log: "ERROR: Cannot install django==4.2 and djangorestframework==3.12 because..."
      "djangorestframework 3.12 requires django<4.0"
   fix_type: "safe_auto_apply", confidence: 0.92, category: "dependency"
-  files_changed: [{path: "requirements.txt", new_content: "<complete file with djangorestframework>=3.14>"}]
+  files_changed: [{path: "requirements.txt", edits: [{old_content: "djangorestframework==3.12", new_content: "djangorestframework>=3.14"}]}]
 
 EXAMPLE 15 — Docker COPY failure (safe_auto_apply)
 Log: "COPY failed: file not found in build context: ./dist/app.js"
   fix_type: "safe_auto_apply", confidence: 0.90, category: "workflow_config"
-  files_changed: [{path: "Dockerfile", new_content: "<complete Dockerfile with corrected COPY path or added build step>"}]
+  files_changed: [{path: "Dockerfile", edits: [{old_content: "<the exact broken COPY line, verbatim>", new_content: "<the corrected COPY path, or an added build step before it>"}]}]
 
 EXAMPLE 16 — Matrix: one version fails (safe_auto_apply)
 Log: Node 20 passes, Node 22 fails with "ERR_IMPORT_ASSERTION_TYPE_MISSING"
   fix_type: "safe_auto_apply", confidence: 0.88, category: "code"
-  files_changed: [{path: "src/loader.ts", new_content: "<complete file using import attributes syntax>"}]
+  files_changed: [{path: "src/loader.ts", edits: [{old_content: "<the exact old-style import assertion line, verbatim>", new_content: "<the same line using the new import attributes syntax>"}]}]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MASKED / SWALLOWED EXCEPTIONS (READ CAREFULLY — a common wrong-diagnosis trap)
@@ -869,7 +942,7 @@ No traceback, no KeyError/AttributeError visible anywhere in the log.
     root_cause: "run_shell's success path calls logger.debug(), but the test's stub logger has no \
     .debug method, raising AttributeError that is caught by the broad except and returned as \
     status=error. The subprocess call itself works fine."
-    files_changed: [{path: "src/shell.py", new_content: "<file with logger.debug removed or guarded>"}]
+    files_changed: [{path: "src/shell.py", edits: [{old_content: "<the exact logger.debug(...) line, verbatim from fetch_file>", new_content: "<same line removed, or guarded with hasattr(logger, 'debug')>"}]}]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOW TO READ CI LOGS
@@ -938,8 +1011,10 @@ manual_required — use sparingly, only when:
 OUTPUT RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-• new_content = COMPLETE file. Not a diff. Not pseudocode. The whole file.
-• Only change lines that directly fix the root cause. Leave everything else untouched.
+• edits = exact-match search/replace against an EXISTING file. new_content = the complete
+  content of a file that does NOT exist yet. Existing file + new_content is wrong.
+• Only change lines that directly fix the root cause. Leave everything else untouched —
+  edits enforces this structurally, since anything outside old_content is never touched.
 • Do NOT add comments explaining the fix inside the file (use the explanation field).
 • Do NOT reformat, re-indent, or improve unrelated sections.
 • When in doubt, try review_recommended with your best guess — not manual_required.
@@ -1170,17 +1245,23 @@ async def diagnose_failure(
             model=model,
         )
 
-    # Filter out files with empty/missing content before validation.
-    # The model sometimes returns new_content="" for files it couldn't generate —
-    # drop those rather than letting one bad file nuke the entire diagnosis.
+    # Filter out files with no real content or edits before validation. The model
+    # sometimes returns new_content="" (or an edits entry with a blank old_content)
+    # for a file it couldn't actually generate a fix for — drop those rather than
+    # letting one bad file nuke the entire diagnosis. Must check `edits` here too,
+    # not just new_content: since 2026-08-17 edits is the normal shape for an
+    # existing-file fix, and checking new_content alone would silently drop every
+    # one of those (exactly the "Prash quietly does nothing" failure this whole
+    # project exists to avoid).
     if raw_args.get("files_changed"):
         valid_files = []
         for fc in raw_args["files_changed"]:
-            content = fc.get("new_content") or ""
-            if content.strip():
+            has_new_content = bool((fc.get("new_content") or "").strip())
+            has_edits = any((e.get("old_content") or "").strip() for e in (fc.get("edits") or []))
+            if has_new_content or has_edits:
                 valid_files.append(fc)
             else:
-                logger.warning(f"Dropping file {fc.get('path', '?')} — empty new_content")
+                logger.warning(f"Dropping file {fc.get('path', '?')} — no new_content or edits")
         raw_args["files_changed"] = valid_files
 
     try:
@@ -1225,7 +1306,7 @@ async def diagnose_failure(
         diagnosis = diagnosis.model_copy(update=updates)
 
     diagnosis = _apply_deterministic_guardrails(diagnosis, preprocessed)
-    diagnosis = _check_dependency_chain_completeness(diagnosis)
+    diagnosis = _check_dependency_chain_completeness(diagnosis, current_files)
     diagnosis = _flag_strictness_suppression(diagnosis)
     diagnosis = await _consult_second_opinion(diagnosis, SYSTEM_PROMPT, user_prompt, run_id)
 
@@ -1404,22 +1485,29 @@ def _extract_major_version(spec: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _check_dependency_chain_completeness(diagnosis: Diagnosis) -> Diagnosis:
+def _check_dependency_chain_completeness(diagnosis: Diagnosis, current_files: dict[str, str] | None = None) -> Diagnosis:
     """
     M4: deterministic check for peer/type package major-version alignment in a
     rewritten package.json. Prompt instructions alone weren't reliable enough —
     this catches an incomplete bump instead of letting it ship as safe_auto_apply.
+
+    Needs the resulting file's full content to parse, which since 2026-08-17
+    (edits replacing new_content as the normal existing-file shape, PRASH_V2.md
+    §9) isn't always on the FileChange directly — apply() reconstructs it from
+    current_files, the same pre-fetched content already shown to the model in
+    the prompt for this exact reason.
     """
     package_json = next(
-        (fc for fc in diagnosis.files_changed if fc.path.endswith("package.json") and fc.new_content),
+        (fc for fc in diagnosis.files_changed if fc.path.endswith("package.json") and (fc.new_content or fc.edits)),
         None,
     )
     if not package_json:
         return diagnosis
 
     try:
-        manifest = json.loads(package_json.new_content)
-    except (json.JSONDecodeError, TypeError):
+        original = (current_files or {}).get(package_json.path)
+        manifest = json.loads(package_json.apply(original))
+    except (json.JSONDecodeError, TypeError, ValueError):
         return diagnosis
 
     if not isinstance(manifest, dict):
@@ -1882,9 +1970,12 @@ def _build_user_prompt(
         )
         parts.append("\n".join(rag_lines))
 
-    # Inject current file contents so Kimi can write complete replacements
+    # Inject current file contents as the exact source text for edits[].old_content
     if current_files:
-        parts.append("\nCURRENT FILE CONTENTS (use these to write complete replacements):")
+        parts.append(
+            "\nCURRENT FILE CONTENTS (these files already exist — use edits with old_content "
+            "copied VERBATIM from here, not new_content):"
+        )
         for path, content in current_files.items():
             parts.append(f"\n=== {path} ===\n{content}\n=== end {path} ===")
 
