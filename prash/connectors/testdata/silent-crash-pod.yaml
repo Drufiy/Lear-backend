@@ -1,0 +1,28 @@
+# Deliberately silent, immediate-exit deployment — built to catch a live
+# restart_count=1 window for TESTING_CHECKLIST.md §6b criterion #5 ("ask,
+# don't quit" end-to-end on a real ambiguous case). No echo, no log output
+# at all before exit, so there's genuinely no deterministic signal either
+# way -- exactly the shape EXAMPLE 24 in diagnosis_agent.py describes.
+#
+# Apply:  kubectl apply -f prash/connectors/testdata/silent-crash-pod.yaml
+# Watch:  kubectl get pods -n prash-demo -w
+# Clean:  kubectl delete -f prash/connectors/testdata/silent-crash-pod.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: silent-crash
+  namespace: prash-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: silent-crash
+  template:
+    metadata:
+      labels:
+        app: silent-crash
+    spec:
+      containers:
+        - name: silent-crash
+          image: busybox:latest
+          command: ["sh", "-c", "exit 1"]
