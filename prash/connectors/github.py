@@ -6,8 +6,10 @@ beyond what ships with Python.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Mapping
 
@@ -79,6 +81,21 @@ class GitHubConnector(Connector):
     def get_commit_tree_sha(self, repo: str, commit_sha: str) -> str:
         commit = self._request("GET", f"/repos/{repo}/git/commits/{commit_sha}")
         return commit["tree"]["sha"]
+
+    def get_file_content(self, repo: str, path: str, ref: str) -> str:
+        """Fetch a file's current raw text content at a specific ref (commit SHA or branch).
+
+        Used to apply FileChange.edits against the real content right before
+        writing the fix commit -- the same file identity apply_ci_fix.py just
+        resolved base_sha from, so this reads exactly what the new commit
+        will be built on top of.
+        """
+        quoted = urllib.parse.quote(path)
+        data = self._request("GET", f"/repos/{repo}/contents/{quoted}?ref={ref}")
+        if isinstance(data, list):
+            raise GitHubError(f"{path} is a directory, not a file")
+        content = data.get("content", "")
+        return base64.b64decode(content).decode("utf-8")
 
     def create_blob(self, repo: str, content: str) -> str:
         blob = self._request("POST", f"/repos/{repo}/git/blobs", {"content": content, "encoding": "utf-8"})

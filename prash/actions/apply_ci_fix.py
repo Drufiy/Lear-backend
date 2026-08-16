@@ -50,8 +50,8 @@ class _ApplyFixBase(Action):
         return "prash/fix"
 
     def _file_changes(self, ctx: ActionContext) -> list[Any]:
-        # FileChange.new_content is guaranteed non-empty by its own model
-        # validator (prash/brain/schemas.py) -- every entry here is real.
+        # Every entry here has either `edits` or `new_content` populated --
+        # guaranteed by FileChange's own model validator (prash/brain/schemas.py).
         return ctx.extra.get("file_changes", [])
 
     def plan(self, ctx: ActionContext) -> Plan:
@@ -89,7 +89,15 @@ class _ApplyFixBase(Action):
 
             entries = []
             for fc in changes:
-                blob_sha = gh.create_blob(repo, fc.new_content)
+                # edits apply against the file's real current content, fetched fresh
+                # against base_sha -- this is what guarantees anything the model
+                # didn't explicitly edit survives untouched, unlike trusting a
+                # regenerated new_content to be a faithful complete file (the bug
+                # found live 2026-08-16/17: two verification PRs each contained the
+                # correct fix plus unrequested deletions elsewhere in the file).
+                original = gh.get_file_content(repo, fc.path, base_sha) if fc.edits else None
+                content = fc.apply(original)
+                blob_sha = gh.create_blob(repo, content)
                 entries.append({"path": fc.path, "mode": "100644", "type": "blob", "sha": blob_sha})
             new_tree_sha = gh.create_tree(repo, base_tree_sha, entries)
 

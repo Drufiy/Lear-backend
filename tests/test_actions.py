@@ -4,7 +4,7 @@ from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
 from prash.actions.restart_pod import RestartPodAction
 from prash.actions.rollback import RollbackAction
-from prash.brain.schemas import FileChange
+from prash.brain.schemas import FileChange, FileEdit
 from prash.circuit_breaker import CircuitBreaker
 from prash.credentials import CredentialStore
 from prash.dispatch import AskFn, Dispatcher, ExecutionOutcome
@@ -27,6 +27,13 @@ class FakeGitHub:
         self.refs = {}
         self.default_branch = "main"
         self.raise_ref_exists = False
+        self.files = {}  # path -> current content, for get_file_content
+        self.blobs = {}  # blob sha -> content actually written, for assertions
+
+    def get_file_content(self, repo, path, ref):
+        if path not in self.files:
+            raise KeyError(f"{path} not found in fake repo at {ref}")
+        return self.files[path]
 
     def authenticate(self):
         return True
@@ -49,7 +56,9 @@ class FakeGitHub:
         return "base-tree-sha"
 
     def create_blob(self, repo, content):
-        return f"blob-sha-{abs(hash(content))}"
+        sha = f"blob-sha-{abs(hash(content))}"
+        self.blobs[sha] = content
+        return sha
 
     def create_tree(self, repo, base_tree_sha, entries):
         return "new-tree-sha"
@@ -236,6 +245,74 @@ def test_apply_ci_fix_fails_cleanly_when_branch_already_exists(tmp_path):
     result = action.execute(ctx)
     assert result.status is ActionResultStatus.FAILED
     assert "already proposed" in result.summary
+
+
+def test_apply_ci_fix_applies_edits_against_the_real_fetched_file(tmp_path):
+    """The mechanism that replaced whole-file regeneration (PRASH_V2.md §9,
+    2026-08-17): a FileChange with `edits` must fetch the file's actual
+    current content and patch only the matched span, leaving everything
+    else in the file byte-for-byte untouched -- the property whole-file
+    regeneration could never guarantee."""
+    github = FakeGitHub()
+    github.files["k8s/app.yaml"] = "spec:\n  replicas: 1\n  # a comment nothing should touch\n  image: myapp:v1\n"
+    changes = [FileChange(
+        path="k8s/app.yaml",
+        edits=[FileEdit(old_content="image: myapp:v1", new_content="image: myapp:v2")],
+        explanation="bump image tag",
+    )]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": github}, "file_changes": changes, "run_id": 1},
+        resource="acme/widget",
+    )
+    action = ApplyCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    written = next(iter(github.blobs.values()))
+    assert written == "spec:\n  replicas: 1\n  # a comment nothing should touch\n  image: myapp:v2\n"
+
+
+def test_apply_ci_fix_fails_honestly_when_edit_does_not_match(tmp_path):
+    """old_content that doesn't appear in the real file (a paraphrase, a
+    stale read, a hallucination) must fail loudly and specifically -- never
+    silently apply nothing, and never fall back to some other behavior."""
+    github = FakeGitHub()
+    github.files["k8s/app.yaml"] = "image: myapp:v1\n"
+    changes = [FileChange(
+        path="k8s/app.yaml",
+        edits=[FileEdit(old_content="image: myapp:v9-does-not-exist", new_content="image: myapp:v2")],
+        explanation="bump image tag",
+    )]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": github}, "file_changes": changes, "run_id": 1},
+        resource="acme/widget",
+    )
+    action = ApplyCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "did not apply" in result.summary
+
+
+def test_apply_ci_fix_fails_honestly_when_edit_matches_more_than_once(tmp_path):
+    """A non-unique old_content must be rejected rather than guessing which
+    occurrence to patch -- the same contract Prash's own Edit tool uses."""
+    github = FakeGitHub()
+    github.files["config.py"] = "PORT = 8080\nOTHER = 1\nPORT = 8080\n"
+    changes = [FileChange(
+        path="config.py",
+        edits=[FileEdit(old_content="PORT = 8080", new_content="PORT = 9090")],
+        explanation="bump port",
+    )]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"github": github}, "file_changes": changes, "run_id": 1},
+        resource="acme/widget",
+    )
+    action = ApplyCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "matches 2 times" in result.summary
 
 
 def test_restart_pod_reports_failure_honestly_when_pod_missing(tmp_path, monkeypatch):
