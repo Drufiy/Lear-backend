@@ -1,0 +1,57 @@
+# Deliberately broken deployment for stress-testing apply-manifest-fix
+# (PRASH_V2.md §9, 2026-08-16) against a StuckPending / FailedMount failure
+# shape, distinct from the 2026-08-13 ConfigMap-flag fixture (that one was a
+# readinessProbe wedge that read a ConfigMap value at startup, never a real
+# FailedMount -- see PRASH_V2.md §10, 2026-08-13). This one is the literal
+# case: a Deployment's volume references a ConfigMap name that doesn't match
+# the one actually defined, exactly the kind of copy/rename typo the
+# already-verified image-tag fixture (sample-app.yaml) tests for images.
+#
+# web-cfg-v2 is the real ConfigMap. The Deployment's volume asks for
+# "web-cfg" (missing the "-v2") -- kubelet can never mount it, so the pod
+# sits in ContainerCreating/Pending forever, no crash, no restart. After the
+# real 120s age gate this classifies StuckPending (prash/connectors/
+# kubernetes.py's _classify()). The correct fix is a one-line rename of the
+# volume's configMap.name to match, same shape as the image-tag fix.
+#
+# Apply:  kubectl apply -f prash/connectors/testdata/configmap-mismatch.yaml
+# Watch:  kubectl get pods -n prash-demo -w
+# Events: kubectl describe pod -n prash-demo -l app=configmap-app
+# Clean:  kubectl delete -f prash/connectors/testdata/configmap-mismatch.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-cfg-v2
+  namespace: prash-demo
+data:
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: configmap-app
+  namespace: prash-demo
+  labels:
+    app: configmap-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: configmap-app
+  template:
+    metadata:
+      labels:
+        app: configmap-app
+    spec:
+      containers:
+        - name: configmap-app
+          image: busybox:latest
+          command: ["sh", "-c", "cat /etc/config/LOG_LEVEL && sleep infinity"]
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config
+      volumes:
+        - name: config-volume
+          configMap:
+            # BUG: should be web-cfg-v2 -- this name doesn't exist.
+            name: web-cfg
