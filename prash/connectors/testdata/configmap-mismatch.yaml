@@ -14,9 +14,7 @@
 # kubernetes.py's _classify()). The correct fix is a one-line rename of the
 # volume's configMap.name to match, same shape as the image-tag fix.
 #
-# Apply:  kubectl apply -f prash/connectors/testdata/configmap-mismatch.yaml
-# Watch:  kubectl get pods -n prash-demo -w
-# Events: kubectl describe pod -n prash-demo -l app=configmap-app
+
 # Clean:  kubectl delete -f prash/connectors/testdata/configmap-mismatch.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -53,5 +51,4 @@ spec:
       volumes:
         - name: config-volume
           configMap:
-            # BUG: should be web-cfg-v2 -- this name doesn't exist.
-            name: web-cfg
+            name: web-cfg-v2
