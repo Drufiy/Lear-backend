@@ -28,7 +28,7 @@ class SSMFailedNeedsSSH(Exception):
 
 class AWSConnector(Connector):
     name = "aws"
-    read_capabilities = ("instance_status", "logs")  # Mapping EC2 instances similar to pods for now
+    read_capabilities = ("pod_status", "logs")  # Mapping EC2 instances similar to pods for now
     write_capabilities = ("execute",)
 
     def __init__(self, credentials: Mapping[str, Any]):
@@ -37,7 +37,6 @@ class AWSConnector(Connector):
         self.secret_key = self.credentials.get("AWS_SECRET_ACCESS_KEY")
         self.region = self.credentials.get("AWS_REGION")
         self.session_token = self.credentials.get("AWS_SESSION_TOKEN")
-        self._is_authenticated = False
 
     def _get_boto_session(self) -> Any:
         if not _HAS_BOTO3:
@@ -51,9 +50,6 @@ class AWSConnector(Connector):
         )
 
     def authenticate(self) -> bool:
-        if self._is_authenticated:
-            return True
-            
         if not self.access_key or not self.secret_key:
             return False
         
@@ -61,7 +57,6 @@ class AWSConnector(Connector):
             session = self._get_boto_session()
             sts = session.client("sts")
             sts.get_caller_identity()
-            self._is_authenticated = True
             return True
         except (botocore.exceptions.BotoCoreError, botocore.exceptions.ClientError):
             return False

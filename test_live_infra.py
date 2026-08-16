@@ -154,8 +154,4 @@ async def main():
         print(f"Unexpected error: {e}")
 
 if __name__ == "__main__":
-    if not os.environ.get("PRASH_LIVE_AWS_TESTS"):
-        print("Skipped: PRASH_LIVE_AWS_TESTS=1 not set. Skipping live AWS tests to prevent CI failures.")
-        import sys
-        sys.exit(0)
     asyncio.run(main())
