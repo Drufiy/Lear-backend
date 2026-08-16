@@ -42,6 +42,7 @@ from .actions.restart_pod import RestartPodAction
 from .actions.rollback import RollbackAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
+from .connectors.aws import AWSConnector
 from .connectors.base import Connector
 from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.vercel import VercelConnector
@@ -54,6 +55,7 @@ console = ui.console
 PROVIDERS = {
     "github": GitHubConnector,
     "vercel": VercelConnector,
+    "aws": AWSConnector,
 }
 
 
