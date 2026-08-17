@@ -397,6 +397,10 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 
 ## 9. Decision log
 
+**2026-08-17 — Tier 2 starts (GitLab CI, Aradhya). Recorded demo moves to backlog.**
+Aradhya's call. Kubernetes Depth is fully built (4 PRs: #19, #20 merged, #22, #24) but 3 of 4 still open pending Aryan's review — strictly, "a Tier-1 item lands" (§7b) means merged, not just built, so this is a deliberate exception rather than the tiering rule being satisfied. Justified because Diagnosis Brain (a separate Tier-1 item) already merged, and the alternative is Aradhya blocked entirely while waiting on review he can't force. Recorded demo (the other open Tier-1 item) explicitly backlogged, not dropped — needs Aradhya at the keyboard for the actual recording, lower priority than continuing Tier-2 momentum right now.
+
+
 **2026-08-17 — CROSS-TRACK — Aryan, PLEASE READ. New command: `prash logs` (Kubernetes Depth, Tier 1). Also: a real pre-existing bug found and fixed in `get_pod_logs()`, plus a false alarm caught and reverted before it shipped.**
 
 Second piece of "Kubernetes Actions" (first piece, `scale`, is PR #19, separate branch — CROSS-TRACK entry for that one is on that PR). Small cross-track footprint here too: new `cmd_logs()` + `logs` subparser in `prash/cli.py`, following `cmd_investigate`/`cmd_audit`'s shape exactly — pure read, no dispatcher/Action involved (log reading has no permission implications to gate). Two additions to `prash/connectors/kubernetes.py` (mine): `stream_pod_logs()` (new, live-follow generator) and a fix to `get_pod_logs()` (existing).
