@@ -348,3 +348,41 @@ def get_previous_revision(namespace: str, deployment_name: str) -> dict | None:
 
     revisions.sort(reverse=True)
     return {"revision": revisions[1]}
+
+
+def scale_deployment(namespace: str, deployment_name: str, replicas: int) -> bool:
+    """WRITE. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b) -- Track C's
+    ScaleAction wires the permission check; this function assumes it has
+    already been granted and just patches the replica count.
+
+    Returns True if the patch succeeded, False if the Deployment doesn't
+    exist. Track C is responsible for post-action verification (§3), same
+    split as restart_pod() above -- keep this a single clear write.
+    """
+    namespace = _default_namespace(namespace)
+    api = _client()
+    apps_api = client.AppsV1Api(api.api_client)
+    try:
+        apps_api.patch_namespaced_deployment_scale(
+            name=deployment_name, namespace=namespace, body={"spec": {"replicas": replicas}}
+        )
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+
+
+def get_deployment_replicas(namespace: str, deployment_name: str) -> int | None:
+    """Read-only. Current replica count for verify() after a scale action.
+    Returns None if the Deployment doesn't exist."""
+    namespace = _default_namespace(namespace)
+    api = _client()
+    apps_api = client.AppsV1Api(api.api_client)
+    try:
+        deployment = apps_api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+    return deployment.spec.replicas

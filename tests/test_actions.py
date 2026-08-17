@@ -4,6 +4,7 @@ from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
 from prash.actions.restart_pod import RestartPodAction
 from prash.actions.rollback import RollbackAction
+from prash.actions.scale import ScaleAction
 from prash.brain.schemas import FileChange, FileEdit
 from prash.circuit_breaker import CircuitBreaker
 from prash.credentials import CredentialStore
@@ -387,6 +388,59 @@ def test_rollback_with_grant_fails_honestly_when_no_prior_revision(tmp_path, mon
     assert result.decision is Decision.ALLOW
     assert result.result.status is ActionResultStatus.FAILED
     assert "no prior revision recorded" in result.result.summary
+
+
+def test_scale_approval_prompts_even_in_bypass(tmp_path):
+    """Same contract as rollback -- RiskTier's own docstring names scale as
+    an APPROVAL-tier example alongside rollback, for the same reason: it can
+    take a service down (replicas=0) as surely as a bad rollback."""
+    ctx = _ctx(tmp_path, resource="default/api", extra={"replicas": 3})
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ScaleAction()])
+    result = dispatcher.run("scale", ctx, ask=FakeAsk(answer=False))
+    assert result.decision is Decision.PROMPT
+    assert result.result.status is ActionResultStatus.SKIPPED
+
+
+def test_scale_fails_honestly_when_replicas_not_specified(tmp_path):
+    ctx = _ctx(tmp_path, resource="default/api", extra={})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ScaleAction()])
+    result = dispatcher.run("scale", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "not specified" in result.result.summary
+
+
+def test_scale_fails_honestly_when_deployment_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("prash.actions.scale.scale_deployment", lambda ns, name, replicas: False)
+    ctx = _ctx(tmp_path, resource="default/api", extra={"replicas": 3})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ScaleAction()])
+    result = dispatcher.run("scale", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "not found" in result.result.summary
+
+
+def test_scale_succeeds_and_verify_confirms_replica_count(tmp_path, monkeypatch):
+    monkeypatch.setattr("prash.actions.scale.scale_deployment", lambda ns, name, replicas: True)
+    ctx = _ctx(tmp_path, resource="default/api", extra={"replicas": 3})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ScaleAction()])
+
+    monkeypatch.setattr("prash.actions.scale.get_deployment_replicas", lambda ns, name: 3)
+    result = dispatcher.run("scale", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert "scaled to 3 replicas" in result.result.summary
+    assert result.result.verification.ok
+
+    monkeypatch.setattr("prash.actions.scale.get_deployment_replicas", lambda ns, name: 1)
+    result = dispatcher.run("scale", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert not result.result.verification.ok
+    assert "replicas=1 (target=3)" in result.result.verification.detail
 
 
 def test_audit_recorded_for_refused_read_only(tmp_path):

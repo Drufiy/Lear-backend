@@ -42,6 +42,7 @@ from .actions.open_pr import OpenPrAction
 from .actions.restart_pod import RestartPodAction
 from .actions.rollback import RollbackAction
 from .actions.execute_aws import ExecuteAwsAction
+from .actions.scale import ScaleAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
 from .connectors.aws import AWSConnector
@@ -183,6 +184,7 @@ def _make_context(
             "body": getattr(args, "body", None),
             "command": getattr(args, "command", None),
             "pem_path": getattr(args, "pem_path", None),
+            "replicas": getattr(args, "replicas", None),
         },
     )
 
@@ -195,6 +197,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             RequestSecretAction(),
             RestartPodAction(),
             RollbackAction(),
+            ScaleAction(),
             ApplyCiFixAction(),
             ApplyManifestFixAction(),
             ExecuteAwsAction(),
@@ -649,6 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--body", help="PR body (open-pr)")
     run.add_argument("--command", help="Command to execute (execute-aws)")
     run.add_argument("--pem-path", help="Path to PEM file for SSH fallback (execute-aws)")
+    run.add_argument("--replicas", type=int, help="target replica count (scale)")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)
