@@ -397,6 +397,13 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 
 ## 9. Decision log
 
+**2026-08-17 — `prash setup` Configuration Wizard v0.1 (Anant)**
+
+Created a terminal setup wizard (`prash setup`) to act as a fast local installer. It parses `.env.example`, groups keys logically (AI Models, Cloud, etc.), and prompts the user using a `rich`-based interactive interface.
+- It safely masks secrets during input to avoid terminal history leaks.
+- Preserves existing values if the user presses `Enter` to skip.
+- Retains structural comments from `.env.example` when saving out to the user's `.env`.
+- Verified live against a dummy `test.env` file to ensure non-destructive merging.
 **2026-08-17 — AWS `execute_command` Wired into Dispatcher (Anant)**
 
 Tier-2 task completed. The AWS EC2 `execute_command` logic built earlier has been formally registered as a dispatcher action (`execute-aws`).
