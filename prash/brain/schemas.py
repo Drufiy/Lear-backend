@@ -32,9 +32,57 @@ _CATEGORY_ALIASES = {
 }
 
 
+class FileEdit(BaseModel):
+    """One exact-match search/replace edit against a file's current content.
+
+    Added 2026-08-17 (PRASH_V2.md §9) after live stress-testing found that
+    whole-file regeneration (the original, and until now only, FileChange
+    shape) silently drops content the model doesn't fully attend to — two
+    separate live PRs each contained a correct fix PLUS unrelated deleted
+    comment lines, with the model's own explanation claiming "everything
+    else is untouched" when the diff proved otherwise. There was no
+    mechanism to catch this: new_content was trusted as the complete file
+    and written straight to a blob.
+
+    old_content must match the current file exactly and uniquely — the same
+    contract Prash's own coding-agent Edit tool uses, deliberately, since
+    that's a pattern models are already well-trained to produce reliably.
+    This is NOT the same as a traditional unified diff (line numbers +
+    context, tried previously and abandoned — see the "patch" field warning
+    this replaces in diagnosis_agent.py's prompt — fragile against whitespace
+    drift). An exact substring match has no line numbers to get wrong: it
+    either matches or it doesn't, and a failed match fails loudly (see
+    FileChange.apply()) instead of silently corrupting the file.
+    """
+
+    old_content: str = Field(..., description="Exact existing text to find — must appear exactly once in the current file")
+    new_content: str = Field(..., description="Text to replace it with")
+
+    @field_validator("old_content")
+    @classmethod
+    def validate_old_content(cls, v):
+        if not v:
+            raise ValueError("old_content must not be empty")
+        return v
+
+    @field_validator("new_content")
+    @classmethod
+    def validate_edit_new_content(cls, v):
+        if len(v) > 200_000:
+            raise ValueError("edit new_content exceeds 200KB — likely hallucinated")
+        return v
+
+
 class FileChange(BaseModel):
     path: str = Field(..., description="File path relative to repo root")
-    new_content: str | None = Field(default=None, description="Complete new file content")
+    edits: list[FileEdit] = Field(
+        default_factory=list,
+        description="Exact-match search/replace edits against the file's EXISTING content. Use this to change a file that already exists.",
+    )
+    new_content: str | None = Field(
+        default=None,
+        description="Complete content for a brand-NEW file only. Do not use this to edit a file that already exists — use `edits` instead.",
+    )
     explanation: str = Field(..., description="What changed and why")
 
     @field_validator("path")
@@ -56,10 +104,38 @@ class FileChange(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def require_content(self) -> "FileChange":
-        if not self.new_content:
-            raise ValueError("new_content must be provided")
+    def require_edits_or_new_content(self) -> "FileChange":
+        if self.edits and self.new_content:
+            raise ValueError("FileChange must use either `edits` (existing file) or `new_content` (new file), not both")
+        if not self.edits and not self.new_content:
+            raise ValueError("FileChange must provide either `edits` or `new_content`")
         return self
+
+    def apply(self, original_content: str | None) -> str:
+        """Return the file's new content after this change.
+
+        new_content changes ignore original_content entirely (this is a new
+        file, or an intentional full replacement). edits changes apply each
+        edit in turn against original_content, requiring an exact, unique
+        match — the whole point being that anything the model didn't
+        explicitly mention in an edit is structurally impossible to lose,
+        unlike regenerating the entire file and hoping nothing fell out.
+        """
+        if self.new_content is not None:
+            return self.new_content
+        content = original_content or ""
+        for i, edit in enumerate(self.edits, start=1):
+            count = content.count(edit.old_content)
+            if count == 0:
+                raise ValueError(
+                    f"edit {i} for {self.path} did not apply: old_content not found in the current file content"
+                )
+            if count > 1:
+                raise ValueError(
+                    f"edit {i} for {self.path} did not apply: old_content matches {count} times, expected exactly 1 — it must be unique"
+                )
+            content = content.replace(edit.old_content, edit.new_content, 1)
+        return content
 
 
 class DiagnosisOption(BaseModel):

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from prash.brain.schemas import Diagnosis, DiagnosisOption
+from prash.brain.schemas import Diagnosis, DiagnosisOption, FileChange, FileEdit
 
 
 def _base(**overrides) -> dict:
@@ -158,6 +158,73 @@ def test_options_normalizes_string_null_and_empty_list_to_none():
     for raw in ("null", "NULL", "none", "", []):
         d = Diagnosis(**_base(options=raw))
         assert d.options is None, f"{raw!r} did not normalize to None"
+
+
+# ── FileChange.apply(): edits vs new_content (PRASH_V2.md §9, 2026-08-17) ───
+# Added after live stress-testing found whole-file regeneration silently drops
+# content the model doesn't fully attend to (two real PRs each had the
+# correct fix plus unrelated deleted comment lines). edits apply as exact,
+# unique search/replace against the file's real current content instead.
+
+def test_file_change_requires_edits_or_new_content():
+    with pytest.raises(ValidationError, match="edits.*or.*new_content"):
+        FileChange(path="x.py", explanation="nothing to do")
+
+
+def test_file_change_rejects_both_edits_and_new_content():
+    with pytest.raises(ValidationError, match="not both"):
+        FileChange(
+            path="x.py",
+            explanation="ambiguous",
+            new_content="a = 1\n",
+            edits=[FileEdit(old_content="a", new_content="b")],
+        )
+
+
+def test_file_change_new_content_ignores_original():
+    fc = FileChange(path="x.py", new_content="a = 2\n", explanation="new file")
+    assert fc.apply("a = 1\n") == "a = 2\n"
+    assert fc.apply(None) == "a = 2\n"
+
+
+def test_file_change_edits_apply_only_the_matched_span():
+    fc = FileChange(
+        path="k8s/app.yaml",
+        edits=[FileEdit(old_content="image: v1", new_content="image: v2")],
+        explanation="bump image",
+    )
+    original = "spec:\n  # keep this comment\n  image: v1\n  replicas: 1\n"
+    assert fc.apply(original) == "spec:\n  # keep this comment\n  image: v2\n  replicas: 1\n"
+
+
+def test_file_change_edits_apply_in_sequence():
+    fc = FileChange(
+        path="pkg.json",
+        edits=[
+            FileEdit(old_content='"react": "^17"', new_content='"react": "^18"'),
+            FileEdit(old_content='"react-dom": "^17"', new_content='"react-dom": "^18"'),
+        ],
+        explanation="bump both together",
+    )
+    original = '{"react": "^17", "react-dom": "^17"}'
+    assert fc.apply(original) == '{"react": "^18", "react-dom": "^18"}'
+
+
+def test_file_change_edit_raises_when_old_content_missing():
+    fc = FileChange(path="x.py", edits=[FileEdit(old_content="not_here", new_content="x")], explanation="?")
+    with pytest.raises(ValueError, match="did not apply.*not found"):
+        fc.apply("a = 1\n")
+
+
+def test_file_change_edit_raises_when_old_content_not_unique():
+    fc = FileChange(path="x.py", edits=[FileEdit(old_content="PORT = 8080", new_content="PORT = 9090")], explanation="?")
+    with pytest.raises(ValueError, match="matches 2 times"):
+        fc.apply("PORT = 8080\nOTHER = 1\nPORT = 8080\n")
+
+
+def test_file_edit_rejects_empty_old_content():
+    with pytest.raises(ValidationError):
+        FileEdit(old_content="", new_content="x")
 
 
 def test_options_action_can_be_null_for_escalate_to_human():

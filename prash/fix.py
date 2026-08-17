@@ -111,8 +111,9 @@ async def diagnose_k8s_pod(
                 f"{manifest_content}\n"
                 f"(This is the live content of the manifest defining Deployment "
                 f"'{deployment}', already fetched for you from {repo}. If the fix is a "
-                f"manifest change, return the COMPLETE corrected file in files_changed "
-                f"with path exactly '{manifest_path}'.)"
+                f"manifest change, return an edits entry in files_changed with path "
+                f"exactly '{manifest_path}' — old_content copied verbatim from this "
+                f"content, not a regenerated new_content.)"
             )
 
     return await diagnose_failure(

@@ -227,10 +227,21 @@ def test_list_all_pods_in_namespace_when_no_name_given(monkeypatch):
 
 
 # ── get_pod_logs: the previous-attempt fallback, verified live 2026-08-09 ──
+# _preload_content=False (added 2026-08-17, see _read_pod_log_raw's docstring
+# for the real bug this fixed) means read_namespaced_pod_log returns a
+# response-like object with .data (bytes) + .release_conn(), not a plain str
+# -- these mocks reflect the real client shape, not a plain string.
+
+def _fake_log_response(text: str):
+    return type("FakeLogResponse", (), {"data": text.encode(), "release_conn": lambda self: None})()
+
 
 def test_logs_falls_back_to_previous_when_current_is_empty(monkeypatch):
     fake_api = _patched_core_api(monkeypatch)
-    fake_api.read_namespaced_pod_log.side_effect = ["", "simulated failure: config file missing\n"]
+    fake_api.read_namespaced_pod_log.side_effect = [
+        _fake_log_response(""),
+        _fake_log_response("simulated failure: config file missing\n"),
+    ]
 
     result = k8s.get_pod_logs("prash-demo", "broken-app-abc")
 
@@ -242,7 +253,7 @@ def test_logs_falls_back_to_previous_when_current_is_empty(monkeypatch):
 
 def test_logs_returns_current_without_fallback_when_present(monkeypatch):
     fake_api = _patched_core_api(monkeypatch)
-    fake_api.read_namespaced_pod_log.return_value = "app started ok\n"
+    fake_api.read_namespaced_pod_log.return_value = _fake_log_response("app started ok\n")
 
     result = k8s.get_pod_logs("prash-demo", "healthy-pod")
 
@@ -257,6 +268,68 @@ def test_logs_returns_empty_string_not_raise_when_pod_not_found(monkeypatch):
     result = k8s.get_pod_logs("prash-demo", "does-not-exist")
 
     assert result == ""
+
+
+def test_logs_are_real_decoded_text_not_a_stringified_bytes_wrapper(monkeypatch):
+    """Regression test for the real bug found live 2026-08-17 building
+    `prash logs`: without _preload_content=False, this kubernetes client
+    version (36.0.3) silently returned the log text wrapped as the literal
+    characters "b'...'" instead of decoded text -- a valid non-empty string,
+    so nothing else here caught it. Confirmed live against a real pod before
+    this test was written; asserting the shape here so it can't regress."""
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_pod_log.return_value = _fake_log_response("real log line\n")
+
+    result = k8s.get_pod_logs("prash-demo", "any-pod")
+
+    assert result == "real log line\n"
+    assert not result.startswith("b'")
+    _, call_kwargs = fake_api.read_namespaced_pod_log.call_args
+    assert call_kwargs["_preload_content"] is False
+
+
+# ── stream_pod_logs: live-follow, sprint-2 Kubernetes Depth (2026-08-17) ────
+
+def _fake_streaming_response(lines: list[str]):
+    released = {"value": False}
+    resp = type(
+        "FakeStreamingResponse",
+        (),
+        {
+            "__iter__": lambda self: iter(line.encode() for line in lines),
+            "release_conn": lambda self: released.__setitem__("value", True),
+        },
+    )()
+    return resp, released
+
+
+def test_stream_pod_logs_yields_decoded_lines_and_follows(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    resp, released = _fake_streaming_response(["line one\n", "line two\n"])
+    fake_api.read_namespaced_pod_log.return_value = resp
+
+    result = list(k8s.stream_pod_logs("prash-demo", "api", tail_lines=10))
+
+    assert result == ["line one", "line two"]
+    assert released["value"] is True
+    _, call_kwargs = fake_api.read_namespaced_pod_log.call_args
+    assert call_kwargs["follow"] is True
+    assert call_kwargs["_preload_content"] is False
+
+
+def test_stream_pod_logs_releases_connection_on_early_break(monkeypatch):
+    """Breaking out of iteration early (e.g. Ctrl+C in the CLI) must not
+    leak the underlying connection -- the finally: release_conn() is the
+    whole point of testing this separately from the happy path above."""
+    fake_api = _patched_core_api(monkeypatch)
+    resp, released = _fake_streaming_response(["line one\n", "line two\n", "line three\n"])
+    fake_api.read_namespaced_pod_log.return_value = resp
+
+    gen = k8s.stream_pod_logs("prash-demo", "api", tail_lines=10)
+    assert next(gen) == "line one"
+    gen.close()
+
+    assert released["value"] is True
 
 
 # ── get_pod_events ──────────────────────────────────────────────────────────

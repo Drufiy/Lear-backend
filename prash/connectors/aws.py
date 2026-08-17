@@ -28,7 +28,7 @@ class SSMFailedNeedsSSH(Exception):
 
 class AWSConnector(Connector):
     name = "aws"
-    read_capabilities = ("pod_status", "logs")  # Mapping EC2 instances similar to pods for now
+    read_capabilities = ("instance_status", "logs")
     write_capabilities = ("execute",)
 
     def __init__(self, credentials: Mapping[str, Any]):
@@ -37,6 +37,7 @@ class AWSConnector(Connector):
         self.secret_key = self.credentials.get("AWS_SECRET_ACCESS_KEY")
         self.region = self.credentials.get("AWS_REGION")
         self.session_token = self.credentials.get("AWS_SESSION_TOKEN")
+        self._authenticated: bool | None = None
 
     def _get_boto_session(self) -> Any:
         if not _HAS_BOTO3:
@@ -50,16 +51,29 @@ class AWSConnector(Connector):
         )
 
     def authenticate(self) -> bool:
+        """Validate credentials against STS, once per connector instance.
+
+        Every other method here calls authenticate() before touching AWS, so
+        without caching a single `prash investigate` invocation fires several
+        redundant STS calls (poll_state -> authenticate + locate ->
+        authenticate). Cached per-instance, which matches how connectors are
+        constructed: fresh per CLI invocation (see cli.py _make_connectors).
+        """
+        if self._authenticated is not None:
+            return self._authenticated
+
         if not self.access_key or not self.secret_key:
+            self._authenticated = False
             return False
-        
+
         try:
             session = self._get_boto_session()
             sts = session.client("sts")
             sts.get_caller_identity()
-            return True
+            self._authenticated = True
         except (botocore.exceptions.BotoCoreError, botocore.exceptions.ClientError):
-            return False
+            self._authenticated = False
+        return self._authenticated
 
     def locate(self, resource: str) -> Dict[str, Any]:
         """Locate EC2 instance by ID or Name tag."""
