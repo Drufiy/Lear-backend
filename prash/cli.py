@@ -41,6 +41,7 @@ from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
 from .actions.restart_pod import RestartPodAction
 from .actions.rollback import RollbackAction
+from .actions.execute_aws import ExecuteAwsAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
 from .connectors.aws import AWSConnector
@@ -180,6 +181,8 @@ def _make_context(
             "base": getattr(args, "base", None),
             "title": getattr(args, "title", None),
             "body": getattr(args, "body", None),
+            "command": getattr(args, "command", None),
+            "pem_path": getattr(args, "pem_path", None),
         },
     )
 
@@ -194,6 +197,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             RollbackAction(),
             ApplyCiFixAction(),
             ApplyManifestFixAction(),
+            ExecuteAwsAction(),
         ]
     )
     return dispatcher
@@ -602,6 +606,14 @@ def cmd_circuit(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    from .setup import run_setup_wizard
+
+    env_path = str(args.env_file) if getattr(args, "env_file", None) else ".env"
+    run_setup_wizard(env_path=env_path)
+    return 0
+
+
 class _BrandedHelp(argparse.HelpFormatter):
     """argparse's help is branding-hostile by default; prepend the masthead so
     `prash --help` and every subcommand's help carry the same yellow header."""
@@ -635,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--base", help="PR target branch (open-pr)")
     run.add_argument("--title", help="PR title (open-pr)")
     run.add_argument("--body", help="PR body (open-pr)")
+    run.add_argument("--command", help="Command to execute (execute-aws)")
+    run.add_argument("--pem-path", help="Path to PEM file for SSH fallback (execute-aws)")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)
@@ -684,6 +698,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tui", help="open the dashboard-style terminal UI (textual)", formatter_class=formatter_class).set_defaults(func=cmd_tui)
     sub.add_parser("repl", help="persistent interactive session (stage 1)", formatter_class=formatter_class).set_defaults(func=cmd_repl)
+    
+    setup = sub.add_parser("setup", help="run the interactive configuration wizard", formatter_class=formatter_class)
+    setup.set_defaults(func=cmd_setup)
 
     return parser
 

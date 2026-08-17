@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **AWS execute-aws Action**: Wired the AWS EC2 `execute_command` logic into the dispatcher as a formal action (`execute-aws`). This action runs under the APPROVAL Risk Tier, gracefully prompts for missing commands, and interactively handles the SSH fallback (`SSMFailedNeedsSSH`) by requesting a `.pem` file from the user.
 - **AWS EC2 Connector (Execution & SSH Fallback)**: Promoted the AWS EC2 connector to support `execute_command`. It executes via AWS Systems Manager (SSM) by default and falls back to a robust SSH execution method if SSM fails (e.g. missing IAM roles). The SSH fallback emits a clean `SSMFailedNeedsSSH` exception designed for REPL integration.
 - **Verification Script Gemini Fallback**: Live infra testing script now falls back to Gemini 3.5 Flash Lite and 3.1 Flash Lite if the primary diagnosis brain APIs fail.
 - **agent_guidelines.md**: Added a guidelines file to establish conventions for AI agents working on this project.

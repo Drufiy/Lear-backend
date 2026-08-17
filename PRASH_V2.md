@@ -368,7 +368,7 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 
 *Tier 2 — starts once a Tier 1 item lands, one connector per person, not a batch:*
 - Aradhya — GitLab CI only (not CircleCI/Jenkins yet — highest overlap, proven connector pattern)
-- Anant — AWS write actions (connector + `execute_command` already exist, just needs wiring + the write-action layer)
+- ~~Anant — AWS write actions (connector + `execute_command` already exist, just needs wiring + the write-action layer)~~ **(Done 2026-08-17)**
 - Aryan — Slack/Discord notifications (closes the exact "one laptop's desktop notification" gap this section already flagged)
 
 *Tier 3 — captured in Notion, deliberately unassigned, discuss as a team before assigning:* CircleCI, Jenkins, Terraform, standalone Docker, Datadog, Grafana, Snyk, gitleaks, PagerDuty, Dependabot, k6/Cypress/Playwright (this last one may collide semantically with the hardening-phase "Testing" checklist task in Notion — same word, different scope, flagged not resolved).
@@ -396,6 +396,13 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 ---
 
 ## 9. Decision log
+
+**2026-08-17 — AWS `execute_command` Wired into Dispatcher (Anant)**
+
+Tier-2 task completed. The AWS EC2 `execute_command` logic built earlier has been formally registered as a dispatcher action (`execute-aws`).
+- Classified under the **APPROVAL** Risk Tier, enforcing proper safety rails (circuit breakers and permission prompts).
+- Integrated with interactive prompts: gracefully requests missing `--command` parameters and actively catches `SSMFailedNeedsSSH` to prompt for `.pem` file fallback paths instead of hard-failing.
+- Live-verified end-to-end on a live EC2 instance. The dispatcher now accurately tracks AWS modifications in the `.prash/audit.log`.
 
 **2026-08-17 — CROSS-TRACK — Aryan, PLEASE READ. New command: `prash logs` (Kubernetes Depth, Tier 1). Also: a real pre-existing bug found and fixed in `get_pod_logs()`, plus a false alarm caught and reverted before it shipped.**
 
