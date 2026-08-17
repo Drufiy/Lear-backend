@@ -404,12 +404,17 @@ Created a terminal setup wizard (`prash setup`) to act as a fast local installer
 - Preserves existing values if the user presses `Enter` to skip.
 - Retains structural comments from `.env.example` when saving out to the user's `.env`.
 - Verified live against a dummy `test.env` file to ensure non-destructive merging.
+
 **2026-08-17 — AWS `execute_command` Wired into Dispatcher (Anant)**
 
 Tier-2 task completed. The AWS EC2 `execute_command` logic built earlier has been formally registered as a dispatcher action (`execute-aws`).
 - Classified under the **APPROVAL** Risk Tier, enforcing proper safety rails (circuit breakers and permission prompts).
 - Integrated with interactive prompts: gracefully requests missing `--command` parameters and actively catches `SSMFailedNeedsSSH` to prompt for `.pem` file fallback paths instead of hard-failing.
 - Live-verified end-to-end on a live EC2 instance. The dispatcher now accurately tracks AWS modifications in the `.prash/audit.log`.
+
+**2026-08-17 — Tier 2 starts (GitLab CI, Aradhya). Recorded demo moves to backlog.**
+Aradhya's call. Kubernetes Depth is fully built (4 PRs: #19, #20 merged, #22, #24) but 3 of 4 still open pending Aryan's review — strictly, "a Tier-1 item lands" (§7b) means merged, not just built, so this is a deliberate exception rather than the tiering rule being satisfied. Justified because Diagnosis Brain (a separate Tier-1 item) already merged, and the alternative is Aradhya blocked entirely while waiting on review he can't force. Recorded demo (the other open Tier-1 item) explicitly backlogged, not dropped — needs Aradhya at the keyboard for the actual recording, lower priority than continuing Tier-2 momentum right now.
+
 
 **2026-08-17 — CROSS-TRACK — Aryan, PLEASE READ. New command: `prash logs` (Kubernetes Depth, Tier 1). Also: a real pre-existing bug found and fixed in `get_pod_logs()`, plus a false alarm caught and reverted before it shipped.**
 
