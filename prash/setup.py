@@ -1,6 +1,5 @@
 """Interactive setup wizard for Prash."""
 
-import os
 from pathlib import Path
 
 from rich.console import Console
@@ -91,7 +90,11 @@ def run_setup_wizard(env_path: str = ".env", template_path: str = ".env.example"
             if default_display:
                 prompt_str += f" [dim]({default_display})[/dim]"
             
-            val = Prompt.ask(prompt_str, default=existing, show_default=False)
+            # password=True masks what the user types for secrets (the PR's
+            # intent) — otherwise a fresh secret value is echoed in plaintext
+            # on screen, leaking it to anyone shoulder-surfing or recording
+            # the terminal session.
+            val = Prompt.ask(prompt_str, default=existing, show_default=False, password=is_sec)
             new_values[key] = val
         console.print()
 

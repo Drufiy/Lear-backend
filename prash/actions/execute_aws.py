@@ -32,7 +32,7 @@ class ExecuteAwsAction(Action):
 
     def plan(self, ctx: ActionContext) -> Plan:
         command = ctx.extra.get("command")
-        noninteractive = getattr(ctx.extra, "noninteractive", False)
+        noninteractive = ctx.extra.get("noninteractive", False)
         if not command and not ctx.dry_run and not noninteractive:
             # Command is missing, we will prompt in execute, but for plan we can just indicate it
             command_desc = "<interactive input>"
@@ -58,7 +58,7 @@ class ExecuteAwsAction(Action):
             )
 
         command = ctx.extra.get("command")
-        noninteractive = getattr(ctx.extra, "noninteractive", False)
+        noninteractive = ctx.extra.get("noninteractive", False)
         
         if not command:
             if noninteractive:
@@ -107,10 +107,10 @@ class ExecuteAwsAction(Action):
             # Retry with SSH
             try:
                 res = aws.execute_command(ctx.target.resource, command, pem_path=pem_path)
-            except Exception as e:
+            except Exception as exc:  # noqa: BLE001 — report honestly, never fake a result
                 return ActionResult(
                     status=ActionResultStatus.FAILED,
-                    summary=f"SSH execution failed: {e}",
+                    summary=f"SSH execution failed: {exc}",
                 )
         except Exception as exc:  # noqa: BLE001
             return ActionResult(
@@ -134,7 +134,15 @@ class ExecuteAwsAction(Action):
 
     def verify(self, ctx: ActionContext, result: ActionResult) -> VerificationResult:
         res = result.detail
-        status_val = res.get("status", "").lower()
-        if "success" in status_val or res.get("exit_code", 0) == 0:
+        status_val = str(res.get("status", "")).lower()
+        if "success" in status_val:
             return VerificationResult(ok=True, detail="Command completed successfully")
+        exit_code = res.get("exit_code")
+        if exit_code is not None:
+            return VerificationResult(
+                ok=exit_code == 0,
+                detail=f"Command exited {exit_code}. STDERR: {res.get('stderr', '').strip()}",
+            )
+        # No success status and no exit code (e.g. SSM returned "Failed") —
+        # report honestly instead of defaulting to ok.
         return VerificationResult(ok=False, detail=f"Command may have failed. Status: {status_val}, STDERR: {res.get('stderr', '').strip()}")

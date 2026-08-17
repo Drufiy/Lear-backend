@@ -1,5 +1,12 @@
 from prash.actions.apply_ci_fix import ApplyCiFixAction
-from prash.actions.contract import ActionContext, ActionResultStatus, Decision, Target
+from prash.actions.contract import (
+    ActionContext,
+    ActionResult,
+    ActionResultStatus,
+    Decision,
+    Target,
+)
+from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
 from prash.actions.restart_pod import RestartPodAction
@@ -531,3 +538,64 @@ def test_request_secret_reports_rerun_failure_but_keeps_secret(tmp_path):
     assert result.result.status is ActionResultStatus.FAILED
     assert "stored locally" in result.result.summary
     assert _store(tmp_path).secrets()["DEPLOY_KEY"] == "s3cr3t"
+
+
+class _FakeAWS:
+    def execute_command(self, resource, command, **kwargs):
+        return {"source": "ssm", "status": "Success", "stdout": "ok", "stderr": ""}
+
+
+def _aws_ctx(tmp_path, **extra):
+    return _ctx(
+        tmp_path,
+        resource="i-0abc",
+        extra={"connectors": {"aws": _FakeAWS()}, **extra},
+    )
+
+
+def test_execute_aws_fails_honestly_when_noninteractive_and_no_command(tmp_path):
+    """Regression: the merged code read ctx.extra's noninteractive flag via
+    getattr() on a dict (always False), so --noninteractive fell through to an
+    interactive Prompt.ask instead of a clean FAILED. The flag is now threaded
+    through _make_context's extra dict and read with .get()."""
+    ctx = _aws_ctx(tmp_path, command=None, noninteractive=True)
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecuteAwsAction()])
+    result = dispatcher.run("execute-aws", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "non-interactive" in result.result.summary
+
+
+def test_execute_aws_verify_failed_ssm_without_exit_code_is_not_ok(tmp_path):
+    """Regression: SSM results carry no exit_code; a "Failed" status used to
+    default to ok via res.get("exit_code", 0) == 0."""
+    action = ExecuteAwsAction()
+    result = ActionResult(
+        status=ActionResultStatus.SUCCEEDED,
+        summary="done",
+        detail={"source": "ssm", "status": "Failed", "stdout": "", "stderr": "boom"},
+    )
+    verification = action.verify(_aws_ctx(tmp_path), result)
+    assert not verification.ok
+    assert "may have failed" in verification.detail
+
+
+def test_execute_aws_verify_ssm_success_is_ok(tmp_path):
+    action = ExecuteAwsAction()
+    result = ActionResult(
+        status=ActionResultStatus.SUCCEEDED,
+        summary="done",
+        detail={"source": "ssm", "status": "Success", "stdout": "hi", "stderr": ""},
+    )
+    assert action.verify(_aws_ctx(tmp_path), result).ok
+
+
+def test_execute_aws_verify_ssh_nonzero_exit_is_not_ok(tmp_path):
+    action = ExecuteAwsAction()
+    result = ActionResult(
+        status=ActionResultStatus.SUCCEEDED,
+        summary="done",
+        detail={"source": "ssh", "status": "Failed", "exit_code": 1, "stdout": "", "stderr": "nope"},
+    )
+    assert not action.verify(_aws_ctx(tmp_path), result).ok

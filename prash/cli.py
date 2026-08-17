@@ -24,7 +24,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -37,11 +37,11 @@ from .actions.contract import (
     Plan,
     Target,
 )
+from .actions.execute_aws import ExecuteAwsAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
 from .actions.restart_pod import RestartPodAction
 from .actions.rollback import RollbackAction
-from .actions.execute_aws import ExecuteAwsAction
 from .actions.scale import ScaleAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
@@ -55,7 +55,7 @@ from .permissions import PermissionMode
 
 console = ui.console
 
-PROVIDERS: Dict[str, Type[Connector]] = {
+PROVIDERS: dict[str, type[Connector]] = {
     "github": GitHubConnector,
     "vercel": VercelConnector,
     "aws": AWSConnector,
@@ -70,7 +70,7 @@ def _parse_mode(raw: str) -> PermissionMode:
         sys.exit(2)
 
 
-def _make_connectors(creds: Dict[str, Any]) -> Dict[str, Connector]:
+def _make_connectors(creds: dict[str, Any]) -> dict[str, Connector]:
     return {name: cls(creds) for name, cls in PROVIDERS.items()}
 
 
@@ -85,7 +85,7 @@ _BRAIN_ENV_PASSTHROUGH = (
 )
 
 
-def _export_cluster_env(creds: Dict[str, Any]) -> None:
+def _export_cluster_env(creds: dict[str, Any]) -> None:
     """Make .env's cluster + brain-model settings visible to the libraries that
     read them straight from the process environment (prash.connectors.kubernetes,
     prash.brain.kimi_client) rather than through ctx.credentials.
@@ -142,9 +142,9 @@ class CliAsk(AskFn):
 def _make_context(
     args: argparse.Namespace,
     store: CredentialStore,
-    creds: Dict[str, Any],
-    resource: Optional[str] = None,
-    env: Optional[str] = None,
+    creds: dict[str, Any],
+    resource: str | None = None,
+    env: str | None = None,
 ) -> ActionContext:
     connectors = _make_connectors(creds)
     secret_input = None
@@ -185,6 +185,7 @@ def _make_context(
             "command": getattr(args, "command", None),
             "pem_path": getattr(args, "pem_path", None),
             "replicas": getattr(args, "replicas", None),
+            "noninteractive": getattr(args, "noninteractive", False),
         },
     )
 
@@ -263,7 +264,7 @@ def _render_run_result(result: RunResult) -> int:
     return 0 if result.ok else 1
 
 
-def _render_no_auto_action(recommended_action: Optional[str], namespace: str) -> None:
+def _render_no_auto_action(recommended_action: str | None, namespace: str) -> None:
     if recommended_action == "rollback":
         console.print("[yellow]brain recommends rollback — not auto-run from `prash fix` (needs the owning Deployment, which Track B doesn't derive from a pod); run `prash run rollback <deployment> --env <namespace>` to execute[/yellow]")
     elif recommended_action == "scale":
@@ -272,7 +273,7 @@ def _render_no_auto_action(recommended_action: Optional[str], namespace: str) ->
         console.print("[dim]brain did not recommend an automated action; review the diagnosis above[/dim]")
 
 
-def _pick_option(diagnosis: Any) -> Optional[str]:
+def _pick_option(diagnosis: Any) -> str | None:
     """Interactive picker for the "ask, don't quit" menu (PRASH_V2.md §9,
     2026-08-15). Returns the chosen option's action value, or None for the
     explicit "escalate to a human" choice and for a declined/no-input prompt.
@@ -709,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     ui.masthead(console)
