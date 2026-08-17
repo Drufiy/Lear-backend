@@ -1,4 +1,5 @@
 from prash.actions.apply_ci_fix import ApplyCiFixAction
+from prash.actions.apply_gitlab_ci_fix import ApplyGitlabCiFixAction
 from prash.actions.contract import (
     ActionContext,
     ActionResult,
@@ -15,6 +16,7 @@ from prash.actions.restart_pod import RestartPodAction
 from prash.actions.rollback import RollbackAction
 from prash.actions.scale import ScaleAction
 from prash.brain.schemas import FileChange, FileEdit
+from prash.connectors.gitlab import GitLabError
 from prash.circuit_breaker import CircuitBreaker
 from prash.credentials import CredentialStore
 from prash.dispatch import AskFn, Dispatcher, ExecutionOutcome
@@ -80,6 +82,41 @@ class FakeGitHub:
         if self.raise_ref_exists:
             raise RuntimeError(f"GitHub API 422: Reference already exists for {branch}")
         self.refs[branch] = commit_sha
+
+
+class FakeGitLab:
+    def __init__(self, creds=None):
+        self.mrs = {}
+        self.commits = {}  # commit sha -> {"branch": ..., "actions": [...]}
+        self.default_branch = "main"
+        self.raise_branch_exists = False
+        self.files = {}  # path -> current content, for get_file_content
+
+    def authenticate(self):
+        return True
+
+    def get_repo(self, project):
+        return {"default_branch": self.default_branch}
+
+    def get_file_content(self, project, path, ref):
+        if path not in self.files:
+            raise GitLabError(f"GitLab API 404: {path} not found at {ref}")
+        return self.files[path]
+
+    def create_commit(self, project, branch, message, actions, start_branch=None):
+        if self.raise_branch_exists:
+            raise RuntimeError(f"GitLab API 400: Branch already exists for {branch}")
+        sha = f"commit-sha-{len(self.commits) + 1}"
+        self.commits[sha] = {"branch": branch, "actions": actions}
+        return {"id": sha}
+
+    def create_mr(self, project, title, source_branch, target_branch, body=""):
+        iid = len(self.mrs) + 1
+        self.mrs[iid] = {"iid": iid, "web_url": f"https://gitlab.com/{project}/-/merge_requests/{iid}", "state": "opened"}
+        return self.mrs[iid]
+
+    def get_mr(self, project, iid):
+        return self.mrs.get(iid, {})
 
 
 def _store(tmp_path):
@@ -323,6 +360,126 @@ def test_apply_ci_fix_fails_honestly_when_edit_matches_more_than_once(tmp_path):
     result = action.execute(ctx)
     assert result.status is ActionResultStatus.FAILED
     assert "matches 2 times" in result.summary
+
+
+def test_apply_gitlab_ci_fix_runs_end_to_end_with_prompt(tmp_path):
+    changes = [FileChange(path="backend/app.py", new_content="x = 1\n", explanation="fix ruff violation")]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": FakeGitLab()}, "file_changes": changes, "pipeline_id": 789},
+        resource="acme/widget",
+    )
+    dispatcher = Dispatcher(mode=PermissionMode.ASK)
+    dispatcher.register_all([ApplyGitlabCiFixAction()])
+    ask = FakeAsk(answer=True)
+    result = dispatcher.run("apply-gitlab-ci-fix", ctx, ask=ask)
+    assert ask.called is True
+    assert result.ok
+    assert result.result.verification.ok
+    assert result.result.detail["mr_iid"] == 1
+    assert result.result.detail["branch"] == "prash/fix-pipeline-789"
+
+
+def test_apply_gitlab_ci_fix_skipped_when_user_declines(tmp_path):
+    changes = [FileChange(path="backend/app.py", new_content="x = 1\n", explanation="fix ruff violation")]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": FakeGitLab()}, "file_changes": changes, "pipeline_id": 789},
+        resource="acme/widget",
+    )
+    dispatcher = Dispatcher(mode=PermissionMode.ASK)
+    dispatcher.register_all([ApplyGitlabCiFixAction()])
+    result = dispatcher.run("apply-gitlab-ci-fix", ctx, ask=FakeAsk(answer=False))
+    assert result.outcome.value == "skipped"
+    assert result.result.status is ActionResultStatus.SKIPPED
+
+
+def test_apply_gitlab_ci_fix_fails_cleanly_with_no_file_changes(tmp_path):
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": FakeGitLab()}, "file_changes": [], "pipeline_id": 789},
+        resource="acme/widget",
+    )
+    action = ApplyGitlabCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "no file changes" in result.summary
+
+
+def test_apply_gitlab_ci_fix_fails_cleanly_when_branch_already_exists(tmp_path):
+    changes = [FileChange(path="backend/app.py", new_content="x = 1\n", explanation="fix ruff violation")]
+    gitlab = FakeGitLab()
+    gitlab.raise_branch_exists = True
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": gitlab}, "file_changes": changes, "pipeline_id": 789},
+        resource="acme/widget",
+    )
+    action = ApplyGitlabCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "already proposed" in result.summary
+
+
+def test_apply_gitlab_ci_fix_applies_edits_against_the_real_fetched_file(tmp_path):
+    """Same fidelity guarantee as ApplyCiFixAction's GitHub equivalent: an
+    `edits` FileChange patches only the matched span of the file's real
+    current content, fetched fresh from GitLab's raw-file endpoint."""
+    gitlab = FakeGitLab()
+    gitlab.files["k8s/app.yaml"] = "spec:\n  replicas: 1\n  # a comment nothing should touch\n  image: myapp:v1\n"
+    changes = [FileChange(
+        path="k8s/app.yaml",
+        edits=[FileEdit(old_content="image: myapp:v1", new_content="image: myapp:v2")],
+        explanation="bump image tag",
+    )]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": gitlab}, "file_changes": changes, "pipeline_id": 1},
+        resource="acme/widget",
+    )
+    action = ApplyGitlabCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    commit = next(iter(gitlab.commits.values()))
+    assert commit["actions"][0]["content"] == "spec:\n  replicas: 1\n  # a comment nothing should touch\n  image: myapp:v2\n"
+    assert commit["actions"][0]["action"] == "update"
+
+
+def test_apply_gitlab_ci_fix_marks_new_files_as_create_not_update(tmp_path):
+    """A FileChange for a path GitLab doesn't have yet must use action
+    "create" -- GitLab's Commits API rejects an "update" action against a
+    nonexistent path, unlike GitHub's blob/tree write which doesn't care."""
+    changes = [FileChange(path="k8s/new.yaml", new_content="kind: ConfigMap\n", explanation="add missing manifest")]
+    gitlab = FakeGitLab()
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": gitlab}, "file_changes": changes, "pipeline_id": 1},
+        resource="acme/widget",
+    )
+    action = ApplyGitlabCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    commit = next(iter(gitlab.commits.values()))
+    assert commit["actions"][0]["action"] == "create"
+
+
+def test_apply_gitlab_ci_fix_fails_honestly_when_edit_does_not_match(tmp_path):
+    gitlab = FakeGitLab()
+    gitlab.files["k8s/app.yaml"] = "image: myapp:v1\n"
+    changes = [FileChange(
+        path="k8s/app.yaml",
+        edits=[FileEdit(old_content="image: myapp:v9-does-not-exist", new_content="image: myapp:v2")],
+        explanation="bump image tag",
+    )]
+    ctx = _ctx(
+        tmp_path,
+        extra={"connectors": {"gitlab": gitlab}, "file_changes": changes, "pipeline_id": 1},
+        resource="acme/widget",
+    )
+    action = ApplyGitlabCiFixAction()
+    result = action.execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "did not apply" in result.summary
 
 
 def test_restart_pod_reports_failure_honestly_when_pod_missing(tmp_path, monkeypatch):

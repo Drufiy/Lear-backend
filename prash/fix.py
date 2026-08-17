@@ -24,6 +24,7 @@ from .brain.diagnosis_agent import (
     find_deployment_manifest,
     format_k8s_context,
 )
+from .brain.gitlab_log_fetcher import fetch_pipeline_logs
 from .brain.log_fetcher import fetch_workflow_logs
 from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
 from .brain.schemas import Diagnosis
@@ -149,6 +150,22 @@ async def diagnose_ci_run(run_id: int, repo_full_name: str, access_token: str) -
         repo_full_name=repo_full_name,
         commit_message="(unknown — multi-failure diagnosis from run logs)",
         workflow_name=f"github run {run_id}",
+    )
+
+
+async def diagnose_gitlab_ci_run(pipeline_id: int, project: str, access_token: str) -> MultiFailureResult:
+    """GitLab counterpart to diagnose_ci_run (Sprint 2 Tier 2, PRASH_V2.md
+    §7b) -- same multi-failure diagnosis brain, fed from a pipeline's job
+    traces instead of a workflow run's log ZIP. The brain itself is already
+    provider-agnostic (it only ever sees preprocessed log text + a
+    workflow_name label), so nothing downstream of fetch_pipeline_logs needs
+    to know this came from GitLab rather than GitHub."""
+    logs = await fetch_pipeline_logs(pipeline_id, project, access_token)
+    return await diagnose_multi_failure(
+        logs=logs,
+        repo_full_name=project,
+        commit_message="(unknown — multi-failure diagnosis from pipeline logs)",
+        workflow_name=f"gitlab pipeline {pipeline_id}",
     )
 
 

@@ -31,6 +31,7 @@ from rich.prompt import Prompt
 
 from . import ui
 from .actions.apply_ci_fix import ApplyCiFixAction, ApplyManifestFixAction
+from .actions.apply_gitlab_ci_fix import ApplyGitlabCiFixAction
 from .actions.contract import (
     ActionContext,
     MissingSecretError,
@@ -50,6 +51,7 @@ from .circuit_breaker import CircuitBreaker
 from .connectors.aws import AWSConnector
 from .connectors.base import Connector
 from .connectors.github import GitHubConnector, GitHubRunner
+from .connectors.gitlab import GitLabConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
@@ -59,9 +61,14 @@ console = ui.console
 
 PROVIDERS: dict[str, type[Connector]] = {
     "github": GitHubConnector,
+    "gitlab": GitLabConnector,
     "vercel": VercelConnector,
     "aws": AWSConnector,
 }
+
+# Providers --ci diagnosis on `prash fix` knows how to drive. Not all of
+# PROVIDERS: aws/vercel have no CI-run concept for this command.
+_CI_PROVIDERS = ("github", "gitlab")
 
 
 def _parse_mode(raw: str) -> PermissionMode:
@@ -226,6 +233,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
 
             ExecAction(),
             ApplyCiFixAction(),
+            ApplyGitlabCiFixAction(),
             ApplyManifestFixAction(),
             ExecuteAwsAction(),
         ]
@@ -319,6 +327,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
     from .fix import (
         FixTargetError,
         diagnose_ci_run,
+        diagnose_gitlab_ci_run,
         diagnose_k8s_pod,
         recommended_action_id,
         render_diagnosis,
@@ -333,14 +342,28 @@ def cmd_fix(args: argparse.Namespace) -> int:
     mode = _parse_mode(mode_raw)
 
     if args.ci:
+        provider = getattr(args, "provider", "github") or "github"
         if not args.run_id:
-            console.print("[red]--run-id is required for CI diagnosis: `prash fix <owner>/<repo> --ci --run-id <n>`[/red]")
+            console.print(f"[red]--run-id is required for CI diagnosis: `prash fix <target> --ci --run-id <n>`[/red]")
             return 2
-        if not creds.get("GITHUB_TOKEN"):
-            console.print("[yellow]CI diagnosis needs GITHUB_TOKEN in local .env[/yellow]")
+
+        # Same diagnosis+apply shape either way -- only the token, fetch
+        # function, apply-fix action id, and the extra key naming the run
+        # differ between providers.
+        if provider == "gitlab":
+            token_key, diagnose_fn, apply_action_id, run_extra_key = (
+                "GITLAB_TOKEN", diagnose_gitlab_ci_run, "apply-gitlab-ci-fix", "pipeline_id",
+            )
+        else:
+            token_key, diagnose_fn, apply_action_id, run_extra_key = (
+                "GITHUB_TOKEN", diagnose_ci_run, "apply-ci-fix", "run_id",
+            )
+
+        if not creds.get(token_key):
+            console.print(f"[yellow]CI diagnosis needs {token_key} in local .env[/yellow]")
             return 3
         try:
-            result = asyncio.run(diagnose_ci_run(args.run_id, args.target, creds["GITHUB_TOKEN"]))
+            result = asyncio.run(diagnose_fn(args.run_id, args.target, creds[token_key]))
         except Exception as exc:  # noqa: BLE001 — report honestly, never fake a diagnosis
             console.print(f"[red]CI diagnosis failed: {exc}[/red]")
             return 2
@@ -353,9 +376,9 @@ def cmd_fix(args: argparse.Namespace) -> int:
         dispatcher = _build_dispatcher(mode)
         ctx = _make_context(args, store, creds, resource=args.target, env=args.env)
         ctx.extra["file_changes"] = changes
-        ctx.extra["run_id"] = args.run_id
+        ctx.extra[run_extra_key] = args.run_id
         try:
-            run_result = dispatcher.run("apply-ci-fix", ctx, ask=None if args.noninteractive else CliAsk())
+            run_result = dispatcher.run(apply_action_id, ctx, ask=None if args.noninteractive else CliAsk())
         except KeyError as exc:
             console.print(f"[red]{exc}[/red]")
             return 2
@@ -687,9 +710,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)
-    fix.add_argument("target", help="<namespace>/<pod> for a Kubernetes problem, or <owner>/<repo> with --ci")
+    fix.add_argument("target", help="<namespace>/<pod> for a Kubernetes problem, or <owner>/<repo> (GitHub) / <namespace>/<project> (GitLab) with --ci")
     fix.add_argument("--ci", action="store_true", help="diagnose a CI run (multi-failure) instead of a pod")
-    fix.add_argument("--run-id", type=int, help="GitHub run id for CI diagnosis (requires GITHUB_TOKEN)")
+    fix.add_argument("--provider", choices=_CI_PROVIDERS, default="github", help="CI provider for --ci (default: github)")
+    fix.add_argument("--run-id", type=int, help="GitHub run id, or GitLab pipeline id with --provider gitlab, for CI diagnosis")
     fix.add_argument(
         "--repo",
         default=None,

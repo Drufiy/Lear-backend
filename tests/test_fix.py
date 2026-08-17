@@ -75,8 +75,12 @@ def _patch_brain(monkeypatch, diagnosis=None, multi=None):
     async def fake_diagnose_ci_run(run_id, repo_full_name, access_token):
         return multi
 
+    async def fake_diagnose_gitlab_ci_run(pipeline_id, project, access_token):
+        return multi
+
     monkeypatch.setattr(fix_mod, "diagnose_k8s_pod", fake_diagnose_k8s_pod)
     monkeypatch.setattr(fix_mod, "diagnose_ci_run", fake_diagnose_ci_run)
+    monkeypatch.setattr(fix_mod, "diagnose_gitlab_ci_run", fake_diagnose_gitlab_ci_run)
 
 
 # ── pure helpers ────────────────────────────────────────────────────────────
@@ -304,6 +308,51 @@ def test_cmd_fix_ci_skips_dispatch_when_nothing_is_fixable(monkeypatch, capsys):
     assert "Diagnosed 0 of 1 independent failures" in out
 
 
+# ── GitLab CI (Sprint 2 Tier 2, PRASH_V2.md §7b) ────────────────────────────
+
+def test_cmd_fix_ci_requires_gitlab_token(monkeypatch, capsys):
+    _patch_store(monkeypatch)
+    rc = cli_mod.cmd_fix(_args(target="acme/api", ci=True, run_id=123, provider="gitlab"))
+    assert rc == 3
+    assert "GITLAB_TOKEN" in capsys.readouterr().out
+
+
+def test_cmd_fix_ci_gitlab_reports_partial_success(monkeypatch, capsys):
+    """Same wiring as the GitHub --ci path, just routed through
+    diagnose_gitlab_ci_run/apply-gitlab-ci-fix instead -- proves --provider
+    gitlab actually reaches the GitLab-specific functions, not that the
+    diagnosis rendering logic itself differs (it doesn't; it's shared)."""
+    _patch_store(monkeypatch, creds={"GITLAB_TOKEN": "gl-token"})
+    fixed = _diagnosis(files_changed=[FileChange(path="backend/app.py", new_content="x = 1", explanation="fix ruff")])
+    _patch_brain(
+        monkeypatch,
+        multi=MultiFailureResult(
+            diagnoses=[fixed, _diagnosis(problem_summary="Frontend bundle error persists", files_changed=[])],
+            job_names=["backend", "frontend"],
+        ),
+    )
+    rc = cli_mod.cmd_fix(_args(target="acme/api", ci=True, run_id=456, provider="gitlab"))
+    out = capsys.readouterr().out
+    assert "Diagnosed 1 of 2 independent failures with a proposed fix" in out
+    assert rc == 1
+    assert "needs_approval" in out
+
+
+def test_cmd_fix_ci_gitlab_skips_dispatch_when_nothing_is_fixable(monkeypatch, capsys):
+    _patch_store(monkeypatch, creds={"GITLAB_TOKEN": "gl-token"})
+    _patch_brain(
+        monkeypatch,
+        multi=MultiFailureResult(
+            diagnoses=[_diagnosis(problem_summary="Frontend bundle error persists", files_changed=[])],
+            job_names=["frontend"],
+        ),
+    )
+    rc = cli_mod.cmd_fix(_args(target="acme/api", ci=True, run_id=456, provider="gitlab"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Diagnosed 0 of 1 independent failures" in out
+
+
 # ── diagnose_ci_run ─────────────────────────────────────────────────────────
 
 def test_diagnose_ci_run_passes_logs_to_multi_diagnosis(monkeypatch):
@@ -322,6 +371,24 @@ def test_diagnose_ci_run_passes_logs_to_multi_diagnosis(monkeypatch):
     assert seen["repo_full_name"] == "acme/api"
     assert "=== backend/1_Run tests.txt ===" in seen["logs"]
     assert seen["workflow_name"] == "github run 456"
+
+
+def test_diagnose_gitlab_ci_run_passes_logs_to_multi_diagnosis(monkeypatch):
+    seen = {}
+
+    async def fake_fetch_pipeline_logs(pipeline_id, project, token):
+        return "=== backend (failed) ===\nFAILED"
+
+    async def fake_diagnose_multi_failure(**kwargs):
+        seen.update(kwargs)
+        return MultiFailureResult(diagnoses=[], job_names=[])
+
+    monkeypatch.setattr(fix_mod, "fetch_pipeline_logs", fake_fetch_pipeline_logs)
+    monkeypatch.setattr(fix_mod, "diagnose_multi_failure", fake_diagnose_multi_failure)
+    asyncio.run(fix_mod.diagnose_gitlab_ci_run(789, "acme/api", "gl-token"))
+    assert seen["repo_full_name"] == "acme/api"
+    assert "=== backend (failed) ===" in seen["logs"]
+    assert seen["workflow_name"] == "gitlab pipeline 789"
 
 
 # ── the manifest-fix path (PRASH_V2.md §9, 2026-08-16) ──────────────────────
