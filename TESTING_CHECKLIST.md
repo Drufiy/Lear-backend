@@ -46,20 +46,20 @@ first real use and zero tests ever exercised.
 
 | Action | macOS | Windows |
 |---|---|---|
-| `open-pr` | [x] 2026-08-14 ✅ | [ ] |
-| `request-secret` | [x] 2026-08-14 ✅ nothing stored on decline | [ ] |
-| `restart-pod` | [x] 2026-08-14 ✅ pod untouched | [ ] |
-| `rollback` | [x] 2026-08-14 ✅ | [ ] |
+| `open-pr` | [x] 2026-08-14 ✅ | [x] 2026-08-16 ✅ piped `n` → "prompt / skipped: declined by user: open-pr", exit 1, nothing executed; audit shows the `prompt/skipped` decline entry |
+| `request-secret` | [x] 2026-08-14 ✅ nothing stored on decline | [ ] deferred (needs interactive session) |
+| `restart-pod` | [x] 2026-08-14 ✅ pod untouched | [ ] deferred (no cluster) |
+| `rollback` | [x] 2026-08-14 ✅ | [ ] deferred (no interactive session / no rollout driver) |
 
 ### 1c. Every permission mode (use `restart-pod` as the probe action — SAFE tier, cheapest to test repeatedly)
 
 | `--mode` | Expected behavior | macOS | Windows |
 |---|---|---|---|
-| `read-only` | Refused outright, no prompt | [x] 2026-08-14 ✅ | [ ] |
-| `ask` (default) | Prompts every time | [x] 2026-08-14 ✅ (see 1a) | [ ] |
+| `read-only` | Refused outright, no prompt | [x] 2026-08-14 ✅ | [x] 2026-08-16 ✅ `open-pr --mode read-only --noninteractive` → "refuse / skipped: refused by permission engine (safe tier, mode read-only)", no prompt, nothing executed |
+| `ask` (default) | Prompts every time | [x] 2026-08-14 ✅ (see 1a) | [x] 2026-08-16 ✅ see §1a/§1b open-pr (prompt appeared, decline honored) |
 | `auto-safe` | SAFE tier runs without asking; APPROVAL tier (`rollback`) still prompts | [x] 2026-08-14 ✅ verified both halves with a real (non-dry-run) restart-pod | [x] 2026-08-15 ✅ SAFE-tier half confirmed on Windows via `open-pr --mode auto-safe` reaching execute() without a prompt (clean auth failure, but no gate prompt — proves the no-ask path); APPROVAL half deferred (no interactive session) |
-| `environment-scoped` | Auto on `--env staging`; always prompts on `--env production` | [x] 2026-08-14 ✅ | [ ] |
-| `bypass` | Runs without asking, but still refuses anything in the NEVER tier outright | [x] 2026-08-14 ⚠️ SAFE-tier auto-run confirmed; NEVER-tier refusal not separately re-tested here (no NEVER-tier action currently registered to probe with — see `prash actions`) | [ ] |
+| `environment-scoped` | Auto on `--env staging`; always prompts on `--env production` | [x] 2026-08-14 ✅ | [x] 2026-08-16 ✅ both halves via `--noninteractive`: `--env production` → "prompt / needs_approval: approval required", `--env staging` → "allow / failed" (reached execute, auth failure only) |
+| `bypass` | Runs without asking, but still refuses anything in the NEVER tier outright | [x] 2026-08-14 ⚠️ SAFE-tier auto-run confirmed; NEVER-tier refusal not separately re-tested here (no NEVER-tier action currently registered to probe with — see `prash actions`) | [x] 2026-08-16 ⚠️ SAFE-tier auto-run confirmed (`open-pr --mode bypass --noninteractive` → "allow / failed" at auth, no gate); NEVER-tier refusal still not separately probed (no NEVER-tier action registered) |
 
 **Note found while testing:** `--dry-run` bypasses the permission engine's gate entirely, for every mode including `read-only` — it still computes and displays the correct `decision` label (e.g. `refuse`) but always returns `status: succeeded` with a plan. Never touches real infra either way (upholds the flag's own contract), but the terminal output for `--mode read-only --dry-run` literally reads "refuse / succeeded" — self-contradictory to someone scanning output live, even though the audit log's `dry_run: true` field makes the full picture reconstructable. Logged as an open finding below, not fixed yet (low severity — no safety impact, just a confusing label).
 
@@ -67,7 +67,7 @@ first real use and zero tests ever exercised.
 
 | Flag | What to verify | macOS | Windows |
 |---|---|---|---|
-| `--dry-run` | Produces a plan, **never touches real infrastructure** — confirm nothing actually changed | [x] 2026-08-14 ✅ never mutated the cluster in any dry-run test; see the decision-label note under 1c though | [ ] |
+| `--dry-run` | Produces a plan, **never touches real infrastructure** — confirm nothing actually changed | [x] 2026-08-14 ✅ never mutated the cluster in any dry-run test; see the decision-label note under 1c though | [x] 2026-08-16 ✅ `open-pr acme/widget --dry-run` → "prompt / succeeded: dry-run plan prepared (2 steps)", nothing executed; `--mode read-only --dry-run` read "refuse / skipped: refused by permission engine" (decision label reads consistently on this build — see issue #1 for the historical "refuse / succeeded" reading) |
 | `--grant` | **Checklist corrected 2026-08-14** — the code's actual, documented contract (`prash/permissions.py` docstring) is the opposite of what this row used to say: `grant` is meaningless for SAFE tier (mode alone decides), and it's the intended way to pre-approve one APPROVAL-tier action without an interactive prompt. Verified: SAFE tier ignores `--grant` under `ask` mode (still prompts); APPROVAL tier (`rollback --grant`) skips the prompt and runs. | [x] 2026-08-14 ✅ (corrected understanding, not a bug) | [ ] |
 | `--noninteractive` | Never prompts; a missing secret returns `NEEDS_INPUT` instead of hanging waiting for input | [x] 2026-08-14 ✅ (needs a mode that lets the action actually reach execute() — `ask` mode alone resolves to `NEEDS_APPROVAL` before ever reaching the secret check, which is correct: noninteractive doesn't force-allow a PROMPT decision, it just removes the interactive channel) | [x] 2026-08-15 ✅ no hang, no crash through the whole circuit-trip run above (auto-safe + noninteractive open-pr → immediate clean auth failure, then clean refusals once tripped) |
 | `--secret-name` / `--secret-hint` | `request-secret` picks these up correctly | [x] 2026-08-14 ✅ (see 1a) | [ ] |
@@ -109,7 +109,7 @@ first real use and zero tests ever exercised.
 
 | Command | What to verify | macOS | Windows |
 |---|---|---|---|
-| `prash actions` | Lists all 4 actions with correct risk tier + reversibility | [x] 2026-08-14 ✅ matches action registry exactly | [x] 2026-08-15 ✅ all 5 registered actions (open-pr, request-secret, restart-pod, rollback, apply-ci-fix — `apply-ci-fix` added 2026-08-15, so this row's "all 4" is now 5) with correct tiers + reversibility, matches registry |
+| `prash actions` | Lists all 4 actions with correct risk tier + reversibility | [x] 2026-08-14 ✅ matches action registry exactly | [x] 2026-08-15 ✅ all 5 registered actions (open-pr, request-secret, restart-pod, rollback, apply-ci-fix — `apply-ci-fix` added 2026-08-15, so this row's "all 4" is now 5) with correct tiers + reversibility, matches registry; [x] 2026-08-16 ✅ now **6** with `apply-manifest-fix` (added 2026-08-16) listed with correct tier (SAFE) + reversibility |
 | `prash audit` | Shows real entries after the above; `--tail N` actually limits | [x] 2026-08-14 ✅ `--tail 5` returned exactly the 5 most recent real entries | [x] 2026-08-15 ✅ `--tail 5` returned exactly the 5 most recent real entries |
 | `prash config` | Secrets shown as redacted, never in plaintext | [x] 2026-08-14 ✅ (see §0.4) | [x] 2026-08-15 ✅ (see §0.4) |
 | `prash circuit status` | Shows real breaker state | [x] 2026-08-14 ✅ | [x] 2026-08-15 ✅ `OPEN acme/widget` shown while tripped, `closed` after reset |
@@ -117,7 +117,7 @@ first real use and zero tests ever exercised.
 | `prash circuit reset <resource>` | Resets only that resource | [x] 2026-08-14 ✅ | [x] 2026-08-15 ✅ `reset acme/widget` cleared it while another tripped resource stayed open |
 | `prash watch` | Detects a real new problem, notifies once, stays silent on repeat polls (§10, already verified once on macOS — re-verify after any watcher changes) | [x] 2026-08-14 ✅ re-verified against a fresh cluster session (see §0.5) | [ ] deferred (no cluster) — no-cluster path verified: clean `watch stopped: Invalid kube-config file. No configuration found.` exit 2, no traceback (the §0.5 fix) |
 | `prash watch --namespace` / `--interval` | Both flags actually take effect | [x] 2026-08-14 ✅ `--namespace default` correctly overrode `.env`'s `prash-demo`; `--interval 5` measured at ~5.02s between polls via timestamped output | [ ] deferred (no cluster) — flag plumbing confirmed via the `watch stopped` clean-stop run with `--namespace prash-demo --interval 2` |
-| Desktop notification actually fires (not just logged) | **macOS: verified via `osascript` fallback. Windows: never verified live — only mocked. Priority item.** | [x] 2026-08-14 ✅ macOS confirmed: direct `osascript display notification` call exits 0, and no "notification failed" warning appeared in any real watch run today (which would have logged if the fallback failed) | [ ] still the priority item (needs a cluster + a real notification to fire on) |
+| Desktop notification actually fires (not just logged) | **macOS: verified via `osascript` fallback. Windows: never verified live — only mocked. Priority item.** | [x] 2026-08-14 ✅ macOS confirmed: direct `osascript display notification` call exits 0, and no "notification failed" warning appeared in any real watch run today (which would have logged if the fallback failed) | [x] 2026-08-16 ✅ **priority item now closed** — `_send_desktop_notification("prash test", ...)` returned True (real plyer toast fired on this machine), and the full `_notify()` path with a real `PodStatus` ran with no "Desktop notification failed" warning (that only logs if every path failed). One note: `_notify`'s ⚠-prefixed rich line needs UTF-8 stdout on Windows (handled by `prash/ui.py`'s win32 reconfigure; the only failure seen was when bypassing `prash.ui` import) |
 | `--env-file` (top-level flag) | Points `prash` at a non-default `.env` location correctly | [x] 2026-08-14 ✅ pointed at an alternate file with a different `KUBE_NAMESPACE` — watcher correctly used the alternate value, not the default `.env` | [x] 2026-08-15 ✅ pointed at a temp alternate `.env` (`KUBE_NAMESPACE=altns`) — `prash config` reported the alternate file as the credentials file and read its keys; `watch` picked up the alternate value path |
 
 ---

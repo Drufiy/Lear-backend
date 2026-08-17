@@ -42,6 +42,23 @@ GOOD = "green"
 BAD = "red"
 WARN = "yellow"
 
+# Hex equivalents of the same identity for surfaces that need concrete colour
+# values rather than rich styles (the Textual TUI). Single source so a brand
+# change in the palette updates every surface; the values are the TUI's own
+# GitHub-dark surface, kept unchanged when this was converged (2026-08-16).
+TUI_PALETTE = {
+    "bg": "#0d1117",
+    "panel": "#161b22",
+    "panel_border": "#30363d",
+    "text": "#c9d1d9",
+    "dim": "#8b949e",
+    "brand": "#ffd23f",
+    "accent": "#2f81f7",
+    "good": "#3fb950",
+    "bad": "#f85149",
+    "warn": "#d29922",
+}
+
 _RULE_STYLE = "bright_black"
 
 MASTHEAD = "[bold yellow]PRASH V2[/]  [dim]local AI DevOps agent[/dim]"

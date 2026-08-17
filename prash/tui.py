@@ -1,4 +1,4 @@
-"""Prash v2 TUI — a modern, dashboard-style interface (Track A, sprint 2 §7b).
+"""Prash v2 TUI — a modern, dashboard-style interface (Track A, §6b hardening phase).
 
 OpenCode-shaped surface: a dark, keyboard-driven terminal app that turns the
 read-only commands (`actions`, `audit`, `config`, `circuit`, `watch`) into a
@@ -35,19 +35,20 @@ from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
 from .credentials import CredentialStore
 from .permissions import PermissionMode
+from .ui import TUI_PALETTE
 
 REFRESH_SECONDS = 5
 
-_BG = "#0d1117"
-_PANEL = "#161b22"
-_PANEL_BORDER = "#30363d"
-_TEXT = "#c9d1d9"
-_DIM = "#8b949e"
-_BRAND = "#ffd23f"
-_ACCENT = "#2f81f7"
-_GOOD = "#3fb950"
-_BAD = "#f85149"
-_WARN = "#d29922"
+_BG = TUI_PALETTE["bg"]
+_PANEL = TUI_PALETTE["panel"]
+_PANEL_BORDER = TUI_PALETTE["panel_border"]
+_TEXT = TUI_PALETTE["text"]
+_DIM = TUI_PALETTE["dim"]
+_BRAND = TUI_PALETTE["brand"]
+_ACCENT = TUI_PALETTE["accent"]
+_GOOD = TUI_PALETTE["good"]
+_BAD = TUI_PALETTE["bad"]
+_WARN = TUI_PALETTE["warn"]
 
 CSS = f"""
 Screen {{
