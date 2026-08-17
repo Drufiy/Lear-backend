@@ -6,6 +6,7 @@ from prash.actions.contract import (
     Decision,
     Target,
 )
+from prash.actions.edit_config import EditConfigMapAction, EditSecretAction
 from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
@@ -409,6 +410,17 @@ def test_scale_approval_prompts_even_in_bypass(tmp_path):
     assert result.result.status is ActionResultStatus.SKIPPED
 
 
+def test_edit_configmap_approval_prompts_even_in_bypass(tmp_path):
+    """Same contract as rollback/scale -- RiskTier's own docstring names
+    "config change" as an APPROVAL-tier example alongside them."""
+    ctx = _ctx(tmp_path, resource="default/app-config", extra={"config_data": {"LOG_LEVEL": "debug"}})
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditConfigMapAction()])
+    result = dispatcher.run("edit-configmap", ctx, ask=FakeAsk(answer=False))
+    assert result.decision is Decision.PROMPT
+    assert result.result.status is ActionResultStatus.SKIPPED
+
+
 def test_scale_fails_honestly_when_replicas_not_specified(tmp_path):
     ctx = _ctx(tmp_path, resource="default/api", extra={})
     ctx.grant = True
@@ -426,6 +438,27 @@ def test_scale_fails_honestly_when_deployment_missing(tmp_path, monkeypatch):
     dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
     dispatcher.register_all([ScaleAction()])
     result = dispatcher.run("scale", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "not found" in result.result.summary
+
+
+def test_edit_configmap_fails_honestly_when_no_data_given(tmp_path):
+    ctx = _ctx(tmp_path, resource="default/app-config", extra={})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditConfigMapAction()])
+    result = dispatcher.run("edit-configmap", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "no --set" in result.result.summary
+
+
+def test_edit_configmap_fails_honestly_when_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr("prash.actions.edit_config.update_configmap", lambda ns, name, data: False)
+    ctx = _ctx(tmp_path, resource="default/app-config", extra={"config_data": {"LOG_LEVEL": "debug"}})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditConfigMapAction()])
+    result = dispatcher.run("edit-configmap", ctx, ask=FakeAsk(answer=False))
     assert result.result.status is ActionResultStatus.FAILED
     assert "not found" in result.result.summary
 
@@ -448,6 +481,62 @@ def test_scale_succeeds_and_verify_confirms_replica_count(tmp_path, monkeypatch)
     assert result.ok
     assert not result.result.verification.ok
     assert "replicas=1 (target=3)" in result.result.verification.detail
+
+def test_edit_configmap_succeeds_and_verify_confirms_the_key(tmp_path, monkeypatch):
+    monkeypatch.setattr("prash.actions.edit_config.update_configmap", lambda ns, name, data: True)
+    ctx = _ctx(tmp_path, resource="default/app-config", extra={"config_data": {"LOG_LEVEL": "debug"}})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditConfigMapAction()])
+
+    monkeypatch.setattr("prash.actions.edit_config.get_configmap", lambda ns, name: {"LOG_LEVEL": "debug", "OTHER": "untouched"})
+    result = dispatcher.run("edit-configmap", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert "LOG_LEVEL" in result.result.summary
+    assert result.result.verification.ok
+
+    monkeypatch.setattr("prash.actions.edit_config.get_configmap", lambda ns, name: {"LOG_LEVEL": "info", "OTHER": "untouched"})
+    result = dispatcher.run("edit-configmap", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert not result.result.verification.ok
+
+
+def test_edit_secret_approval_prompts_even_in_bypass(tmp_path):
+    ctx = _ctx(tmp_path, resource="default/db-creds", extra={"config_data": {"PASSWORD": "s3cr3t"}})
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditSecretAction()])
+    result = dispatcher.run("edit-secret", ctx, ask=FakeAsk(answer=False))
+    assert result.decision is Decision.PROMPT
+    assert result.result.status is ActionResultStatus.SKIPPED
+
+
+def test_edit_secret_never_echoes_the_value_on_success(tmp_path, monkeypatch):
+    """The whole point of EditSecretAction: the value must never appear in
+    the summary, only the key name -- get_secret_keys() (used by verify())
+    never even has access to the decoded value to leak."""
+    monkeypatch.setattr("prash.actions.edit_config.update_secret", lambda ns, name, data: True)
+    monkeypatch.setattr("prash.actions.edit_config.get_secret_keys", lambda ns, name: ["PASSWORD", "OTHER"])
+    ctx = _ctx(tmp_path, resource="default/db-creds", extra={"config_data": {"PASSWORD": "s3cr3t-value-must-not-leak"}})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditSecretAction()])
+    result = dispatcher.run("edit-secret", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert "PASSWORD" in result.result.summary
+    assert "s3cr3t-value-must-not-leak" not in result.result.summary
+    assert "s3cr3t-value-must-not-leak" not in result.result.verification.detail
+    assert result.result.verification.ok
+
+
+def test_edit_secret_fails_honestly_when_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr("prash.actions.edit_config.update_secret", lambda ns, name, data: False)
+    ctx = _ctx(tmp_path, resource="default/db-creds", extra={"config_data": {"PASSWORD": "s3cr3t"}})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([EditSecretAction()])
+    result = dispatcher.run("edit-secret", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "not found" in result.result.summary
 
 
 def test_audit_recorded_for_refused_read_only(tmp_path):

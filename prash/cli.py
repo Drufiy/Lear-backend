@@ -37,6 +37,7 @@ from .actions.contract import (
     Plan,
     Target,
 )
+from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.execute_aws import ExecuteAwsAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
@@ -139,6 +140,22 @@ class CliAsk(AskFn):
         return answer.lower().startswith("y")
 
 
+def _parse_set_flags(pairs: list | None) -> dict[str, str]:
+    """--set KEY=VALUE (repeatable) -> {KEY: VALUE}, for edit-configmap/
+    edit-secret. A malformed entry (no '=') is dropped rather than raising
+    here -- the action's own execute() already fails honestly on an empty
+    data dict, so a single bad --set degrades to that same clean failure
+    instead of a CLI-level traceback."""
+    result: dict[str, str] = {}
+    for pair in pairs or []:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            console.print(f"[yellow]ignoring malformed --set value (expected KEY=VALUE): {pair!r}[/yellow]")
+            continue
+        result[key] = value
+    return result
+
+
 def _make_context(
     args: argparse.Namespace,
     store: CredentialStore,
@@ -186,6 +203,7 @@ def _make_context(
             "pem_path": getattr(args, "pem_path", None),
             "replicas": getattr(args, "replicas", None),
             "noninteractive": getattr(args, "noninteractive", False),
+            "config_data": _parse_set_flags(getattr(args, "set", None)),
         },
     )
 
@@ -199,6 +217,8 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             RestartPodAction(),
             RollbackAction(),
             ScaleAction(),
+            EditConfigMapAction(),
+            EditSecretAction(),
             ApplyCiFixAction(),
             ApplyManifestFixAction(),
             ExecuteAwsAction(),
@@ -654,6 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--command", help="Command to execute (execute-aws)")
     run.add_argument("--pem-path", help="Path to PEM file for SSH fallback (execute-aws)")
     run.add_argument("--replicas", type=int, help="target replica count (scale)")
+    run.add_argument("--set", action="append", metavar="KEY=VALUE", help="key to merge-patch (edit-configmap/edit-secret); repeatable")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)

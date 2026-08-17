@@ -440,3 +440,91 @@ def test_previous_revision_ignores_replicasets_from_other_deployments(monkeypatc
     result = k8s.get_previous_revision("prash-demo", "broken-app")
 
     assert result is None
+
+
+# ── get_configmap / update_configmap: sprint-2 Kubernetes Depth (2026-08-17) ─
+
+def test_get_configmap_returns_data(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_config_map.return_value = SimpleNamespace(data={"LOG_LEVEL": "info"})
+
+    result = k8s.get_configmap("prash-demo", "app-config")
+
+    assert result == {"LOG_LEVEL": "info"}
+
+
+def test_get_configmap_returns_none_when_not_found(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_config_map.side_effect = ApiException(status=404)
+
+    result = k8s.get_configmap("prash-demo", "does-not-exist")
+
+    assert result is None
+
+
+def test_update_configmap_merge_patches_only_the_given_keys(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.patch_namespaced_config_map.return_value = None
+
+    result = k8s.update_configmap("prash-demo", "app-config", {"LOG_LEVEL": "debug"})
+
+    assert result is True
+    _, call_kwargs = fake_api.patch_namespaced_config_map.call_args
+    assert call_kwargs["body"] == {"data": {"LOG_LEVEL": "debug"}}
+
+
+def test_update_configmap_returns_false_when_not_found(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.patch_namespaced_config_map.side_effect = ApiException(status=404)
+
+    result = k8s.update_configmap("prash-demo", "does-not-exist", {"K": "V"})
+
+    assert result is False
+
+
+# ── get_secret_keys / update_secret: never decode/hold plaintext values ────
+
+def test_get_secret_keys_returns_only_key_names_not_values(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_secret.return_value = SimpleNamespace(
+        data={"PASSWORD": "czNjcjN0", "USERNAME": "YWRtaW4="}
+    )
+
+    result = k8s.get_secret_keys("prash-demo", "db-creds")
+
+    assert result == ["PASSWORD", "USERNAME"]
+    assert "czNjcjN0" not in result
+    assert "YWRtaW4=" not in result
+
+
+def test_get_secret_keys_returns_none_when_not_found(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.read_namespaced_secret.side_effect = ApiException(status=404)
+
+    result = k8s.get_secret_keys("prash-demo", "does-not-exist")
+
+    assert result is None
+
+
+def test_update_secret_uses_string_data_not_manual_base64(monkeypatch):
+    """stringData lets the API server handle encoding server-side -- this
+    connector must never base64-encode (or otherwise transform) a secret
+    value itself, which is exactly what passing plain text via stringData
+    guarantees."""
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.patch_namespaced_secret.return_value = None
+
+    result = k8s.update_secret("prash-demo", "db-creds", {"PASSWORD": "plaintext-value"})
+
+    assert result is True
+    _, call_kwargs = fake_api.patch_namespaced_secret.call_args
+    assert call_kwargs["body"] == {"stringData": {"PASSWORD": "plaintext-value"}}
+
+
+def test_update_secret_returns_false_when_not_found(monkeypatch):
+    fake_api = _patched_core_api(monkeypatch)
+    fake_api.patch_namespaced_secret.side_effect = ApiException(status=404)
+
+    result = k8s.update_secret("prash-demo", "does-not-exist", {"K": "V"})
+
+    assert result is False

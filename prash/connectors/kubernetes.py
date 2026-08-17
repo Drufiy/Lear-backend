@@ -350,6 +350,7 @@ def get_previous_revision(namespace: str, deployment_name: str) -> dict | None:
     return {"revision": revisions[1]}
 
 
+
 def scale_deployment(namespace: str, deployment_name: str, replicas: int) -> bool:
     """WRITE. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b) -- Track C's
     ScaleAction wires the permission check; this function assumes it has
@@ -386,3 +387,77 @@ def get_deployment_replicas(namespace: str, deployment_name: str) -> int | None:
             return None
         raise
     return deployment.spec.replicas
+
+
+def get_configmap(namespace: str, name: str) -> dict[str, str] | None:
+    """Read-only. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b). Returns the
+    ConfigMap's key/value data, or None if it doesn't exist. ConfigMap data
+    is not sensitive by definition -- safe to read and surface directly,
+    unlike Secret below."""
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        cm = api.read_namespaced_config_map(name=name, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+    return dict(cm.data or {})
+
+
+def update_configmap(namespace: str, name: str, data: dict[str, str]) -> bool:
+    """WRITE. Merge-patches the given keys into an existing ConfigMap --
+    only the keys passed in data change, every other key is left exactly
+    as-is (a JSON merge patch on .data, not a replace). Returns True if
+    the patch succeeded, False if the ConfigMap doesn't exist. Same split
+    as scale_deployment()/restart_pod(): Track C's action wires the
+    permission check and calls this once already granted."""
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        api.patch_namespaced_config_map(name=name, namespace=namespace, body={"data": data})
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
+
+
+def get_secret_keys(namespace: str, name: str) -> list[str] | None:
+    """Read-only. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b). Returns only
+    the Secret's key NAMES, never decoded values -- Secret data is
+    sensitive by definition and Prash's whole security posture is "your
+    credentials never leave your machine" (§4); there is no legitimate
+    reason for this connector to ever decode and hold a Secret's plaintext
+    value in memory, let alone return it somewhere it could be printed to
+    a console or written to the audit log. Returns None if the Secret
+    doesn't exist."""
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        secret = api.read_namespaced_secret(name=name, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return None
+        raise
+    return sorted((secret.data or {}).keys())
+
+
+def update_secret(namespace: str, name: str, data: dict[str, str]) -> bool:
+    """WRITE. Merge-patches the given keys into an existing Secret. data
+    values are plain text -- passed via the API's stringData field, which
+    the API server base64-encodes server-side (the same mechanism kubectl
+    itself uses), so this function never base64-encodes or otherwise holds
+    an encoded copy of a secret value in memory. Like update_configmap(),
+    this only changes the keys passed in; every other key is untouched.
+    Returns True if the patch succeeded, False if the Secret doesn't exist.
+    """
+    namespace = _default_namespace(namespace)
+    api = _client()
+    try:
+        api.patch_namespaced_secret(name=name, namespace=namespace, body={"stringData": data})
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise
