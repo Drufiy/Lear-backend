@@ -10,6 +10,7 @@ Commands:
     prash fix <namespace>/<pod>     diagnose a pod, then run the brain's recommended action
     prash fix <owner>/<repo> --ci --run-id <n>   multi-failure CI diagnosis (Track D tier 2)
     prash investigate <resource>    read-only state/logs via a connector
+    prash logs <namespace>/<pod> [--follow]   read/tail a pod's logs
     prash actions                   list registered actions and risk tiers
     prash audit                     show the append-only audit log
     prash config                    show local config (secrets redacted)
@@ -523,6 +524,49 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Sprint-2 Kubernetes Depth (PRASH_V2.md §7b). Read-only, no dispatcher
+    involved -- same shape as cmd_investigate/cmd_audit, not an Action, since
+    reading logs has no permission implications to gate.
+
+    --follow iterates stream_pod_logs() directly on the main thread rather
+    than via a background thread + queue -- tried that first, reverted
+    (PRASH_V2.md §9, 2026-08-17). A blocking socket read genuinely does stay
+    responsive to Ctrl+C in real usage: PEP 475 (3.5+) retries interrupted
+    syscalls but still raises the pending Python signal first, confirmed via
+    a real subprocess + SIGINT test with no shell job-control involved. What
+    looked like a hang during manual testing was `&`-backgrounding in a
+    non-interactive shell setting SIGINT to SIG_IGN, unrelated to this code
+    -- a test-harness artifact, not a product bug. Keeping the simple
+    version rather than the threading complexity that "fixed" it.
+    """
+    from .connectors.kubernetes import get_pod_logs, stream_pod_logs
+    from .fix import FixTargetError, split_k8s_target
+
+    try:
+        namespace, pod = split_k8s_target(args.target)
+    except FixTargetError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+
+    if not args.follow:
+        logs = get_pod_logs(namespace, pod, tail_lines=args.tail)
+        console.print(logs or "[dim](no logs)[/dim]")
+        return 0
+
+    console.print(f"[bold]Following logs for {namespace}/{pod}...[/bold] (Ctrl+C to stop)")
+    try:
+        for line in stream_pod_logs(namespace, pod, tail_lines=args.tail):
+            console.print(line)
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/dim]")
+        return 0
+    except Exception as exc:  # noqa: BLE001 — unreachable cluster / missing pod must be a clean stop, not a traceback
+        console.print(f"[red]logs stopped: {exc}[/red]")
+        return 2
+    return 0
+
+
 def cmd_tui(_args: argparse.Namespace) -> int:
     from .tui import run_tui
 
@@ -616,6 +660,12 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("resource")
     inv.add_argument("--provider", choices=list(PROVIDERS), default="github")
     inv.set_defaults(func=cmd_investigate)
+
+    logs = sub.add_parser("logs", help="read a pod's logs, optionally following live (sprint-2 Kubernetes Depth)", formatter_class=formatter_class)
+    logs.add_argument("target", help="<namespace>/<pod>")
+    logs.add_argument("--follow", action="store_true", help="live-follow, like `kubectl logs -f` (Ctrl+C to stop)")
+    logs.add_argument("--tail", type=int, default=10, help="number of recent lines to start from")
+    logs.set_defaults(func=cmd_logs)
 
     sub.add_parser("actions", help="list registered actions", formatter_class=formatter_class).set_defaults(func=cmd_actions)
     audit = sub.add_parser("audit", help="show the audit log", formatter_class=formatter_class)

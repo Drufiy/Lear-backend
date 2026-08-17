@@ -9,7 +9,7 @@ from __future__ import annotations
 from argparse import Namespace
 
 from prash.actions.contract import ActionContext, ActionSpec, Plan, RiskTier, Target
-from prash.cli import _export_cluster_env, cmd_investigate, cmd_watch
+from prash.cli import _export_cluster_env, cmd_investigate, cmd_logs, cmd_watch
 
 
 def test_exports_kube_context_from_env_dict(monkeypatch):
@@ -205,6 +205,74 @@ def test_cmd_investigate_stops_cleanly_when_unauthenticated(monkeypatch):
 
     assert poll_state_called["value"] is False
     assert exit_code != 0
+
+
+def test_cmd_logs_rejects_a_bad_target_cleanly(capsys):
+    """<namespace>/<pod> is required, same contract as `prash fix`'s target
+    parsing (reuses split_k8s_target) -- a malformed target must not reach
+    the kubernetes client at all."""
+    args = Namespace(target="not-a-valid-target", follow=False, tail=10)
+    rc = cmd_logs(args)
+    assert rc == 2
+    assert "expected" in capsys.readouterr().out
+
+
+def test_cmd_logs_no_follow_prints_recent_logs(monkeypatch, capsys):
+    import prash.connectors.kubernetes as k8s_mod
+
+    monkeypatch.setattr(k8s_mod, "get_pod_logs", lambda ns, pod, tail_lines: "line one\nline two")
+    args = Namespace(target="prash-demo/api", follow=False, tail=10)
+    rc = cmd_logs(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "line one" in out and "line two" in out
+
+
+def test_cmd_logs_no_follow_handles_empty_logs_honestly(monkeypatch, capsys):
+    import prash.connectors.kubernetes as k8s_mod
+
+    monkeypatch.setattr(k8s_mod, "get_pod_logs", lambda ns, pod, tail_lines: "")
+    args = Namespace(target="prash-demo/api", follow=False, tail=10)
+    rc = cmd_logs(args)
+    assert rc == 0
+    assert "(no logs)" in capsys.readouterr().out
+
+
+def test_cmd_logs_follow_streams_lines_and_stops_cleanly_on_ctrl_c(monkeypatch, capsys):
+    import prash.connectors.kubernetes as k8s_mod
+
+    def fake_stream(ns, pod, tail_lines):
+        yield "first line"
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(k8s_mod, "stream_pod_logs", fake_stream)
+    args = Namespace(target="prash-demo/api", follow=True, tail=10)
+    rc = cmd_logs(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "first line" in out
+    assert "stopped" in out
+    assert "Traceback" not in out
+
+
+def test_cmd_logs_follow_unreachable_cluster_is_a_clean_stop_not_a_traceback(monkeypatch, capsys):
+    """Same class of bug as cmd_watch's ConfigException fix (2026-08-15) --
+    an unreachable cluster or a pod that disappears mid-stream must stop
+    cleanly, not crash with a raw kubernetes-client traceback."""
+    import prash.connectors.kubernetes as k8s_mod
+
+    def fake_stream(ns, pod, tail_lines):
+        raise ConnectionError("connection refused")
+        yield  # pragma: no cover — makes this a generator function
+
+    monkeypatch.setattr(k8s_mod, "stream_pod_logs", fake_stream)
+    args = Namespace(target="prash-demo/api", follow=True, tail=10)
+    rc = cmd_logs(args)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "logs stopped:" in out
+    assert "connection refused" in out
+    assert "Traceback" not in out
 
 
 def test_cli_ask_ctrl_c_during_prompt_is_a_clean_decline_not_a_crash(monkeypatch):
