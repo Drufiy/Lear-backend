@@ -368,7 +368,7 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 
 *Tier 2 — starts once a Tier 1 item lands, one connector per person, not a batch:*
 - Aradhya — GitLab CI only (not CircleCI/Jenkins yet — highest overlap, proven connector pattern)
-- Anant — AWS write actions (connector + `execute_command` already exist, just needs wiring + the write-action layer)
+- ~~Anant — AWS write actions (connector + `execute_command` already exist, just needs wiring + the write-action layer)~~ **(Done 2026-08-17)**
 - Aryan — Slack/Discord notifications (closes the exact "one laptop's desktop notification" gap this section already flagged)
 
 *Tier 3 — captured in Notion, deliberately unassigned, discuss as a team before assigning:* CircleCI, Jenkins, Terraform, standalone Docker, Datadog, Grafana, Snyk, gitleaks, PagerDuty, Dependabot, k6/Cypress/Playwright (this last one may collide semantically with the hardening-phase "Testing" checklist task in Notion — same word, different scope, flagged not resolved).
@@ -396,6 +396,21 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 ---
 
 ## 9. Decision log
+
+**2026-08-17 — `prash setup` Configuration Wizard v0.1 (Anant)**
+
+Created a terminal setup wizard (`prash setup`) to act as a fast local installer. It parses `.env.example`, groups keys logically (AI Models, Cloud, etc.), and prompts the user using a `rich`-based interactive interface.
+- It safely masks secrets during input to avoid terminal history leaks.
+- Preserves existing values if the user presses `Enter` to skip.
+- Retains structural comments from `.env.example` when saving out to the user's `.env`.
+- Verified live against a dummy `test.env` file to ensure non-destructive merging.
+
+**2026-08-17 — AWS `execute_command` Wired into Dispatcher (Anant)**
+
+Tier-2 task completed. The AWS EC2 `execute_command` logic built earlier has been formally registered as a dispatcher action (`execute-aws`).
+- Classified under the **APPROVAL** Risk Tier, enforcing proper safety rails (circuit breakers and permission prompts).
+- Integrated with interactive prompts: gracefully requests missing `--command` parameters and actively catches `SSMFailedNeedsSSH` to prompt for `.pem` file fallback paths instead of hard-failing.
+- Live-verified end-to-end on a live EC2 instance. The dispatcher now accurately tracks AWS modifications in the `.prash/audit.log`.
 
 **2026-08-17 — Tier 2 starts (GitLab CI, Aradhya). Recorded demo moves to backlog.**
 Aradhya's call. Kubernetes Depth is fully built (4 PRs: #19, #20 merged, #22, #24) but 3 of 4 still open pending Aryan's review — strictly, "a Tier-1 item lands" (§7b) means merged, not just built, so this is a deliberate exception rather than the tiering rule being satisfied. Justified because Diagnosis Brain (a separate Tier-1 item) already merged, and the alternative is Aradhya blocked entirely while waiting on review he can't force. Recorded demo (the other open Tier-1 item) explicitly backlogged, not dropped — needs Aradhya at the keyboard for the actual recording, lower priority than continuing Tier-2 momentum right now.

@@ -12,6 +12,7 @@ from .contract import (
     Target,
     VerificationResult,
 )
+from .execute_aws import ExecuteAwsAction
 
 __all__ = [
     "Action",
@@ -26,4 +27,5 @@ __all__ = [
     "RiskTier",
     "Target",
     "VerificationResult",
+    "ExecuteAwsAction",
 ]
