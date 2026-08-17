@@ -173,6 +173,30 @@ def get_pod_status(namespace: str, pod_name: str | None = None) -> list[PodStatu
     return result
 
 
+def _read_pod_log_raw(api, *, name: str, namespace: str, tail_lines: int, previous: bool) -> str:
+    """Real bug found live 2026-08-17 building `prash logs`: calling
+    read_namespaced_pod_log() WITHOUT `_preload_content=False` on this
+    kubernetes client version (36.0.3) does not return decoded text the way
+    its own type hint (-> str) promises -- it returns the raw response
+    stringified, i.e. the literal characters "b'...actual log text...'"
+    (a bytes repr, not bytes itself, so `.strip()`/`str` checks elsewhere
+    never caught it -- it silently looked like a valid non-empty string).
+    This had been feeding the diagnosis brain corrupted log text for every
+    runtime diagnosis since the connector was built; never noticed because
+    nothing printed raw log content to a human until this command existed.
+    `_preload_content=False` + manual decode (the same pattern
+    stream_pod_logs() already uses) is the actual fix -- confirmed live
+    against a real pod, real log lines, no more `b'...'` wrapper.
+    """
+    resp = api.read_namespaced_pod_log(
+        name=name, namespace=namespace, tail_lines=tail_lines, previous=previous, _preload_content=False
+    )
+    try:
+        return resp.data.decode("utf-8", errors="replace")
+    finally:
+        resp.release_conn()
+
+
 def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
     """Read-only. Recent logs for a pod.
 
@@ -187,9 +211,7 @@ def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
     namespace = _default_namespace(namespace)
     api = _client()
     try:
-        logs = api.read_namespaced_pod_log(
-            name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=False
-        )
+        logs = _read_pod_log_raw(api, name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=False)
     except ApiException as exc:
         if exc.status == 404:
             return ""
@@ -199,11 +221,33 @@ def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
         return logs
 
     try:
-        return api.read_namespaced_pod_log(
-            name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=True
-        )
+        return _read_pod_log_raw(api, name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=True)
     except ApiException:
         return logs  # whatever we had, even if empty -- never raise for "no logs yet"
+
+
+def stream_pod_logs(namespace: str, pod_name: str, tail_lines: int = 10):
+    """Read-only. Live-follows a pod's logs (like `kubectl logs -f`), yielding
+    one decoded line at a time as they arrive. Sprint-2 Kubernetes Depth
+    (PRASH_V2.md §7b).
+
+    A generator, not a one-shot read like get_pod_logs() above -- the
+    caller drives how long to keep iterating (the CLI breaks on Ctrl+C).
+    Uses `_preload_content=False` so the underlying urllib3 response is
+    streamed rather than buffered whole, which is the whole point of
+    "live" here. `resp.release_conn()` in `finally` matters: without it,
+    breaking out of iteration early (e.g. Ctrl+C) leaks the connection.
+    """
+    namespace = _default_namespace(namespace)
+    api = _client()
+    resp = api.read_namespaced_pod_log(
+        name=pod_name, namespace=namespace, follow=True, tail_lines=tail_lines, _preload_content=False
+    )
+    try:
+        for raw_line in resp:
+            yield raw_line.decode("utf-8", errors="replace").rstrip("\n")
+    finally:
+        resp.release_conn()
 
 
 def get_pod_events(namespace: str, pod_name: str) -> list[dict]:
