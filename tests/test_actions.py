@@ -7,6 +7,7 @@ from prash.actions.contract import (
     Target,
 )
 from prash.actions.edit_config import EditConfigMapAction, EditSecretAction
+from prash.actions.exec_command import ExecAction
 from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
@@ -410,6 +411,18 @@ def test_scale_approval_prompts_even_in_bypass(tmp_path):
     assert result.result.status is ActionResultStatus.SKIPPED
 
 
+def test_exec_approval_prompts_even_in_bypass(tmp_path):
+    """Same contract as rollback/scale/edit-config -- APPROVAL tier, the
+    strongest gate in the permission model, and the one that matters most
+    here given exec's blast radius."""
+    ctx = _ctx(tmp_path, resource="default/api", extra={"exec_command": "ls -la"})
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecAction()])
+    result = dispatcher.run("exec", ctx, ask=FakeAsk(answer=False))
+    assert result.decision is Decision.PROMPT
+    assert result.result.status is ActionResultStatus.SKIPPED
+
+
 def test_edit_configmap_approval_prompts_even_in_bypass(tmp_path):
     """Same contract as rollback/scale -- RiskTier's own docstring names
     "config change" as an APPROVAL-tier example alongside them."""
@@ -537,6 +550,103 @@ def test_edit_secret_fails_honestly_when_not_found(tmp_path, monkeypatch):
     result = dispatcher.run("edit-secret", ctx, ask=FakeAsk(answer=False))
     assert result.result.status is ActionResultStatus.FAILED
     assert "not found" in result.result.summary
+
+def test_exec_fails_honestly_when_no_command_given(tmp_path):
+    ctx = _ctx(tmp_path, resource="default/api", extra={})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecAction()])
+    result = dispatcher.run("exec", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "no --exec-command" in result.result.summary
+
+
+def _fake_running_pod(name, namespace):
+    from prash.connectors.kubernetes import PodStatus
+
+    return [PodStatus(name=name, namespace=namespace, phase="Running", problem=None, restart_count=0, ready=True)]
+
+
+def test_exec_succeeds_on_zero_exit_and_shows_output(tmp_path, monkeypatch):
+    monkeypatch.setattr("prash.actions.exec_command.get_pod_status", lambda ns, pod: _fake_running_pod(pod, ns))
+    monkeypatch.setattr(
+        "prash.actions.exec_command.exec_in_pod",
+        lambda ns, pod, command, container=None: {"stdout": "hello world\n", "stderr": "", "exit_code": 0},
+    )
+    ctx = _ctx(tmp_path, resource="default/api", extra={"exec_command": "echo hello world"})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecAction()])
+    result = dispatcher.run("exec", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert "exited 0" in result.result.summary
+    assert "hello world" in result.result.summary
+    assert result.result.verification.ok
+
+
+def test_exec_succeeds_even_on_nonzero_exit_code(tmp_path, monkeypatch):
+    """A command that legitimately exits non-zero (grep finding nothing,
+    a diagnostic check reporting unhealthy) is still a successful exec --
+    Prash ran it and captured a real result. Conflating "command exit code"
+    with "did Prash's own action succeed" would be dishonest in the other
+    direction: it would report FAILED for something that worked exactly
+    as asked."""
+    monkeypatch.setattr("prash.actions.exec_command.get_pod_status", lambda ns, pod: _fake_running_pod(pod, ns))
+    monkeypatch.setattr(
+        "prash.actions.exec_command.exec_in_pod",
+        lambda ns, pod, command, container=None: {"stdout": "", "stderr": "no match\n", "exit_code": 1},
+    )
+    ctx = _ctx(tmp_path, resource="default/api", extra={"exec_command": "grep nomatch /var/log/app.log"})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecAction()])
+    result = dispatcher.run("exec", ctx, ask=FakeAsk(answer=False))
+    assert result.ok
+    assert "exited 1" in result.result.summary
+    assert result.result.detail["exit_code"] == "1"
+    assert result.result.verification.ok
+
+
+def test_exec_fails_honestly_when_pod_missing(tmp_path, monkeypatch):
+    """Real bug found live 2026-08-17: without checking get_pod_status()
+    first, a missing pod surfaced as a raw AttributeError deep inside the
+    WebSocket exec client ('NoneType' object has no attribute 'decode'),
+    not a clean message. Checking first with the same get_pod_status()
+    every other pod-targeting action already uses avoids depending on that
+    internal shape -- exec_in_pod() is never even called for this case."""
+    monkeypatch.setattr("prash.actions.exec_command.get_pod_status", lambda ns, pod: [])
+    exec_in_pod_called = {"value": False}
+    monkeypatch.setattr(
+        "prash.actions.exec_command.exec_in_pod",
+        lambda ns, pod, command, container=None: exec_in_pod_called.__setitem__("value", True),
+    )
+    ctx = _ctx(tmp_path, resource="default/does-not-exist", extra={"exec_command": "ls"})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecAction()])
+    result = dispatcher.run("exec", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "not found" in result.result.summary
+    assert exec_in_pod_called["value"] is False
+
+
+def test_exec_fails_honestly_when_exec_itself_errors(tmp_path, monkeypatch):
+    """Pod exists, but the exec call itself fails for some other reason
+    (connection dropped, timeout, container gone mid-call) -- still an
+    honest failure, not a crash."""
+    monkeypatch.setattr("prash.actions.exec_command.get_pod_status", lambda ns, pod: _fake_running_pod(pod, ns))
+
+    def raise_timeout(ns, pod, command, container=None):
+        raise TimeoutError("exec timed out")
+
+    monkeypatch.setattr("prash.actions.exec_command.exec_in_pod", raise_timeout)
+    ctx = _ctx(tmp_path, resource="default/api", extra={"exec_command": "sleep 999"})
+    ctx.grant = True
+    dispatcher = Dispatcher(mode=PermissionMode.BYPASS)
+    dispatcher.register_all([ExecAction()])
+    result = dispatcher.run("exec", ctx, ask=FakeAsk(answer=False))
+    assert result.result.status is ActionResultStatus.FAILED
+    assert "exec failed" in result.result.summary
 
 
 def test_audit_recorded_for_refused_read_only(tmp_path):

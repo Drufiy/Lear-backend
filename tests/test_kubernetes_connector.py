@@ -528,3 +528,87 @@ def test_update_secret_returns_false_when_not_found(monkeypatch):
     result = k8s.update_secret("prash-demo", "does-not-exist", {"K": "V"})
 
     assert result is False
+
+# ── exec_in_pod: sprint-2 Kubernetes Depth (2026-08-17) ─────────────────────
+
+class _FakeWSResponse:
+    def __init__(self, stdout="", stderr="", returncode=0, raise_on_run=None):
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self._raise_on_run = raise_on_run
+        self.closed = False
+
+    def run_forever(self, timeout=None):
+        if self._raise_on_run:
+            raise self._raise_on_run
+
+    def read_stdout(self, timeout=None):
+        return self._stdout
+
+    def read_stderr(self, timeout=None):
+        return self._stderr
+
+    def close(self):
+        self.closed = True
+
+
+def test_exec_in_pod_captures_stdout_and_exit_code(monkeypatch):
+    _patched_core_api(monkeypatch)
+    fake_resp = _FakeWSResponse(stdout="hello world\n", returncode=0)
+    monkeypatch.setattr("kubernetes.stream.stream", lambda fn, *a, **kw: fake_resp)
+
+    result = k8s.exec_in_pod("prash-demo", "api", ["sh", "-c", "echo hello world"])
+
+    assert result == {"stdout": "hello world\n", "stderr": "", "exit_code": 0}
+
+
+def test_exec_in_pod_captures_nonzero_exit_and_stderr(monkeypatch):
+    """A diagnostic command that legitimately exits non-zero (e.g. grep
+    finding nothing) is still a successful exec, at this layer -- the exit
+    code is just data, not conflated with connector-level failure."""
+    _patched_core_api(monkeypatch)
+    fake_resp = _FakeWSResponse(stderr="cat: /nope: No such file or directory\n", returncode=1)
+    monkeypatch.setattr("kubernetes.stream.stream", lambda fn, *a, **kw: fake_resp)
+
+    result = k8s.exec_in_pod("prash-demo", "api", ["sh", "-c", "cat /nope"])
+
+    assert result["exit_code"] == 1
+    assert "No such file" in result["stderr"]
+
+
+def test_exec_in_pod_passes_container_when_given(monkeypatch):
+    _patched_core_api(monkeypatch)
+    fake_resp = _FakeWSResponse()
+    captured = {}
+
+    def fake_stream(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return fake_resp
+
+    monkeypatch.setattr("kubernetes.stream.stream", fake_stream)
+    k8s.exec_in_pod("prash-demo", "api", ["true"], container="sidecar")
+
+    assert captured["container"] == "sidecar"
+
+
+def test_exec_in_pod_truncates_huge_output(monkeypatch):
+    _patched_core_api(monkeypatch)
+    huge = "x" * 50_000
+    fake_resp = _FakeWSResponse(stdout=huge, returncode=0)
+    monkeypatch.setattr("kubernetes.stream.stream", lambda fn, *a, **kw: fake_resp)
+
+    result = k8s.exec_in_pod("prash-demo", "api", ["sh", "-c", "yes x"])
+
+    assert len(result["stdout"]) == k8s._EXEC_OUTPUT_CAP
+
+
+def test_exec_in_pod_always_closes_even_when_run_forever_raises(monkeypatch):
+    _patched_core_api(monkeypatch)
+    fake_resp = _FakeWSResponse(raise_on_run=TimeoutError("exec timed out"))
+    monkeypatch.setattr("kubernetes.stream.stream", lambda fn, *a, **kw: fake_resp)
+
+    with pytest.raises(TimeoutError):
+        k8s.exec_in_pod("prash-demo", "api", ["sleep", "999"])
+
+    assert fake_resp.closed is True

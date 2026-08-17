@@ -38,6 +38,7 @@ from .actions.contract import (
     Target,
 )
 from .actions.edit_config import EditConfigMapAction, EditSecretAction
+from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
@@ -204,6 +205,9 @@ def _make_context(
             "replicas": getattr(args, "replicas", None),
             "noninteractive": getattr(args, "noninteractive", False),
             "config_data": _parse_set_flags(getattr(args, "set", None)),
+
+            "exec_command": getattr(args, "exec_command", None),
+            "container": getattr(args, "container", None),
         },
     )
 
@@ -219,6 +223,8 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ScaleAction(),
             EditConfigMapAction(),
             EditSecretAction(),
+
+            ExecAction(),
             ApplyCiFixAction(),
             ApplyManifestFixAction(),
             ExecuteAwsAction(),
@@ -675,6 +681,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--pem-path", help="Path to PEM file for SSH fallback (execute-aws)")
     run.add_argument("--replicas", type=int, help="target replica count (scale)")
     run.add_argument("--set", action="append", metavar="KEY=VALUE", help="key to merge-patch (edit-configmap/edit-secret); repeatable")
+
+    run.add_argument("--exec-command", help="command to run inside the pod, e.g. 'ls -la /app' (exec)")
+    run.add_argument("--container", default=None, help="container name, for multi-container pods (exec)")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)

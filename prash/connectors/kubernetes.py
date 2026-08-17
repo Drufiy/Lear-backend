@@ -461,3 +461,70 @@ def update_secret(namespace: str, name: str, data: dict[str, str]) -> bool:
         if exc.status == 404:
             return False
         raise
+
+# Cap on captured stdout/stderr -- a runaway command (cat on a huge file,
+# an infinite-ish loop that got interrupted by the timeout) must not blow
+# up memory or flood the terminal/audit log. Matches the truncation pattern
+# already used elsewhere for untrusted-size text (diagnosis_agent.py's
+# fetch_file caps at 20000 chars for the same reason).
+_EXEC_OUTPUT_CAP = 20_000
+
+
+def exec_in_pod(
+    namespace: str, pod_name: str, command: list[str], container: str | None = None, timeout: int = 30
+) -> dict:
+    """WRITE (arbitrary command execution). Sprint-2 Kubernetes Depth
+    (PRASH_V2.md §7b). Runs `command` inside the pod via the kubernetes
+    client's WebSocket exec API and captures stdout/stderr + exit code.
+
+    This is the highest-blast-radius primitive in this connector -- unlike
+    every other write here (restart_pod, scale_deployment, update_configmap/
+    update_secret), which are each one well-defined Kubernetes API mutation,
+    this can do anything the container's own user and filesystem permit.
+    There is deliberately no allowlist or restriction at this layer --
+    Track C's ExecAction's RiskTier.APPROVAL gate (same pattern as
+    scale/rollback/config edits: always prompts, even in bypass mode,
+    unless explicitly granted) is the actual safety net, matching how every
+    other write in this connector already relies on the permission system
+    rather than baking restrictions into the connector itself.
+
+    Uses the documented WSClient pattern (`kubernetes.stream.stream(...,
+    _preload_content=False)` + `run_forever` + `returncode`), not manual
+    channel parsing -- `WSClient.returncode` already does the ERROR_CHANNEL
+    YAML parsing correctly and is what the kubernetes client's own examples
+    use. `container` disambiguates a multi-container pod; if omitted,
+    behaves like `kubectl exec` without `-c` (the pod's only container, or
+    an API-level error if there's more than one).
+
+    Returns {"stdout": str, "stderr": str, "exit_code": int}. Unlike
+    get_configmap()/scale_deployment() above, this does NOT catch and
+    translate a not-found pod into a clean None/False return -- the
+    WebSocket upgrade for a nonexistent pod fails at a different layer
+    than a plain REST call, and the exact exception shape isn't a single
+    clean ApiException(404) the way the REST-based functions get. Left to
+    propagate; Track C's ExecAction wraps it in the same broad
+    except-Exception-report-honestly pattern every other action here
+    already uses for its own failure paths, so the user still gets an
+    honest message either way, just not a specially-classified one.
+    """
+    from kubernetes.stream import stream
+
+    namespace = _default_namespace(namespace)
+    api = _client()
+    kwargs: dict = {"command": command, "stderr": True, "stdin": False, "stdout": True, "tty": False, "_preload_content": False}
+    if container:
+        kwargs["container"] = container
+    resp = stream(api.connect_get_namespaced_pod_exec, pod_name, namespace, **kwargs)
+    try:
+        resp.run_forever(timeout=timeout)
+        stdout = resp.read_stdout(timeout=5) or ""
+        stderr = resp.read_stderr(timeout=5) or ""
+        exit_code = resp.returncode
+    finally:
+        resp.close()
+
+    return {
+        "stdout": stdout[:_EXEC_OUTPUT_CAP],
+        "stderr": stderr[:_EXEC_OUTPUT_CAP],
+        "exit_code": exit_code if exit_code is not None else -1,
+    }

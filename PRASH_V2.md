@@ -425,6 +425,22 @@ Four new connector primitives in `prash/connectors/kubernetes.py` (mine): `get_c
 
 Left open for your review, not self-merged — and this time following the full notification process (§0c): GitHub review request, Notion comment, WhatsApp ping, not just the ping alone.
 
+**2026-08-17 — Scope decision for `exec` (Kubernetes Depth, Tier 1), discussed before building: full exec, `RiskTier.APPROVAL`, no allowlist, no automated-brain carve-out.**
+
+Last piece of "Kubernetes Actions." Different in kind from restart-pod/rollback/scale/edit-configmap/edit-secret, not just degree: every other action does one well-defined Kubernetes API mutation; this runs an arbitrary command, unbounded blast radius bounded only by the container's own permissions. Presented three options before writing code: (a) full exec at the same APPROVAL tier as every other action here (relies on the existing permission system as the safety net), (b) same, but explicitly kept out of any future brain-automated path, (c) a restricted command allowlist (structurally bounds blast radius, more engineering, less useful). **Aradhya chose (a)** — consistent with how every other action in this model already works, no new judgment call.
+
+**CROSS-TRACK — Aryan, PLEASE READ.** Same small, mechanical footprint as scale/edit-configmap/edit-secret: `ExecAction` registered in `_build_dispatcher()`, new `--exec-command`/`--container` flags on the `run` subparser (`prash/cli.py`).
+
+New `exec_in_pod()` in `prash/connectors/kubernetes.py` (mine) — uses the kubernetes client's documented WebSocket exec pattern (`stream(..., _preload_content=False)` + `run_forever` + the built-in `WSClient.returncode` property, not manual channel parsing). Output capped at 20K chars, same truncation pattern as `fetch_file` elsewhere in the codebase.
+
+**A design point worth being explicit about:** `ExecAction.execute()` reports `SUCCEEDED` whenever the command actually ran and returned a real exit code — **not** only when it exits 0. A diagnostic command that legitimately exits non-zero (`grep` finding nothing, a health check reporting unhealthy) is Prash doing exactly what was asked; collapsing that into a single success/fail bit would be dishonest in the other direction. The exit code is always in the summary and detail for the user to read.
+
+**Real bug found and fixed while live-testing:** exec against a nonexistent pod didn't fail cleanly — it surfaced a raw `AttributeError: 'NoneType' object has no attribute 'decode'` from deep inside the kubernetes client's WebSocket layer, because (unlike a plain REST call) a failed WebSocket upgrade doesn't come back as one clean `ApiException(404)` the connector could catch and translate. Fixed by checking `get_pod_status()` — the same function every other pod-targeting action already uses — before attempting the exec at all, so a missing pod fails with a clean "not found" and `exec_in_pod()` is never even called.
+
+221/221 suite (11 new tests, including one that asserts `exec_in_pod` is never called when the pod-existence pre-check fails). **Live-verified against the real cluster:** `--dry-run` (no mutation), default `ask` + `--noninteractive` (correctly refuses), real exec with a zero exit (real command output captured — `echo hello from the container && whoami` → `hello from the container` / `root`), real exec with a non-zero exit (still reported `SUCCEEDED`, exit code visible), the pod-not-found fix (confirmed the clean message replaced the raw `AttributeError`), no `--exec-command` given.
+
+Left open for review, not self-merged — full process: GitHub review request, Notion comment, WhatsApp ping.
+
 
 **2026-08-17 — CROSS-TRACK — Aryan, PLEASE READ. New command: `prash logs` (Kubernetes Depth, Tier 1). Also: a real pre-existing bug found and fixed in `get_pod_logs()`, plus a false alarm caught and reverted before it shipped.**
 
