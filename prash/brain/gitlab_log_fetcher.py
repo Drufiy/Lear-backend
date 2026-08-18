@@ -57,7 +57,9 @@ async def fetch_pipeline_logs(pipeline_id: int, project: str, access_token: str)
 
     concatenated = await asyncio.to_thread(_fetch_sync)
 
-    concatenated = _preprocess_logs(concatenated)
+    # include_raw_tail=False: this feeds diagnose_multi_failure, which splits
+    # on === headers per independent failure -- see _preprocess_logs docstring.
+    concatenated = _preprocess_logs(concatenated, include_raw_tail=False)
     if len(concatenated) > MAX_LOG_CHARS:
         concatenated = "... [earlier logs truncated] ...\n" + concatenated[-MAX_LOG_CHARS:]
     return concatenated

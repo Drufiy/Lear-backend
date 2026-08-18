@@ -104,11 +104,19 @@ _STRICT_ERROR_RE = re.compile(
 )
 
 
-def _preprocess_logs(raw: str) -> str:
+def _preprocess_logs(raw: str, include_raw_tail: bool = True) -> str:
     """
     Reduce verbose CI logs to error-relevant signal.
     Keeps lines matching error patterns + context, drops noisy setup output.
     Typically reduces 50KB → 5-10KB without losing the actual failure.
+
+    include_raw_tail appends a synthetic "=== RAW TAIL ===" section as a
+    safety net for single-blob callers. Callers that feed the result into
+    diagnose_multi_failure (which splits on === headers and diagnoses each
+    section as an independent failure) must pass False -- otherwise the
+    tail is misread as its own failure, producing a phantom diagnosis and
+    a bogus "files touched by more than one sub-diagnosis" conflict on
+    every single-failure run. See PRASH_V2.md §10, 2026-08-18.
     """
     if not raw:
         return raw
@@ -138,9 +146,13 @@ def _preprocess_logs(raw: str) -> str:
                 filtered = "... [job output truncated] ...\n" + filtered[-PER_JOB_CHAR_BUDGET:]
         result_parts.append(f"{header}\n{filtered}")
 
+    combined = "\n\n".join(result_parts)
+    if not include_raw_tail:
+        return combined
+
     last_body = splits[-1] if splits else raw
     tail = "\n".join(last_body.splitlines()[-40:])
-    return "\n\n".join(result_parts) + "\n\n=== RAW TAIL (last 40 lines) ===\n" + tail
+    return combined + "\n\n=== RAW TAIL (last 40 lines) ===\n" + tail
 
 
 def _filter_section_lines(section: str, pattern: re.Pattern = _ERROR_RE) -> str:
@@ -316,7 +328,9 @@ def _parse_zip_logs(zip_bytes: bytes, failing_job_names: set[str] | None = None)
 
     # M3: shrink to error-relevant signal BEFORE the hard length cut below —
     # see the "Log preprocessor" section above for why this ordering matters.
-    concatenated = _preprocess_logs(concatenated)
+    # include_raw_tail=False: this feeds diagnose_multi_failure, which splits
+    # on === headers per independent failure -- see _preprocess_logs docstring.
+    concatenated = _preprocess_logs(concatenated, include_raw_tail=False)
 
     if len(concatenated) > MAX_LOG_CHARS:
         concatenated = "... [earlier logs truncated] ...\n" + concatenated[-MAX_LOG_CHARS:]
