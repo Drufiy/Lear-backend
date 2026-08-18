@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,9 +39,36 @@ _kc.mark_agent_run_outcome = lambda *a, **k: None
 from evals.score import CaseResult, aggregate, render_scorecard
 from prash.brain.diagnosis_agent import diagnose_failure
 from prash.brain.kimi_client import DiagnosisValidationError
+from prash.credentials import CredentialStore
 
 CASES_DIR = Path(__file__).parent / "cases"
 RESULTS_DIR = Path(__file__).parent / "results"
+
+# Keys kimi_client.py reads straight from the process environment (see its
+# lazy singleton getters), not passed through as function arguments -- same
+# set as cli.py's _BRAIN_ENV_PASSTHROUGH.
+_BRAIN_ENV_PASSTHROUGH = (
+    "KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL",
+    "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
+    "PRIMARY_MODEL",
+)
+
+
+def load_env_credentials() -> None:
+    """Load .env's model API keys into the process environment before any
+    diagnose_failure() call, matching cli.py's _export_cluster_env contract
+    (a shell-exported value always wins over .env).
+
+    Bug, found 2026-08-17: unlike cmd_fix, this script never did this --
+    running it in a shell that hadn't already exported DEEPSEEK_API_KEY/
+    KIMI_API_KEY silently fell back to whichever client had no key at all,
+    which reads as a near-total model failure rather than a missing
+    credential. See PRASH_V2.md §10.
+    """
+    creds = CredentialStore.from_env().load()
+    for key in _BRAIN_ENV_PASSTHROUGH:
+        if creds.get(key) and key not in os.environ:
+            os.environ[key] = str(creds[key])
 
 
 def load_cases(limit: int = 0) -> list[dict]:
@@ -150,7 +178,7 @@ def _print_diff(baseline: dict, current: dict) -> None:
 
 
 def main() -> None:
-    import os
+    load_env_credentials()
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=3)
