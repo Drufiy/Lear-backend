@@ -367,7 +367,7 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 - Aradhya — Recorded demo (§6 day 14, deferred 2026-08-14) — now cheap: every `§0b` step is already individually live-verified, this is chaining + recording, not new engineering. Doubles as the evidence source §7b originally wanted before ranking Tier 2/3.
 
 *Tier 2 — starts once a Tier 1 item lands, one connector per person, not a batch:*
-- Aradhya — GitLab CI only (not CircleCI/Jenkins yet — highest overlap, proven connector pattern) **(in progress 2026-08-18 — connector + fix path built, see §10; not yet live-verified against a real project)**
+- ~~Aradhya — GitLab CI only (not CircleCI/Jenkins yet — highest overlap, proven connector pattern)~~ **(Done 2026-08-18 — connector + fix path built and live-verified against a real project; see §10. A real bug (phantom multi-diagnosis failure, affecting GitHub too) was found during verification and fixed same day.)**
 - ~~Anant — AWS write actions (connector + `execute_command` already exist, just needs wiring + the write-action layer)~~ **(Done 2026-08-17)**
 - Aryan — Slack/Discord notifications (closes the exact "one laptop's desktop notification" gap this section already flagged)
 
