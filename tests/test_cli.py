@@ -9,7 +9,13 @@ from __future__ import annotations
 from argparse import Namespace
 
 from prash.actions.contract import ActionContext, ActionSpec, Plan, RiskTier, Target
-from prash.cli import _export_cluster_env, cmd_investigate, cmd_logs, cmd_watch
+from prash.cli import (
+    _export_cluster_env,
+    cmd_investigate,
+    cmd_logs,
+    cmd_notify,
+    cmd_watch,
+)
 
 
 def test_exports_kube_context_from_env_dict(monkeypatch):
@@ -291,3 +297,79 @@ def test_cli_ask_ctrl_c_during_prompt_is_a_clean_decline_not_a_crash(monkeypatch
     ctx = ActionContext(target=Target(resource="prash-demo/pod"), credentials={})
 
     assert cli_mod.CliAsk().ask(action, plan, ctx) is False
+
+
+# ── team notifications (Sprint 2 Tier 2, PRASH_V2.md §7b) ───────────────────
+
+def _fake_credential_store(load_result: dict):
+    """CredentialStore stub returning `load_result` — the pattern the
+    existing cmd_watch tests use, extracted so the notify tests share it."""
+    import prash.cli as cli_mod
+
+    class _Store:
+        def load(self):
+            return load_result
+
+    class _Fake:
+        @staticmethod
+        def from_env():
+            return _Store()
+
+    cli_mod.CredentialStore = _Fake  # type: ignore[assignment]
+
+
+def test_cmd_watch_passes_creds_to_watch_loop_for_team_channels(monkeypatch):
+    """cmd_watch must hand the .env dict into the loop so configured Slack/
+    Discord channels actually get pinged on a new pod problem."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    _fake_credential_store(creds)
+
+    seen: dict = {}
+    monkeypatch.setattr(watcher_mod, "run_watch_loop", lambda ns, **kw: seen.update(kw))
+
+    cmd_watch(Namespace(namespace="prash-demo", interval=None))
+    assert seen["creds"]["SLACK_WEBHOOK_URL"] == "https://hooks.slack.com/x"
+
+
+def test_cmd_watch_prints_configured_team_channels(monkeypatch, capsys):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    _fake_credential_store({"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"})
+    monkeypatch.setattr(watcher_mod, "run_watch_loop", lambda ns, **kw: None)
+
+    cmd_watch(Namespace(namespace="prash-demo", interval=None))
+    assert "slack" in capsys.readouterr().out
+
+
+def test_cmd_notify_reports_no_channel_configured(monkeypatch, capsys):
+    _fake_credential_store({})
+    rc = cmd_notify(Namespace(message=["hello", "team"]))
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "SLACK_WEBHOOK_URL" in out
+    assert "DISCORD_WEBHOOK_URL" in out
+
+
+def test_cmd_notify_sends_and_reports_per_channel(monkeypatch, capsys):
+    import prash.cli as cli_mod
+
+    creds = {"SLACK_WEBHOOK_URL": "x", "DISCORD_WEBHOOK_URL": "y"}
+    _fake_credential_store(creds)
+    sent: dict = {}
+    monkeypatch.setattr(
+        cli_mod, "send_team_notifications",
+        lambda c, title, message: sent.update(creds=c, title=title, message=message)
+        or {"slack": True, "discord": True},
+    )
+
+    rc = cmd_notify(Namespace(message=["hello", "team"]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "slack: sent" in out
+    assert "discord: sent" in out
+    assert sent["message"] == "hello team"
+    assert sent["creds"] == creds

@@ -22,6 +22,7 @@ import sys
 import time
 
 from prash.connectors.kubernetes import PodStatus, get_pod_status
+from prash.notifications import send_team_notifications
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def detect_changes(
     return changed, new_state
 
 
-def _notify(pod: PodStatus, console=None) -> None:
+def _notify(pod: PodStatus, console=None, creds: dict | None = None) -> None:
     title = f"Prash: {pod.problem} — {pod.name}"
     message = (
         f"{pod.namespace}/{pod.name} (restart_count={pod.restart_count}). "
@@ -75,6 +76,16 @@ def _notify(pod: PodStatus, console=None) -> None:
     )
     if not _send_desktop_notification(title, message):
         logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        # Sprint 2 Tier 2: push the same ping to every configured team channel
+        # (Slack/Discord webhooks). Never raises; a dead channel is logged by
+        # send_team_notifications and reported here, it doesn't kill the loop.
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
     if console is not None:
         console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
 
@@ -122,10 +133,13 @@ def run_watch_loop(
     interval: int | None = None,
     console=None,
     max_iterations: int | None = None,
+    creds: dict | None = None,
 ) -> dict[str, str | None]:
     """The actual loop. `max_iterations` is None for the real `prash watch`
     command (runs until Ctrl+C, caught by cli.py's main()) -- set to a small
-    int in tests so a single call can't hang forever."""
+    int in tests so a single call can't hang forever. `creds` is the local
+    .env dict; when present, each new-problem ping is also pushed to any
+    configured Slack/Discord team channels."""
     interval = interval or _interval_from_env()
     state: dict[str, str | None] = {}
     iterations = 0
@@ -134,7 +148,7 @@ def run_watch_loop(
         pods = get_pod_status(namespace)
         changed, state = detect_changes(pods, state)
         for pod in changed:
-            _notify(pod, console)
+            _notify(pod, console, creds)
         if console is not None and not changed:
             console.print(f"[dim]{namespace}: {len(pods)} pod(s), no new problems[/dim]")
 

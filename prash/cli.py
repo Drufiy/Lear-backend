@@ -15,6 +15,7 @@ Commands:
     prash audit                     show the append-only audit log
     prash config                    show local config (secrets redacted)
     prash watch                     poll a namespace, notify on new pod problems (Track E)
+    prash notify <message>          send a message to every configured team channel (Slack/Discord)
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from .connectors.gitlab import GitLabConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
+from .notifications import send_team_notifications, team_notifiers
 from .permissions import PermissionMode
 
 console = ui.console
@@ -573,12 +575,30 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # alone would silently ignore a shell-only override.
     namespace = args.namespace or os.environ.get("KUBE_NAMESPACE", "default")
     console.print(f"[bold]Watching namespace '{namespace}' for CrashLoopBackOff / OOMKilled / ImagePullBackOff / stuck pods...[/bold] (Ctrl+C to stop)")
+    team_channels = [n.name for n in team_notifiers(creds)]
+    if team_channels:
+        console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
     try:
-        run_watch_loop(namespace, interval=args.interval, console=console)
+        run_watch_loop(namespace, interval=args.interval, console=console, creds=creds)
     except Exception as exc:  # noqa: BLE001 — no cluster configured / unreachable must be a clean stop, not a traceback
         console.print(f"[red]watch stopped: {exc}[/red]")
         return 2
     return 0
+
+
+def cmd_notify(args: argparse.Namespace) -> int:
+    """Sprint 2 Tier 2: send a message to every configured team channel. Doubles
+    as the manual "does my webhook actually work" verification path."""
+    store = CredentialStore.from_env()
+    creds = store.load()
+    message = " ".join(args.message)
+    results = send_team_notifications(creds, "Prash", message)
+    if not results:
+        console.print("[yellow]no team channel configured — add SLACK_WEBHOOK_URL and/or DISCORD_WEBHOOK_URL to .env[/yellow]")
+        return 1
+    for channel, ok in results.items():
+        console.print(f"[{'green' if ok else 'red'}]{channel}: {'sent' if ok else 'failed'}[/]")
+    return 0 if all(results.values()) else 1
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
@@ -754,6 +774,10 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--namespace", default=None, help="default: KUBE_NAMESPACE from .env, or 'default'")
     watch.add_argument("--interval", type=int, default=None, help="poll interval in seconds (default: PRASH_WATCH_INTERVAL_SECONDS or 30)")
     watch.set_defaults(func=cmd_watch)
+
+    notify = sub.add_parser("notify", help="send a message to every configured team channel (Slack/Discord webhooks)", formatter_class=formatter_class)
+    notify.add_argument("message", nargs="+", help="the message to send")
+    notify.set_defaults(func=cmd_notify)
 
     sub.add_parser("tui", help="open the dashboard-style terminal UI (textual)", formatter_class=formatter_class).set_defaults(func=cmd_tui)
     sub.add_parser("repl", help="persistent interactive session (stage 1)", formatter_class=formatter_class).set_defaults(func=cmd_repl)

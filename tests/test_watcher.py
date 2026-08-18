@@ -115,7 +115,7 @@ def test_watch_loop_notifies_once_for_a_persistent_problem(monkeypatch):
     monkeypatch.setattr(watcher_mod, "get_pod_status", lambda ns: [_pod(problem="CrashLoopBackOff")])
     monkeypatch.setattr(watcher_mod, "time", MagicMock())  # no real sleeping in tests
     notify_calls = []
-    monkeypatch.setattr(watcher_mod, "_notify", lambda pod, console=None: notify_calls.append(pod))
+    monkeypatch.setattr(watcher_mod, "_notify", lambda pod, console=None, creds=None: notify_calls.append(pod))
 
     run_watch_loop("production", interval=0, max_iterations=2)
     assert len(notify_calls) == 1
@@ -131,7 +131,7 @@ def test_watch_loop_notifies_again_when_problem_changes(monkeypatch):
     monkeypatch.setattr(watcher_mod, "get_pod_status", lambda ns: next(calls))
     monkeypatch.setattr(watcher_mod, "time", MagicMock())
     notify_calls = []
-    monkeypatch.setattr(watcher_mod, "_notify", lambda pod, console=None: notify_calls.append(pod.problem))
+    monkeypatch.setattr(watcher_mod, "_notify", lambda pod, console=None, creds=None: notify_calls.append(pod.problem))
 
     run_watch_loop("production", interval=0, max_iterations=2)
     assert notify_calls == ["CrashLoopBackOff", "OOMKilled"]
@@ -205,7 +205,62 @@ def test_watch_loop_returns_final_state(monkeypatch):
 
     monkeypatch.setattr(watcher_mod, "get_pod_status", lambda ns: [_pod(problem="ImagePullBackOff")])
     monkeypatch.setattr(watcher_mod, "time", MagicMock())
-    monkeypatch.setattr(watcher_mod, "_notify", lambda pod, console=None: None)
+    monkeypatch.setattr(watcher_mod, "_notify", lambda pod, console=None, creds=None: None)
 
     state = run_watch_loop("production", interval=0, max_iterations=1)
     assert state == {"production/api-7f9d": "ImagePullBackOff"}
+
+
+# ── team notifications (Sprint 2 Tier 2, PRASH_V2.md §7b) ───────────────────
+
+def test_notify_pushes_team_notification_when_creds_given(monkeypatch):
+    """When .env has a webhook, a new-problem ping must also reach the team
+    channel, not just the one laptop's desktop toast."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent: list = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((creds, title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify(_pod(problem="CrashLoopBackOff"), creds=creds)
+
+    assert len(sent) == 1
+    assert sent[0][0] == creds
+    assert "CrashLoopBackOff" in sent[0][1]
+    assert "api-7f9d" in sent[0][2]
+
+
+def test_notify_skips_team_channels_without_creds(monkeypatch):
+    """No webhook configured -> no team send attempted at all (existing
+    watcher behaviour unchanged for the desktop-only setup)."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+
+    def boom(creds, title, message):
+        raise AssertionError("must not send team notifications without creds")
+
+    monkeypatch.setattr(watcher_mod, "send_team_notifications", boom)
+    watcher_mod._notify(_pod(problem="CrashLoopBackOff"))
+
+
+def test_watch_loop_passes_creds_through_to_notify(monkeypatch):
+    """The loop must hand the .env dict to _notify so the ping reaches the
+    team channel -- otherwise cmd_watch loading creds would be pointless."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "get_pod_status", lambda ns: [_pod(problem="CrashLoopBackOff")])
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    seen: dict = {}
+    monkeypatch.setattr(
+        watcher_mod, "_notify",
+        lambda pod, console=None, creds=None: seen.setdefault("creds", creds),
+    )
+
+    creds = {"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/x"}
+    run_watch_loop("production", interval=0, max_iterations=1, creds=creds)
+    assert seen["creds"] == creds

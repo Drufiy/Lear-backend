@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Slack/Discord team notifications (Sprint 2 Tier 2)**: New `prash/notifications.py` with `SlackNotifier`/`DiscordNotifier` incoming-webhook channels (stdlib-only urllib). `prash watch` now pushes every new-problem ping to any configured channel in addition to the desktop toast, and a new **`prash notify <message>`** command sends a message to every configured channel (`SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` in `.env`).
 - **`prash setup` v0.1 (Configuration Wizard)**: Introduced an interactive terminal UI for setting up Prash. It prompts for all relevant `.env` API keys and configurations grouped by category, masks secrets to prevent terminal history leaks, supports skipping fields to keep existing defaults, and writes the output back while preserving `.env.example` comments.
 - **AWS execute-aws Action**: Wired the AWS EC2 `execute_command` logic into the dispatcher as a formal action (`execute-aws`). This action runs under the APPROVAL Risk Tier, gracefully prompts for missing commands, and interactively handles the SSH fallback (`SSMFailedNeedsSSH`) by requesting a `.pem` file from the user.
 - **AWS EC2 Connector (Execution & SSH Fallback)**: Promoted the AWS EC2 connector to support `execute_command`. It executes via AWS Systems Manager (SSM) by default and falls back to a robust SSH execution method if SSM fails (e.g. missing IAM roles). The SSH fallback emits a clean `SSMFailedNeedsSSH` exception designed for REPL integration.
