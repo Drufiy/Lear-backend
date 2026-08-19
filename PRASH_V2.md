@@ -360,11 +360,11 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 **Sprint 2 kickoff — tiered plan (decided 2026-08-17, Aradhya).** The hardening-phase exit criteria for Windows testing and the ask-don't-quit live trigger moved to backlog (§9, 2026-08-17) rather than block sprint 2 indefinitely — but the *this* section's own warning about spreading thin still applies, so sprint 2 itself starts tiered, not flat. All ~15 categories from the table above got a Notion task card (workspace: DrufiyAI → Software Development Sprint Board), but only 5 are actually in flight:
 
 *Tier 1 — nothing in Tier 2 starts until one of these lands:*
-- Aradhya — **Diagnosis Brain: depth-of-agency.** Answers the "propose confidently vs. propose cautiously" question from the 2026-08-13 entry below once, before it has to be re-answered for every future connector.
-- Aradhya — Kubernetes Depth (already assigned, in progress)
-- Aryan — REPL Stage 1 + 2 (already assigned, in progress)
-- Anant — Config Wizard (already assigned, in progress)
-- Aradhya — Recorded demo (§6 day 14, deferred 2026-08-14) — now cheap: every `§0b` step is already individually live-verified, this is chaining + recording, not new engineering. Doubles as the evidence source §7b originally wanted before ranking Tier 2/3.
+- ~~Aradhya — **Diagnosis Brain: depth-of-agency.** Answers the "propose confidently vs. propose cautiously" question from the 2026-08-13 entry below once, before it has to be re-answered for every future connector.~~ **(Resolved 2026-08-17 — the decision it asked for was already made: "ask, don't quit" is the standing default for every future connector. See §9.)**
+- ~~Aradhya — Kubernetes Depth~~ **(Done 2026-08-17 — all 4 PRs merged: `scale`, `exec`, `edit-configmap`/`edit-secret`, `prash logs`. See §10.)**
+- ~~Aryan — REPL Stage 1 + 2~~ **(Done — Stage 1 landed 2026-08-15 (`prash/repl.py`, persistent session, live-verified on macOS by Aradhya), Stage 2 landed 2026-08-17 (`prash/intent.py`, free-text intent parsing). See §10.)**
+- ~~Anant — Config Wizard~~ **(Done 2026-08-17 — `prash setup` v0.1 wizard, §9.)**
+- Aradhya — Recorded demo (§6 day 14, deferred 2026-08-14, then backlogged 2026-08-17) — still open. Needs Aradhya at the keyboard for the actual recording.
 
 *Tier 2 — starts once a Tier 1 item lands, one connector per person, not a batch:*
 - ~~Aradhya — GitLab CI only (not CircleCI/Jenkins yet — highest overlap, proven connector pattern)~~ **(Done 2026-08-18 — connector + fix path built and live-verified against a real project; see §10. A real bug (phantom multi-diagnosis failure, affecting GitHub too) was found during verification and fixed same day.)**
