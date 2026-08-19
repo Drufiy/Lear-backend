@@ -76,7 +76,9 @@ This isn't a bug. It's the ceiling of the product as designed. No better prompt 
 
 ## 2. What Prash v2 actually is, in one paragraph
 
-Prash becomes a local agent, in the shape of Claude Code, that a developer or ops engineer installs and points at their own infrastructure. It runs quietly in the background watching what it's been given access to — CI, cloud logs, Kubernetes, deployments. The moment something looks wrong, it pings the user. The user opens the Prash interface, and Prash walks them through what it found, fixes it directly if the action is safe, or asks permission first if it isn't. All credentials stay on the user's own machine, in a file they control — Drufiy's servers never hold them.
+**Sharpened 2026-08-18 — team positioning decision, full reasoning in §9.** Prash is an AI DevOps agent with two modes on one shared brain, one local credential store, and one audit log. In **autopilot** — the hero mode — Prash runs continuously in the environment a team gives it access to (CI, cloud, Kubernetes, deployments), the way an on-call engineer would, except it never sleeps: the moment something looks wrong it notifies the team over their own channel (Slack, Discord, email — whatever's configured), then acts within whatever permission tier it's been trusted with — safe fixes on its own, anything riskier only with a human's yes. In **copilot** mode, an engineer drops into the local CLI + REPL to drive Prash directly — deep-diving an incident, brainstorming the fix together, watching it land — deliberately the same interaction shape as Claude Code, for familiarity. Same credentials, same audit trail, either way: they stay local, under the team's control, and Drufiy's servers never hold them. Built first for **startups and small tech companies**, where the engineers *are* the on-call rotation and the pain is sharpest — not an enterprise sale that needs a security review before it can prove itself.
+
+*Original 2026-08-03 framing, kept for the record, not the current pitch: "Prash becomes a local agent, in the shape of Claude Code, that a developer or ops engineer installs and points at their own infrastructure..." — see git history for the full original paragraph.*
 
 ---
 
@@ -396,6 +398,34 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 ---
 
 ## 9. Decision log
+
+**2026-08-18 — Product positioning locked: two-mode framing (Autopilot / Copilot), startups/small tech companies as the beachhead ICP, permission-tier trust ladder as the adoption story. §2 rewritten to match — this entry is the reasoning trail.**
+
+**Where this came from.** After the same-day team meeting (REPL/CLI finalization decided as next build focus, task ownership handed to Anant), Anant raised a real problem: he can't explain what Prash *is* to people at college until there's a working prototype. Aradhya (founder/CEO) agreed — and flagged that he couldn't cleanly articulate it either. That's a positioning gap, not a build gap, and it doesn't get fixed by a nicer UI.
+
+**The four unresolved tensions that were actually causing the gap** (surfaced via agent-assisted grilling before any answer was drafted, matching this doc's own "think it through before building" convention from the 2026-08-13 entry below):
+1. *"Isn't this just Claude Code?"* — §2's own old wording ("in the shape of Claude Code," "watches infrastructure the way Claude Code watches a codebase") invited the question and didn't answer it.
+2. *The always-on contradiction* — §1's stated reason for the whole pivot is 3am production incidents, but the old §3 had the watcher running "on the user's machine," which is asleep at 3am. Two irreconcilable halves of one pitch.
+3. *Who is this for, concretely* — "a developer or ops engineer" is everyone, which is nobody.
+4. *The evidence gap* — every live verification to date (GitLab CI included, see the entry above) diagnoses a fixture someone on the team planted. Prash v2 has never yet caught something nobody planted. Anant's answer doesn't close this gap; it's still open (see "what's still unresolved" below).
+
+**Anant's answer (full text saved separately, see memory / ask Aradhya for the raw version) resolved #1 and #2, and pointed at #3:**
+- Claude Code is a local-first coding CLI; the *interaction shape* (CLI + REPL) is borrowed deliberately for user familiarity, but the actual architecture is an orchestrator watching multiple CI/infra flows and fixing them retroactively — something Claude Code can't do without a lot of external tinkering.
+- Primary USP: **replace the on-call engineer's grind**, not the DevOps engineer's job. Analogy: prod breaks at 3am, a vibecoder-engineer asks Claude Code for a fix, runs verification, goes back to sleep — Prash does the same loop *retroactively and autonomously*, keeping the team posted over their own channel.
+- Deployment: both cloud-resident (installed in the team's own dev/prod environment, watching live — this is what actually answers the 3am problem, since a laptop can't) and local (the CLI/REPL half).
+- ICP: Anant's instinct was enterprise-as-the-ceiling, augmenting rather than replacing DevOps engineers.
+
+**Aradhya's resolution, which is what actually locks the pitch (this is the decision):**
+- **Autopilot and Copilot are not competing products — they're two modes of one product**, not a contradiction to pick a winner from. *Autopilot* (cloud/environment-resident, 24×7, watches → notifies over the team's channel → acts within its permission tier) is the hero and the literal answer to tension #2 — it's on when the human is asleep. *Copilot* (local CLI + REPL) is what the same engineer drops into when they want to drive directly: deep-dive an incident, brainstorm the fix with Prash, watch it land. One brain, one credential store, one audit log, both modes.
+- **ICP correction, overriding Anant's enterprise-ceiling framing: startups and small tech companies are the beachhead, not enterprise.** Reasoning: those are the teams where the engineers *are* the on-call rotation, so the pain is sharpest and most personal; they can say yes to a new tool in a week, where an enterprise security review of an AI agent with prod write access is a 6-month gate that would stall the company waiting on it. §4's local-credentials trust model is specifically what lets a startup say yes *without* that review. Enterprise stays a real market — just not the first one.
+- **The "AI touching my prod" objection gets answered by a feature Prash already has, not a new one:** the existing permission-tier system (`ask`/`auto-safe`/`environment-scoped`/`bypass`) plus the circuit breaker becomes an explicit **trust ladder** in the pitch — day one it only watches and notifies (read-only, zero risk), it gets promoted to auto-safe fixes once the team has seen it be right, approval-tier actions (rollback, scale, exec) stay a human yes throughout. This reframes "would you let an agent touch prod" from a yes/no gate into a controllable on-ramp — and it's demoable today, not speculative roadmap.
+
+**What this changes concretely:** §2 above rewritten to lead with the two-mode framing and the startup ICP instead of "a developer or ops engineer." Nothing about the built architecture changes — `Connector`/`Action`/permission pipeline already supports both an always-on watcher and an interactive REPL against the same credentials, so this is a positioning lock, not a re-architecture.
+
+**What's still explicitly unresolved, not decided here:**
+- **Near-zero onboarding is now a hard requirement, not a nice-to-have.** If autopilot means "installed in the team's own environment," and the ICP is startups with no dedicated SRE, then install friction *is* the DevOps burden being removed — a platform-engineer-required install defeats the pitch for exactly the customer being targeted. Not yet spec'd.
+- **The evidence gap (tension #4) is not closed by this positioning work.** The "Recorded demo" Tier-1 task's bar should arguably be raised from "chain the already-proven steps and record it" to "catch and correctly diagnose a failure nobody on the team planted" — that's the concrete proof the new pitch actually needs. Flagged here, not yet redefined in §6/§7b — Aradhya's call.
+- **Only Anant's raw positioning answer has been captured so far.** Aryan's and Maneesh's are explicitly still pending — Aradhya said this is important and is collecting them; this entry and the §2 rewrite reflect Aradhya's synthesis given what's in hand today, and may be revised once the rest of the team weighs in. Don't treat this as final in the sense of "closed" — treat it as "current best answer, worth restating in every pitch until someone brings a reason to change it."
 
 **2026-08-18 — CROSS-TRACK — Aradhya, PLEASE READ: Slack/Discord notifications landed (Sprint 2 Tier 2, Aryan's item). Touches `prash/watcher.py` (your territory) in one small, backward-compatible way — see "watcher" bullet below. §7b Tier 2 is now fully closed.**
 
