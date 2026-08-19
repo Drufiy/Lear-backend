@@ -77,7 +77,7 @@ class ReplSession:
         its func runs. A bare pod name in `fix`/`run restart-pod` resolves
         against the remembered namespace; `watch` picks up the namespace too."""
         command = getattr(args, "command", None)
-        if command == "fix":
+        if command == "fix" and not getattr(args, "ci", False):
             target = getattr(args, "target", "")
             if "/" not in target and self.namespace and target:
                 args.target = f"{self.namespace}/{target}"
@@ -90,9 +90,18 @@ class ReplSession:
                 args.namespace = self.namespace
 
     def learn(self, args) -> None:
-        """Record context from a completed command for the next one."""
+        """Record context from a completed command for the next one.
+
+        Bug, found live 2026-08-19: `fix <owner>/<repo> --ci` and
+        `fix <namespace>/<pod>` share the same `target` field and both
+        contain a `/`, but they are different resource types. Without the
+        `--ci` guard, running a CI diagnosis pollutes the remembered
+        namespace/pod with an owner/repo string -- a later "fix the broken
+        pod" then silently reuses it (no clarifying question, since the
+        context looks known) and sends a GitLab project path to the
+        Kubernetes API as a namespace/pod. See PRASH_V2.md §10."""
         command = getattr(args, "command", None)
-        if command == "fix":
+        if command == "fix" and not getattr(args, "ci", False):
             target = getattr(args, "target", "")
             if "/" in target:
                 self.namespace, self.pod = target.split("/", 1)
@@ -185,8 +194,27 @@ def run_repl(console=None, lines: Iterable[str] | None = None) -> int:
 
         try:
             argv = shlex.split(line)
-        except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
+        except ValueError:
+            # Bug, found live 2026-08-19: any line with an unbalanced quote
+            # character -- in practice almost always an English contraction
+            # ("what's", "it's", "let's") typed into something advertised as
+            # talkable-to -- raised shlex's raw "No closing quotation" and
+            # was discarded before stage 2 ever got a chance, even though
+            # the exact same free text minus the apostrophe would have been
+            # handled fine. Give it the same intent-resolution fallback the
+            # argparse-SystemExit path below already gets, instead of
+            # leaking a shlex implementation detail as the user-facing
+            # error. See PRASH_V2.md §10.
+            suggestion = resolve(line, ctx)
+            if isinstance(suggestion, Suggestion):
+                console.print(f"[dim]→ {suggestion.explain}[/dim]")
+                run_argv(suggestion.argv)
+                continue
+            if isinstance(suggestion, Clarify):
+                pending = (_verb_hit(line), suggestion.options)
+                _ask(console, suggestion)
+                continue
+            console.print("[red]I didn't get that. Try `help`, or describe what you want in plain words.[/red]")
             continue
 
         try:

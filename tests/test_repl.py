@@ -77,3 +77,36 @@ def test_run_repl_survives_bad_line_and_eof():
 
     rc = repl.run_repl(Console(record=True), lines=["this is not a verb", "fix", ""])
     assert rc == 0
+
+def test_learn_does_not_treat_ci_target_as_namespace_pod():
+    """Regression for the 2026-08-19 bug: `fix owner/repo --ci` must not
+    pollute the remembered namespace/pod, since owner/repo isn't a k8s
+    resource -- a later 'fix the broken pod' would otherwise silently reuse
+    it and send it straight to the Kubernetes API."""
+    s = _session()
+    args = Namespace(command="fix", target="drufiyai-group/prash-ci-test", ci=True)
+    s.learn(args)
+    assert s.namespace is None
+    assert s.pod is None
+    assert s.last_target is None
+
+
+def test_apply_context_does_not_namespace_bare_ci_target():
+    s = _session()
+    s.namespace = "production"
+    args = Namespace(command="fix", target="some-repo", ci=True)
+    s.apply_context(args)
+    assert args.target == "some-repo"
+
+
+def test_run_repl_survives_contraction_without_crashing():
+    """Regression: shlex.split raises ValueError on an unbalanced quote
+    (any English contraction -- "what's", "it's"), which used to print the
+    raw shlex exception and never give stage-2 intent resolution a chance."""
+    from rich.console import Console
+
+    console = Console(record=True)
+    rc = repl.run_repl(console, lines=["what's up", "exit"])
+    assert rc == 0
+    output = console.export_text()
+    assert "No closing quotation" not in output
