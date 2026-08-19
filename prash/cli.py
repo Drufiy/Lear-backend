@@ -51,6 +51,7 @@ from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
 from .connectors.aws import AWSConnector
 from .connectors.base import Connector
+from .connectors.datadog import DatadogConnector
 from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.gitlab import GitLabConnector
 from .connectors.vercel import VercelConnector
@@ -66,6 +67,7 @@ PROVIDERS: dict[str, type[Connector]] = {
     "gitlab": GitLabConnector,
     "vercel": VercelConnector,
     "aws": AWSConnector,
+    "datadog": DatadogConnector,
 }
 
 # Providers --ci diagnosis on `prash fix` knows how to drive. Not all of
