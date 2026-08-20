@@ -54,6 +54,7 @@ from .connectors.base import Connector
 from .connectors.datadog import DatadogConnector
 from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.gitlab import GitLabConnector
+from .connectors.grafana import GrafanaConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
@@ -68,6 +69,7 @@ PROVIDERS: dict[str, type[Connector]] = {
     "vercel": VercelConnector,
     "aws": AWSConnector,
     "datadog": DatadogConnector,
+    "grafana": GrafanaConnector,
 }
 
 # Providers --ci diagnosis on `prash fix` knows how to drive. Not all of
