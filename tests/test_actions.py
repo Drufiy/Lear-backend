@@ -12,11 +12,13 @@ from prash.actions.exec_command import ExecAction
 from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.open_pr import OpenPrAction
+from prash.actions.pagerduty_incident import PagerdutyAcknowledgeAction, PagerdutyResolveAction
 from prash.actions.restart_pod import RestartPodAction
 from prash.actions.rollback import RollbackAction
 from prash.actions.scale import ScaleAction
 from prash.brain.schemas import FileChange, FileEdit
 from prash.connectors.gitlab import GitLabError
+from prash.connectors.pagerduty import PagerDutyError
 from prash.circuit_breaker import CircuitBreaker
 from prash.credentials import CredentialStore
 from prash.dispatch import AskFn, Dispatcher, ExecutionOutcome
@@ -955,3 +957,101 @@ def test_execute_aws_verify_ssh_nonzero_exit_is_not_ok(tmp_path):
         detail={"source": "ssh", "status": "Failed", "exit_code": 1, "stdout": "", "stderr": "nope"},
     )
     assert not action.verify(_aws_ctx(tmp_path), result).ok
+
+
+class _FakePagerDuty:
+    def __init__(self, fail=False, missing_from_email=False):
+        self.fail = fail
+        self.missing_from_email = missing_from_email
+        self.acknowledged = []
+        self.resolved = []
+
+    def acknowledge_incident(self, incident_id):
+        if self.missing_from_email:
+            raise PagerDutyError("PAGERDUTY_FROM_EMAIL not configured -- required so PagerDuty can identify who made this change")
+        if self.fail:
+            raise PagerDutyError("PagerDuty API 500: internal error")
+        self.acknowledged.append(incident_id)
+        return {"id": incident_id, "status": "acknowledged"}
+
+    def resolve_incident(self, incident_id):
+        if self.missing_from_email:
+            raise PagerDutyError("PAGERDUTY_FROM_EMAIL not configured -- required so PagerDuty can identify who made this change")
+        if self.fail:
+            raise PagerDutyError("PagerDuty API 500: internal error")
+        self.resolved.append(incident_id)
+        return {"id": incident_id, "status": "resolved"}
+
+
+def _pd_ctx(tmp_path, pd=None, **extra):
+    return _ctx(
+        tmp_path,
+        resource="PINC1",
+        extra={"connectors": {"pagerduty": pd if pd is not None else _FakePagerDuty()}, **extra},
+    )
+
+
+def test_pagerduty_acknowledge_succeeds(tmp_path):
+    pd = _FakePagerDuty()
+    ctx = _pd_ctx(tmp_path, pd=pd)
+    result = PagerdutyAcknowledgeAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert pd.acknowledged == ["PINC1"]
+    assert result.detail["status"] == "acknowledged"
+
+
+def test_pagerduty_resolve_succeeds(tmp_path):
+    pd = _FakePagerDuty()
+    ctx = _pd_ctx(tmp_path, pd=pd)
+    result = PagerdutyResolveAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert pd.resolved == ["PINC1"]
+    assert result.detail["status"] == "resolved"
+
+
+def test_pagerduty_acknowledge_fails_honestly_on_api_error(tmp_path):
+    ctx = _pd_ctx(tmp_path, pd=_FakePagerDuty(fail=True))
+    result = PagerdutyAcknowledgeAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "acknowledge failed" in result.summary.lower()
+
+
+def test_pagerduty_resolve_fails_honestly_without_from_email(tmp_path):
+    """Regression-shaped: the connector raises a clean PagerDutyError when
+    PAGERDUTY_FROM_EMAIL is missing -- the action must surface that, not
+    crash or silently report success."""
+    ctx = _pd_ctx(tmp_path, pd=_FakePagerDuty(missing_from_email=True))
+    result = PagerdutyResolveAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "PAGERDUTY_FROM_EMAIL" in result.summary
+
+
+def test_pagerduty_acknowledge_fails_honestly_when_connector_missing(tmp_path):
+    ctx = _ctx(tmp_path, resource="PINC1", extra={"connectors": {}})
+    result = PagerdutyAcknowledgeAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "not configured" in result.summary
+
+
+def test_pagerduty_acknowledge_risk_tier_is_safe():
+    assert PagerdutyAcknowledgeAction().spec.risk_tier.value == "safe"
+
+
+def test_pagerduty_resolve_risk_tier_is_approval():
+    """Deliberately stricter than acknowledge: a false resolve can suppress
+    a real ongoing outage, so it always needs an explicit human yes."""
+    assert PagerdutyResolveAction().spec.risk_tier.value == "approval"
+
+
+def test_pagerduty_verify_ok_when_status_matches(tmp_path):
+    action = PagerdutyResolveAction()
+    result = ActionResult(status=ActionResultStatus.SUCCEEDED, summary="ok", detail={"status": "resolved"})
+    assert action.verify(_pd_ctx(tmp_path), result).ok
+
+
+def test_pagerduty_verify_not_ok_when_status_mismatched(tmp_path):
+    """If PagerDuty's response reports a status other than what was
+    requested, verify() must not blindly trust the SUCCEEDED result."""
+    action = PagerdutyResolveAction()
+    result = ActionResult(status=ActionResultStatus.SUCCEEDED, summary="ok", detail={"status": "acknowledged"})
+    assert not action.verify(_pd_ctx(tmp_path), result).ok

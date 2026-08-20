@@ -44,6 +44,7 @@ from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.open_pr import OpenPrAction
+from .actions.pagerduty_incident import PagerdutyAcknowledgeAction, PagerdutyResolveAction
 from .actions.restart_pod import RestartPodAction
 from .actions.rollback import RollbackAction
 from .actions.scale import ScaleAction
@@ -55,6 +56,7 @@ from .connectors.datadog import DatadogConnector
 from .connectors.github import GitHubConnector, GitHubRunner
 from .connectors.gitlab import GitLabConnector
 from .connectors.grafana import GrafanaConnector
+from .connectors.pagerduty import PagerDutyConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
@@ -70,6 +72,7 @@ PROVIDERS: dict[str, type[Connector]] = {
     "aws": AWSConnector,
     "datadog": DatadogConnector,
     "grafana": GrafanaConnector,
+    "pagerduty": PagerDutyConnector,
 }
 
 # Providers --ci diagnosis on `prash fix` knows how to drive. Not all of
@@ -242,6 +245,8 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ApplyGitlabCiFixAction(),
             ApplyManifestFixAction(),
             ExecuteAwsAction(),
+            PagerdutyAcknowledgeAction(),
+            PagerdutyResolveAction(),
         ]
     )
     return dispatcher
