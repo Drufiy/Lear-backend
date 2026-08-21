@@ -373,3 +373,79 @@ def test_cmd_notify_sends_and_reports_per_channel(monkeypatch, capsys):
     assert "discord: sent" in out
     assert sent["message"] == "hello team"
     assert sent["creds"] == creds
+
+
+def test_cmd_investigate_dependabot_calls_alerts_not_poll_state(monkeypatch, capsys):
+    """--dependabot (Sprint 2 Tier 3) must route to get_dependabot_alerts,
+    not the CI-run poll_state -- they answer different questions."""
+    import prash.cli as cli_mod
+
+    poll_state_called = {"value": False}
+
+    def fake_poll_state(resource):
+        poll_state_called["value"] = True
+        raise AssertionError("poll_state must not be called when --dependabot is set")
+
+    def fake_get_dependabot_alerts(repo, state="open"):
+        return [{"number": 7, "dependency": {"package": {"name": "lodash"}}, "security_vulnerability": {"severity": "high"}, "security_advisory": {"summary": "prototype pollution"}}]
+
+    fake_connector = type(
+        "FakeConnector",
+        (),
+        {
+            "name": "github",
+            "authenticate": lambda self: True,
+            "poll_state": fake_poll_state,
+            "get_dependabot_alerts": fake_get_dependabot_alerts,
+        },
+    )()
+    monkeypatch.setattr(cli_mod, "_make_connectors", lambda creds: {"github": fake_connector})
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+
+    args = Namespace(provider="github", resource="acme/api", dependabot=True)
+    exit_code = cmd_investigate(args)
+
+    assert poll_state_called["value"] is False
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "1 open Dependabot alert" in out
+    assert "lodash" in out
+
+
+def test_cmd_investigate_dependabot_rejects_non_github_provider(monkeypatch, capsys):
+    import prash.cli as cli_mod
+
+    fake_connector = type("FakeConnector", (), {"name": "vercel", "authenticate": lambda self: True})()
+    monkeypatch.setattr(cli_mod, "_make_connectors", lambda creds: {"vercel": fake_connector})
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+
+    args = Namespace(provider="vercel", resource="acme/api", dependabot=True)
+    exit_code = cmd_investigate(args)
+
+    assert exit_code != 0
+    assert "only applies to --provider github" in capsys.readouterr().out
+
+
+def test_cmd_investigate_gitleaks_unauthenticated_hint_is_about_binary(monkeypatch, capsys):
+    """Found live 2026-08-19: the shared 'auth not configured' message
+    assumed every connector's failure means a missing .env token, which is
+    false for gitleaks (no token at all -- its authenticate() fails when the
+    local binary isn't on PATH)."""
+    import prash.cli as cli_mod
+
+    fake_connector = type("FakeConnector", (), {"name": "gitleaks", "authenticate": lambda self: False})()
+    monkeypatch.setattr(cli_mod, "_make_connectors", lambda creds: {"gitleaks": fake_connector})
+    monkeypatch.setattr(cli_mod, "CredentialStore", type(
+        "FakeStore", (), {"from_env": staticmethod(lambda: type("S", (), {"load": lambda self: {}})())}
+    ))
+
+    args = Namespace(provider="gitleaks", resource=".")
+    cmd_investigate(args)
+
+    out = capsys.readouterr().out
+    assert "missing binary on PATH" in out
+    assert "missing token" not in out

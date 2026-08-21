@@ -54,9 +54,11 @@ from .connectors.aws import AWSConnector
 from .connectors.base import Connector
 from .connectors.datadog import DatadogConnector
 from .connectors.github import GitHubConnector, GitHubRunner
+from .connectors.gitleaks import GitleaksConnector
 from .connectors.gitlab import GitLabConnector
 from .connectors.grafana import GrafanaConnector
 from .connectors.pagerduty import PagerDutyConnector
+from .connectors.snyk import SnykConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
@@ -73,6 +75,8 @@ PROVIDERS: dict[str, type[Connector]] = {
     "datadog": DatadogConnector,
     "grafana": GrafanaConnector,
     "pagerduty": PagerDutyConnector,
+    "snyk": SnykConnector,
+    "gitleaks": GitleaksConnector,
 }
 
 # Providers --ci diagnosis on `prash fix` knows how to drive. Not all of
@@ -507,8 +511,29 @@ def cmd_investigate(args: argparse.Namespace) -> int:
         # crash, but silently returned a "not-found" result that looked like
         # a real answer instead of "we never actually asked." Neither is the
         # clean, honest "not configured" outcome this message promises.
-        console.print(f"[yellow]{connector.name}: auth not configured (missing token in local .env)[/yellow]")
+        # Found live 2026-08-19 testing the gitleaks connector: this message
+        # assumed every connector's auth failure means a missing token in
+        # .env. True for every API-backed connector, but gitleaks has no
+        # token at all -- its authenticate() fails when the local binary
+        # isn't installed, so the old wording was simply false for it.
+        hint = "missing binary on PATH" if connector.name == "gitleaks" else "missing token in local .env"
+        console.print(f"[yellow]{connector.name}: auth not configured ({hint})[/yellow]")
         return 1
+    if getattr(args, "dependabot", False):
+        if args.provider != "github":
+            console.print("[red]--dependabot only applies to --provider github[/red]")
+            return 2
+        alerts = connector.get_dependabot_alerts(args.resource)
+        if not alerts:
+            console.print(f"[bold]{args.resource}[/bold] -> no open Dependabot alerts")
+            return 0
+        console.print(f"[bold]{args.resource}[/bold] -> {len(alerts)} open Dependabot alert(s)")
+        for alert in alerts:
+            pkg = alert.get("dependency", {}).get("package", {}).get("name", "?")
+            severity = alert.get("security_vulnerability", {}).get("severity", "?")
+            summary = alert.get("security_advisory", {}).get("summary", "")
+            console.print(f"[dim]  #{alert.get('number')} {pkg} ({severity}): {summary}[/dim]")
+        return 0
     state = connector.poll_state(args.resource)
     console.print(f"[bold]{args.resource}[/bold] -> {state.state.value}")
     console.print(f"[dim]{state.detail}[/dim]")
@@ -761,6 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
     inv = sub.add_parser("investigate", help="read-only connector probe", formatter_class=formatter_class)
     inv.add_argument("resource")
     inv.add_argument("--provider", choices=list(PROVIDERS), default="github")
+    inv.add_argument("--dependabot", action="store_true", help="github only: list open Dependabot alerts instead of CI run status (Sprint 2 Tier 3)")
     inv.set_defaults(func=cmd_investigate)
 
     logs = sub.add_parser("logs", help="read a pod's logs, optionally following live (sprint-2 Kubernetes Depth)", formatter_class=formatter_class)

@@ -124,6 +124,17 @@ class GitHubConnector(Connector):
         qs = f"?per_page={limit}" + (f"&branch={branch}" if branch else "")
         return self._request("GET", f"/repos/{repo}/actions/runs{qs}")
 
+    def get_dependabot_alerts(self, repo: str, state: str = "open") -> list[Dict[str, Any]]:
+        """Dependabot alerts (Sprint 2 Tier 3, PRASH_V2.md §7b) -- not a new
+        connector, since this is a GitHub API capability, not a separate
+        product with its own credentials. Needs the token to have Dependabot
+        alerts read access (fine-grained PAT scope, or `security_events`/
+        `repo` on a classic token for private repos). state defaults to
+        "open" -- the ones actually worth a human's attention; pass "" for
+        every alert regardless of state."""
+        qs = f"?state={state}" if state else ""
+        return self._request("GET", f"/repos/{repo}/dependabot/alerts{qs}")
+
     def poll_state(self, resource: str, **kwargs: Any) -> ResourceState:
         run = self.locate(resource)
         runs = self.workflow_runs(run["repo"], branch=kwargs.get("branch", ""))
