@@ -119,3 +119,14 @@ def test_fetch_logs_returns_severity_breakdown(monkeypatch):
     sn = SnykConnector({"SNYK_API_TOKEN": "t", "SNYK_ORG_ID": "org1"})
     lines = sn.fetch_logs("p1")
     assert lines == ["critical: 1", "high: 2", "medium: 3", "low: 4"]
+
+
+def test_ignore_issue_sends_temporary_ignore_with_reason(monkeypatch):
+    calls = _capture_urlopen(monkeypatch, json.dumps({"ok": True}).encode())
+    sn = SnykConnector({"SNYK_API_TOKEN": "t", "SNYK_ORG_ID": "org1"})
+    sn.ignore_issue("proj-uuid", "issue-1", "false positive, verified manually")
+    assert calls[0].full_url == "https://api.snyk.io/v1/org/org1/project/proj-uuid/ignore/issue-1"
+    payload = json.loads(calls[0].data)
+    assert payload["reason"] == "false positive, verified manually"
+    assert payload["reasonType"] == "temporary-ignore"
+    assert "expires" in payload

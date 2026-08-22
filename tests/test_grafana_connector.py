@@ -164,3 +164,38 @@ def test_fetch_logs_explicit_tags_override_resource(monkeypatch):
 
 def test_fetch_logs_returns_empty_without_credentials():
     assert GrafanaConnector({}).fetch_logs("anything") == []
+
+
+def test_silence_alert_sends_alertname_matcher(monkeypatch):
+    bodies = [
+        json.dumps([{"uid": "abc123", "title": "High error rate"}]).encode(),
+        json.dumps({"silenceID": "sil-1"}).encode(),
+    ]
+    calls = []
+    index = {"i": 0}
+
+    def fake_urlopen(req, timeout=30):
+        calls.append(req)
+        body = bodies[index["i"]]
+        index["i"] += 1
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    gf = GrafanaConnector({"GRAFANA_URL": "https://acme.grafana.net", "GRAFANA_API_KEY": "k"})
+    result = gf.silence_alert("abc123", minutes=30)
+    assert result["silenceID"] == "sil-1"
+    assert calls[1].full_url == "https://acme.grafana.net/api/alertmanager/grafana/api/v2/silences"
+    payload = json.loads(calls[1].data)
+    assert payload["matchers"] == [{"name": "alertname", "value": "High error rate", "isRegex": False}]
+
+
+def test_silence_alert_raises_when_rule_not_found(monkeypatch):
+    from prash.connectors.grafana import GrafanaError
+
+    _capture_urlopen(monkeypatch, json.dumps([]).encode())
+    gf = GrafanaConnector({"GRAFANA_URL": "https://acme.grafana.net", "GRAFANA_API_KEY": "k"})
+    try:
+        gf.silence_alert("no such rule")
+        assert False, "expected GrafanaError"
+    except GrafanaError as exc:
+        assert "not found" in str(exc)

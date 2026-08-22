@@ -1,8 +1,12 @@
 """Vercel connector, ported from v1's vercel_client.py as the template for all
 new connectors: authenticate -> locate resource -> fetch logs -> poll state.
 
-Read-only for this sprint (matching the v1 scope). Add write capabilities as
-needed in later phases.
+Write actions added 2026-08-19 (PRASH_V2.md §7b) -- redeploy() and rollback(),
+wired through prash/actions/vercel_deploy.py. redeploy() reuses the exact
+same /v13/deployments create-deployment endpoint Vercel itself calls a
+"redeploy": a new deployment is created that references an existing
+deployment's id, cloning it. rollback() uses Vercel's dedicated Rollback API
+(/v9/projects/{id}/rollback/{deploymentId}).
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ class VercelError(RuntimeError):
 class VercelConnector(Connector):
     name = "vercel"
     read_capabilities = ("build_logs", "deploy_state")
+    write_capabilities = ("redeploy", "rollback")
 
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
@@ -76,3 +81,26 @@ class VercelConnector(Connector):
         if ready_state in ("BUILDING", "QUEUED", "INITIALIZING"):
             state = ConnectorState.DEPLOYING
         return ResourceState(resource, state, {"latest_deployment": items[0]})
+
+    def _latest_deployment_id(self, project: str) -> str:
+        deploys = self._request("GET", f"/v1/deployments?projectId={project}&limit=1")
+        items = deploys.get("deployments", []) if isinstance(deploys, dict) else []
+        if not items:
+            raise VercelError(f"no deployments found for project {project}")
+        return items[0]["uid"]
+
+    def redeploy(self, resource: str, deployment_id: str | None = None) -> Dict[str, Any]:
+        """Create a new deployment cloning an existing one -- Vercel's own
+        "redeploy" action, done via the same create-deployment endpoint used
+        to make any deployment. Defaults to redeploying the latest one."""
+        handle = self.locate(resource)
+        target_id = deployment_id or self._latest_deployment_id(handle["project"])
+        return self._request("POST", "/v13/deployments", {"deploymentId": target_id, "name": handle["project"]})
+
+    def rollback(self, resource: str, deployment_id: str) -> Dict[str, Any]:
+        """Point production at a specific earlier deployment via Vercel's
+        dedicated Rollback API. Unlike redeploy(), this requires an explicit
+        deployment_id -- rolling back to "whatever's most recent" would just
+        be a redeploy, not a rollback."""
+        handle = self.locate(resource)
+        return self._request("POST", f"/v9/projects/{handle['project']}/rollback/{deployment_id}")

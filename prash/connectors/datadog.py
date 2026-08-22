@@ -20,6 +20,7 @@ string itself if none is given.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +48,7 @@ class DatadogError(RuntimeError):
 class DatadogConnector(Connector):
     name = "datadog"
     read_capabilities = ("monitor_state", "logs")
+    write_capabilities = ("mute_monitor",)
 
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
@@ -144,3 +146,17 @@ class DatadogConnector(Connector):
             if line:
                 lines.append(line)
         return lines
+
+    def mute_monitor(self, resource: str, minutes: int = 60) -> Dict[str, Any]:
+        """Mute a monitor for the given duration -- Datadog's own /mute
+        endpoint, which silences alert notifications without touching
+        whatever's actually wrong. Write action added 2026-08-19 (PRASH_V2.md
+        §7b): the point isn't to fix the underlying issue (Datadog has no
+        concept of "fixing" a metric), it's to stop the paging noise while a
+        human or another action handles the real cause -- same role
+        pagerduty-acknowledge plays for incidents."""
+        handle = self.locate(resource)
+        if not handle:
+            raise DatadogError(f"monitor not found: {resource}")
+        end_ts = int(time.time()) + minutes * 60
+        return self._request("POST", f"/api/v1/monitor/{handle['monitor_id']}/mute", body={"end": end_ts})
