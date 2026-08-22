@@ -13,6 +13,8 @@ from .contract import (
     VerificationResult,
 )
 from .execute_aws import ExecuteAwsAction
+from .execute_azure import ExecuteAzureAction
+from .execute_gcp import ExecuteGCPAction
 
 __all__ = [
     "Action",
@@ -28,4 +30,6 @@ __all__ = [
     "Target",
     "VerificationResult",
     "ExecuteAwsAction",
+    "ExecuteAzureAction",
+    "ExecuteGCPAction",
 ]
