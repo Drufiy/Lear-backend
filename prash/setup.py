@@ -34,6 +34,20 @@ GROUPS = {
     "Vercel": [
         "VERCEL_TOKEN",
     ],
+    "Team Notifications": [
+        "SLACK_WEBHOOK_URL",
+        "DISCORD_WEBHOOK_URL",
+        "EMAIL_SMTP_HOST",
+        "EMAIL_SMTP_PORT",
+        "EMAIL_USER",
+        "EMAIL_PASSWORD",
+        "EMAIL_FROM",
+        "EMAIL_TO",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "WHATSAPP_FROM_NUMBER",
+        "WHATSAPP_TO_NUMBERS",
+    ],
     "Prash Settings & Watcher": [
         "PRASH_PERMISSION_MODE",
         "PRASH_ENVIRONMENT",

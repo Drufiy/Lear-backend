@@ -30,17 +30,33 @@ it exists to notify about.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import smtplib
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
+from email.message import EmailMessage
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 SLACK_WEBHOOK_KEY = "SLACK_WEBHOOK_URL"
 DISCORD_WEBHOOK_KEY = "DISCORD_WEBHOOK_URL"
+
+EMAIL_SMTP_HOST_KEY = "EMAIL_SMTP_HOST"
+EMAIL_SMTP_PORT_KEY = "EMAIL_SMTP_PORT"
+EMAIL_USER_KEY = "EMAIL_USER"
+EMAIL_PASSWORD_KEY = "EMAIL_PASSWORD"
+EMAIL_FROM_KEY = "EMAIL_FROM"
+EMAIL_TO_KEY = "EMAIL_TO"
+
+TWILIO_ACCOUNT_SID_KEY = "TWILIO_ACCOUNT_SID"
+TWILIO_AUTH_TOKEN_KEY = "TWILIO_AUTH_TOKEN"
+WHATSAPP_FROM_KEY = "WHATSAPP_FROM_NUMBER"
+WHATSAPP_TO_KEY = "WHATSAPP_TO_NUMBERS"
 
 
 class Notifier:
@@ -105,11 +121,116 @@ class DiscordNotifier(Notifier):
         return {"content": f"**{title}**\n{message}"}
 
 
+class EmailNotifier(Notifier):
+    """Email via SMTP, sent in basic HTML format."""
+    name = "email"
+    key = EMAIL_SMTP_HOST_KEY
+
+    def configured(self) -> bool:
+        return bool(self.credentials.get(self.key)) and bool(self.credentials.get(EMAIL_TO_KEY))
+
+    def send(self, title: str, message: str) -> bool:
+        host = self.credentials.get(self.key)
+        if not host:
+            return False
+            
+        port = int(self.credentials.get(EMAIL_SMTP_PORT_KEY, "587"))
+        user = self.credentials.get(EMAIL_USER_KEY)
+        password = self.credentials.get(EMAIL_PASSWORD_KEY)
+        sender = self.credentials.get(EMAIL_FROM_KEY, user)
+        recipients_raw = self.credentials.get(EMAIL_TO_KEY, "")
+        
+        if not recipients_raw:
+            return False
+            
+        recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+        
+        msg = EmailMessage()
+        msg["Subject"] = title
+        msg["From"] = sender
+        msg["To"] = ", ".join(recipients)
+        
+        html_content = f"<html><body><h3>{title}</h3><p>{message.replace(chr(10), '<br>')}</p></body></html>"
+        msg.set_content(message)
+        msg.add_alternative(html_content, subtype='html')
+        
+        try:
+            with smtplib.SMTP(host, port, timeout=15) as server:
+                server.starttls()
+                if user and password:
+                    server.login(user, password)
+                server.send_message(msg)
+            return True
+        except Exception as exc:
+            logger.warning(f"{self.name}: send failed: {exc}")
+        return False
+
+
+class WhatsAppNotifier(Notifier):
+    """WhatsApp via Twilio API."""
+    name = "whatsapp"
+    key = TWILIO_ACCOUNT_SID_KEY
+
+    def configured(self) -> bool:
+        return bool(self.credentials.get(self.key)) and bool(self.credentials.get(WHATSAPP_TO_KEY))
+
+    def send(self, title: str, message: str) -> bool:
+        sid = self.credentials.get(self.key)
+        token = self.credentials.get(TWILIO_AUTH_TOKEN_KEY)
+        from_number = self.credentials.get(WHATSAPP_FROM_KEY)
+        to_numbers_raw = self.credentials.get(WHATSAPP_TO_KEY, "")
+        
+        if not (sid and token and from_number and to_numbers_raw):
+            return False
+            
+        recipients = [r.strip() for r in to_numbers_raw.split(",") if r.strip()]
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+        auth_string = f"{sid}:{token}"
+        auth_header = "Basic " + base64.b64encode(auth_string.encode("utf-8")).decode("utf-8")
+        
+        body_text = f"*{title}*\n{message}"
+        success = False
+        
+        for recipient in recipients:
+            if not recipient.startswith("whatsapp:"):
+                recipient = f"whatsapp:{recipient}"
+            from_sender = from_number if from_number.startswith("whatsapp:") else f"whatsapp:{from_number}"
+                
+            data = urllib.parse.urlencode({
+                "To": recipient,
+                "From": from_sender,
+                "Body": body_text
+            }).encode("utf-8")
+            
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Authorization": auth_header},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp.read()
+                success = True
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+                logger.warning(f"{self.name}: webhook rejected for {recipient} ({exc.code}): {detail}")
+            except Exception as exc:
+                logger.warning(f"{self.name}: webhook send failed for {recipient}: {exc}")
+                
+        return success
+
+
 def team_notifiers(credentials: Mapping[str, Any]) -> list[Notifier]:
     """Every channel that has a webhook configured, in a stable order."""
     return [
         n
-        for n in (SlackNotifier(credentials), DiscordNotifier(credentials))
+        for n in (
+            SlackNotifier(credentials), 
+            DiscordNotifier(credentials),
+            EmailNotifier(credentials),
+            WhatsAppNotifier(credentials),
+        )
         if n.configured()
     ]
 
