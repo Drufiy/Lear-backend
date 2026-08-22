@@ -21,10 +21,17 @@ GROUPS = {
         "KUBE_CONTEXT",
         "KUBE_NAMESPACE",
     ],
-    "Google Cloud (Cloud Run)": [
+    "Google Cloud (Cloud Run & Compute Engine)": [
         "GCP_PROJECT_ID",
         "GCP_REGION",
         "GOOGLE_APPLICATION_CREDENTIALS",
+    ],
+    "Microsoft Azure (VMs)": [
+        "AZURE_SUBSCRIPTION_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
+        "AZURE_LOCATION",
     ],
     "AWS Configuration": [
         "AWS_ACCESS_KEY_ID",

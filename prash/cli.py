@@ -51,6 +51,8 @@ from .actions.scale import ScaleAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
 from .connectors.aws import AWSConnector
+from .connectors.azure import AzureConnector
+from .connectors.gcp import GCPConnector
 from .connectors.base import Connector
 from .connectors.datadog import DatadogConnector
 from .connectors.github import GitHubConnector, GitHubRunner
@@ -72,6 +74,8 @@ PROVIDERS: dict[str, type[Connector]] = {
     "gitlab": GitLabConnector,
     "vercel": VercelConnector,
     "aws": AWSConnector,
+    "azure": AzureConnector,
+    "gcp": GCPConnector,
     "datadog": DatadogConnector,
     "grafana": GrafanaConnector,
     "pagerduty": PagerDutyConnector,
