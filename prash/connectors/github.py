@@ -122,7 +122,7 @@ class GitHubConnector(Connector):
 
     def workflow_runs(self, repo: str, branch: str = "", limit: int = 5) -> list[Dict[str, Any]]:
         qs = f"?per_page={limit}" + (f"&branch={branch}" if branch else "")
-        return self._request("GET", f"/repos/{repo}/actions/runs{qs}")
+        return self._request("GET", f"/repos/{repo}/actions/runs{qs}")["workflow_runs"]
 
     def get_dependabot_alerts(self, repo: str, state: str = "open") -> list[Dict[str, Any]]:
         """Dependabot alerts (Sprint 2 Tier 3, PRASH_V2.md §7b) -- not a new
@@ -135,18 +135,54 @@ class GitHubConnector(Connector):
         qs = f"?state={state}" if state else ""
         return self._request("GET", f"/repos/{repo}/dependabot/alerts{qs}")
 
+    _STATE_SEVERITY = {
+        ConnectorState.HEALTHY: 0,
+        ConnectorState.DEPLOYING: 1,
+        ConnectorState.DEGRADED: 2,
+        ConnectorState.FAILED: 3,
+    }
+
+    @staticmethod
+    def _run_state(run: Dict[str, Any]) -> ConnectorState:
+        status, conclusion = run.get("status"), run.get("conclusion")
+        if status == "in_progress":
+            return ConnectorState.DEPLOYING
+        if status == "completed" and conclusion == "failure":
+            return ConnectorState.FAILED
+        if status == "completed" and conclusion in ("success", "neutral"):
+            return ConnectorState.HEALTHY
+        return ConnectorState.DEGRADED
+
     def poll_state(self, resource: str, **kwargs: Any) -> ResourceState:
         run = self.locate(resource)
-        runs = self.workflow_runs(run["repo"], branch=kwargs.get("branch", ""))
+        runs = self.workflow_runs(run["repo"], branch=kwargs.get("branch", ""), limit=kwargs.get("limit", 20))
         if not runs:
             return ResourceState(resource, ConnectorState.NOT_FOUND, {"runs": 0})
-        status = runs[0].get("status"), runs[0].get("conclusion")
-        state = ConnectorState.FAILED if status[1] == "failure" else ConnectorState.DEGRADED
-        if status[0] == "completed" and status[1] in ("success", "neutral"):
-            state = ConnectorState.HEALTHY
-        elif status[0] == "in_progress":
-            state = ConnectorState.DEPLOYING
-        return ResourceState(resource, state, {"latest_run": runs[0]})
+
+        # A repo can have several workflows (CI, CodeQL, etc). Runs come back
+        # newest-first across ALL of them, so the single most-recent run is
+        # not a reliable health signal -- e.g. a fast CodeQL success completing
+        # right after a genuinely broken CI run would mask the failure. Take
+        # the latest run per workflow instead and surface the worst state.
+        latest_per_workflow: Dict[Any, Dict[str, Any]] = {}
+        for r in runs:
+            wf_id = r.get("workflow_id")
+            if wf_id not in latest_per_workflow:
+                latest_per_workflow[wf_id] = r
+
+        worst_run = None
+        worst_state = ConnectorState.HEALTHY
+        for r in latest_per_workflow.values():
+            candidate = self._run_state(r)
+            if self._STATE_SEVERITY[candidate] >= self._STATE_SEVERITY[worst_state]:
+                worst_state = candidate
+                worst_run = r
+
+        return ResourceState(
+            resource,
+            worst_state,
+            {"latest_run": worst_run, "runs_by_workflow": latest_per_workflow},
+        )
 
 
 class GitHubRunner:

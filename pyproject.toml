@@ -37,3 +37,8 @@ include = ["prash*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Without this, CI (which invokes the bare `pytest` binary, not `python -m
+# pytest`) never puts the repo root on sys.path, so tests/test_eval_env_loading.py
+# importing the sibling `evals` package fails with ModuleNotFoundError even
+# though it works locally (python -m pytest adds the cwd automatically).
+pythonpath = ["."]

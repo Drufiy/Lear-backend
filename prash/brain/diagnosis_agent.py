@@ -1253,16 +1253,44 @@ async def diagnose_failure(
     # existing-file fix, and checking new_content alone would silently drop every
     # one of those (exactly the "Prash quietly does nothing" failure this whole
     # project exists to avoid).
+    #
+    # One deliberate exception (found 2026-08-22 dogfooding a real CI fix): a
+    # genuinely empty new file — a Python __init__.py package marker, a
+    # .gitkeep, py.typed — is indistinguishable from "model gave up" by content
+    # alone, and the drop above was silently eating the *correct* fix. Known
+    # empty-by-convention filenames are let through automatically. Anything
+    # else that comes back blank still gets dropped, but the diagnosis is no
+    # longer allowed to claim safe_auto_apply confidence once that's happened —
+    # downgraded to review_recommended so a human sees it instead of Prash
+    # quietly shipping an incomplete fix (same ask-don't-quit principle as the
+    # options menu, PRASH_V2.md §9 2026-08-15).
+    _KNOWN_EMPTY_FILENAMES = {"__init__.py", ".gitkeep", "py.typed"}
     if raw_args.get("files_changed"):
         valid_files = []
+        dropped_any = False
         for fc in raw_args["files_changed"]:
             has_new_content = bool((fc.get("new_content") or "").strip())
             has_edits = any((e.get("old_content") or "").strip() for e in (fc.get("edits") or []))
+            path = fc.get("path", "")
+            basename = path.rsplit("/", 1)[-1]
+            is_known_empty_marker = (
+                not has_edits and basename in _KNOWN_EMPTY_FILENAMES and not fc.get("edits")
+            )
+            explicitly_empty = fc.get("create_empty") is True
+
             if has_new_content or has_edits:
+                valid_files.append(fc)
+            elif is_known_empty_marker or explicitly_empty:
+                fc["new_content"] = ""
+                fc["create_empty"] = True
                 valid_files.append(fc)
             else:
                 logger.warning(f"Dropping file {fc.get('path', '?')} — no new_content or edits")
+                dropped_any = True
         raw_args["files_changed"] = valid_files
+        if dropped_any and raw_args.get("fix_type") == "safe_auto_apply":
+            logger.warning("Downgrading fix_type to review_recommended — a proposed file was dropped as empty")
+            raw_args["fix_type"] = "review_recommended"
 
     try:
         diagnosis = Diagnosis(**raw_args)

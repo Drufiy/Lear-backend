@@ -83,6 +83,15 @@ class FileChange(BaseModel):
         default=None,
         description="Complete content for a brand-NEW file only. Do not use this to edit a file that already exists — use `edits` instead.",
     )
+    create_empty: bool = Field(
+        default=False,
+        description=(
+            "Set True ONLY when this new file's correct content genuinely is "
+            "empty — e.g. a Python package __init__.py marker, a .gitkeep "
+            "placeholder, or py.typed. Leave False for everything else; this "
+            "is not a way to skip writing real content."
+        ),
+    )
     explanation: str = Field(..., description="What changed and why")
 
     @field_validator("path")
@@ -99,16 +108,27 @@ class FileChange(BaseModel):
             return v
         if len(v) > 200_000:
             raise ValueError("new_content exceeds 200KB — likely hallucinated")
-        if len(v.strip()) == 0:
-            return None
         return v
 
     @model_validator(mode="after")
     def require_edits_or_new_content(self) -> "FileChange":
-        if self.edits and self.new_content:
+        # An empty/whitespace-only new_content is ambiguous on its own: it's
+        # usually the model giving up on a file it couldn't actually fix (the
+        # historical failure mode this validator guards against), but for a
+        # deliberately-empty new file (create_empty=True) it's the correct,
+        # literal content. Normalize to "" only in the latter case so the
+        # ambiguous default (create_empty=False + blank content) still fails
+        # validation exactly as before instead of silently doing nothing.
+        blank_new_content = self.new_content is None or len(self.new_content.strip()) == 0
+        if self.create_empty and blank_new_content:
+            self.new_content = ""
+        elif blank_new_content:
+            self.new_content = None
+
+        if self.edits and self.new_content is not None:
             raise ValueError("FileChange must use either `edits` (existing file) or `new_content` (new file), not both")
-        if not self.edits and not self.new_content:
-            raise ValueError("FileChange must provide either `edits` or `new_content`")
+        if not self.edits and self.new_content is None:
+            raise ValueError("FileChange must provide either `edits` or `new_content` (or set create_empty=True for an intentionally empty new file)")
         return self
 
     def apply(self, original_content: str | None) -> str:
