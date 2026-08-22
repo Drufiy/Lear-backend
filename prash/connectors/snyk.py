@@ -39,6 +39,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping
 
 from .base import Connector, ConnectorState, ResourceState
@@ -53,6 +54,7 @@ class SnykError(RuntimeError):
 class SnykConnector(Connector):
     name = "snyk"
     read_capabilities = ("project_issue_state",)
+    write_capabilities = ("ignore_issue",)
 
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
@@ -123,3 +125,25 @@ class SnykConnector(Connector):
             return []
         counts = (handle["project"].get("issueCountsBySeverity") or {})
         return [f"{sev}: {counts.get(sev, 0)}" for sev in ("critical", "high", "medium", "low")]
+
+    def ignore_issue(self, project_id: str, issue_id: str, reason: str, expires_days: int = 30) -> Dict[str, Any]:
+        """Ignore a specific vulnerability on a project for a bounded time.
+        Write action added 2026-08-19 (PRASH_V2.md §7b), deliberately
+        APPROVAL-tier at the action layer -- accepting a known security risk
+        is a real judgment call, not a neutral operation, so it always
+        prompts. `reasonType` is fixed to "temporary-ignore" (not
+        "wont-fix"/"not-vulnerable") specifically because it's time-bounded
+        by `expires_days` -- an ignore that silently became permanent would
+        misrepresent what was actually approved."""
+        expires = (datetime.now(timezone.utc) + timedelta(days=expires_days)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        body = {
+            "reason": reason,
+            "reasonType": "temporary-ignore",
+            "ignoredBy": {"name": "Prash"},
+            "expires": expires,
+        }
+        return self._request(
+            "POST",
+            f"/v1/org/{urllib.parse.quote(self.org_id or '')}/project/{project_id}/ignore/{issue_id}",
+            body=body,
+        )

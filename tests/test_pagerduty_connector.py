@@ -167,3 +167,34 @@ def test_write_without_from_email_raises_clean_error():
         assert False, "expected PagerDutyError"
     except PagerDutyError as exc:
         assert "PAGERDUTY_FROM_EMAIL" in str(exc)
+
+
+def test_trigger_event_hits_events_api_with_routing_key(monkeypatch):
+    calls = _capture_urlopen(monkeypatch, json.dumps({"status": "success", "dedup_key": "dk-1"}).encode())
+    pd = PagerDutyConnector({"PAGERDUTY_ROUTING_KEY": "rk-secret"})
+    result = pd.trigger_event(summary="leaked secret found", source="/repo/path", severity="critical")
+    assert result["dedup_key"] == "dk-1"
+    assert calls[0].full_url == "https://events.pagerduty.com/v2/enqueue"
+    payload = json.loads(calls[0].data)
+    assert payload["routing_key"] == "rk-secret"
+    assert payload["event_action"] == "trigger"
+    assert payload["payload"]["summary"] == "leaked secret found"
+
+
+def test_trigger_event_without_routing_key_raises_clean_error():
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
+    try:
+        pd.trigger_event(summary="x", source="y")
+        assert False, "expected PagerDutyError"
+    except PagerDutyError as exc:
+        assert "PAGERDUTY_ROUTING_KEY" in str(exc)
+
+
+def test_trigger_event_never_uses_rest_api_auth_header(monkeypatch):
+    """The Events API is a genuinely different PagerDuty product from the
+    REST API used by acknowledge/resolve -- must not send the REST
+    Authorization/From headers here."""
+    calls = _capture_urlopen(monkeypatch, json.dumps({"dedup_key": "dk-1"}).encode())
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "rest-key", "PAGERDUTY_ROUTING_KEY": "rk-secret"})
+    pd.trigger_event(summary="x", source="y")
+    assert calls[0].get_header("Authorization") is None

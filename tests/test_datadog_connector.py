@@ -147,3 +147,37 @@ def test_fetch_logs_explicit_query_overrides_resource(monkeypatch):
 def test_fetch_logs_returns_empty_without_app_key():
     dd = DatadogConnector({"DATADOG_API_KEY": "k"})
     assert dd.fetch_logs("anything") == []
+
+
+def test_mute_monitor_hits_mute_endpoint_with_end_timestamp(monkeypatch):
+    bodies = [
+        b'{"id": 42, "name": "api errors", "overall_state": "Alert"}',
+        b'{"active": true}',
+    ]
+    calls = []
+    index = {"i": 0}
+
+    def fake_urlopen(req, timeout=30):
+        calls.append(req)
+        body = bodies[index["i"]]
+        index["i"] += 1
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
+    dd.mute_monitor("42", minutes=30)
+    assert calls[1].full_url == "https://api.datadoghq.com/api/v1/monitor/42/mute"
+    payload = json.loads(calls[1].data)
+    assert "end" in payload
+
+
+def test_mute_monitor_raises_when_monitor_not_found(monkeypatch):
+    from prash.connectors.datadog import DatadogError
+
+    _capture_urlopen(monkeypatch, b'{"monitors": []}')
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
+    try:
+        dd.mute_monitor("no such monitor")
+        assert False, "expected DatadogError"
+    except DatadogError as exc:
+        assert "not found" in str(exc)

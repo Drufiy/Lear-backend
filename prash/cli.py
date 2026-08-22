@@ -43,11 +43,16 @@ from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
 from .actions.missing_secret import RequestSecretAction
+from .actions.datadog_mute import DatadogMuteMonitorAction
+from .actions.gitleaks_escalate import GitleaksEscalateAction
+from .actions.grafana_silence import GrafanaSilenceAlertAction
 from .actions.open_pr import OpenPrAction
 from .actions.pagerduty_incident import PagerdutyAcknowledgeAction, PagerdutyResolveAction
 from .actions.restart_pod import RestartPodAction
+from .actions.snyk_ignore import SnykIgnoreIssueAction
 from .actions.rollback import RollbackAction
 from .actions.scale import ScaleAction
+from .actions.vercel_deploy import VercelRedeployAction, VercelRollbackAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
 from .connectors.aws import AWSConnector
@@ -228,6 +233,9 @@ def _make_context(
 
             "exec_command": getattr(args, "exec_command", None),
             "container": getattr(args, "container", None),
+            "deployment_id": getattr(args, "deployment_id", None),
+            "minutes": getattr(args, "minutes", 60),
+            "reason": getattr(args, "reason", None),
         },
     )
 
@@ -251,6 +259,12 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ExecuteAwsAction(),
             PagerdutyAcknowledgeAction(),
             PagerdutyResolveAction(),
+            VercelRedeployAction(),
+            VercelRollbackAction(),
+            DatadogMuteMonitorAction(),
+            GrafanaSilenceAlertAction(),
+            SnykIgnoreIssueAction(),
+            GitleaksEscalateAction(),
         ]
     )
     return dispatcher
@@ -761,6 +775,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run.add_argument("--exec-command", help="command to run inside the pod, e.g. 'ls -la /app' (exec)")
     run.add_argument("--container", default=None, help="container name, for multi-container pods (exec)")
+    run.add_argument("--deployment-id", default=None, help="Vercel deployment id (vercel-redeploy/vercel-rollback)")
+    run.add_argument("--minutes", type=int, default=60, help="mute/silence duration in minutes (datadog-mute-monitor/grafana-silence-alert)")
+    run.add_argument("--reason", default=None, help="reason for the change (snyk-ignore-issue)")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)

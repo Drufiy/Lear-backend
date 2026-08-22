@@ -23,6 +23,16 @@ require identifying WHO is making the change: PagerDuty's API rejects a
 status update with no `From: <email>` header naming a real user on the
 account, so PAGERDUTY_FROM_EMAIL is a second, write-only-required
 credential -- reads work with just the API key.
+
+trigger_event() (added 2026-08-19, wired to the Gitleaks-escalation action)
+uses a genuinely different PagerDuty mechanism from everything else in this
+file: the Events API v2 (`events.pagerduty.com`, not `api.pagerduty.com`),
+authenticated by a per-service integration/routing key
+(PAGERDUTY_ROUTING_KEY), not the REST API key. This is intentional, not an
+inconsistency to clean up -- creating a NEW incident from an external
+system and updating the status of an EXISTING incident are different
+PagerDuty products with different auth models; conflating them would mean
+guessing at which key does what.
 """
 
 from __future__ import annotations
@@ -50,12 +60,13 @@ class PagerDutyError(RuntimeError):
 class PagerDutyConnector(Connector):
     name = "pagerduty"
     read_capabilities = ("incident_state",)
-    write_capabilities = ("acknowledge_incident", "resolve_incident")
+    write_capabilities = ("acknowledge_incident", "resolve_incident", "trigger_event")
 
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
         self.api_key = credentials.get("PAGERDUTY_API_KEY")
         self.from_email = credentials.get("PAGERDUTY_FROM_EMAIL")
+        self.routing_key = credentials.get("PAGERDUTY_ROUTING_KEY")
 
     def _headers(self, need_from: bool = False) -> Dict[str, str]:
         headers = {
@@ -144,3 +155,29 @@ class PagerDutyConnector(Connector):
         body = {"incident": {"type": "incident_reference", "status": status}}
         resp = self._request("PUT", f"/incidents/{incident_id}", body=body, need_from=True)
         return resp.get("incident", resp) if isinstance(resp, dict) else resp
+
+    def trigger_event(self, summary: str, source: str, severity: str = "critical", custom_details: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        """Create a brand new incident via the Events API v2 -- a different
+        product from the REST /incidents endpoints above, with a different
+        auth model (see the module docstring). Used when something Prash
+        found needs to escalate to a human as a NEW paged incident, rather
+        than acting on an existing one."""
+        if not self.routing_key:
+            raise PagerDutyError("PAGERDUTY_ROUTING_KEY not configured -- required to trigger a new incident via the Events API")
+        body = {
+            "routing_key": self.routing_key,
+            "event_action": "trigger",
+            "payload": {"summary": summary, "source": source, "severity": severity, "custom_details": custom_details or {}},
+        }
+        req = urllib.request.Request(
+            "https://events.pagerduty.com/v2/enqueue",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raise PagerDutyError(f"PagerDuty Events API {exc.code}: {exc.read().decode('utf-8', errors='replace')[:300]}") from exc

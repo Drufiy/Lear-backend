@@ -11,9 +11,14 @@ from prash.actions.edit_config import EditConfigMapAction, EditSecretAction
 from prash.actions.exec_command import ExecAction
 from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
+from prash.actions.datadog_mute import DatadogMuteMonitorAction
+from prash.actions.gitleaks_escalate import GitleaksEscalateAction
+from prash.actions.grafana_silence import GrafanaSilenceAlertAction
 from prash.actions.open_pr import OpenPrAction
 from prash.actions.pagerduty_incident import PagerdutyAcknowledgeAction, PagerdutyResolveAction
 from prash.actions.restart_pod import RestartPodAction
+from prash.actions.snyk_ignore import SnykIgnoreIssueAction
+from prash.actions.vercel_deploy import VercelRedeployAction, VercelRollbackAction
 from prash.actions.rollback import RollbackAction
 from prash.actions.scale import ScaleAction
 from prash.brain.schemas import FileChange, FileEdit
@@ -1055,3 +1060,305 @@ def test_pagerduty_verify_not_ok_when_status_mismatched(tmp_path):
     action = PagerdutyResolveAction()
     result = ActionResult(status=ActionResultStatus.SUCCEEDED, summary="ok", detail={"status": "acknowledged"})
     assert not action.verify(_pd_ctx(tmp_path), result).ok
+
+
+class _FakeVercel:
+    def __init__(self, fail=False, ready_state="READY"):
+        self.fail = fail
+        self.ready_state = ready_state
+        self.redeployed = []
+        self.rolled_back = []
+
+    def redeploy(self, resource, deployment_id=None):
+        if self.fail:
+            raise RuntimeError("vercel api error")
+        self.redeployed.append((resource, deployment_id))
+        return {"id": "dpl_new", "readyState": self.ready_state}
+
+    def rollback(self, resource, deployment_id):
+        if self.fail:
+            raise RuntimeError("vercel api error")
+        self.rolled_back.append((resource, deployment_id))
+        return {"status": "in-progress"}
+
+    def poll_state(self, resource, **kwargs):
+        from prash.connectors.base import ConnectorState, ResourceState
+
+        return ResourceState(resource, ConnectorState.HEALTHY, {"latest_deployment": {"uid": "dpl_previous"}})
+
+
+def _vercel_ctx(tmp_path, vercel=None, **extra):
+    return _ctx(tmp_path, resource="my-app", extra={"connectors": {"vercel": vercel if vercel is not None else _FakeVercel()}, **extra})
+
+
+def test_vercel_redeploy_succeeds(tmp_path):
+    vc = _FakeVercel()
+    ctx = _vercel_ctx(tmp_path, vercel=vc)
+    result = VercelRedeployAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert vc.redeployed == [("my-app", None)]
+
+
+def test_vercel_redeploy_fails_honestly_on_api_error(tmp_path):
+    ctx = _vercel_ctx(tmp_path, vercel=_FakeVercel(fail=True))
+    result = VercelRedeployAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_vercel_redeploy_verify_ok_when_ready(tmp_path):
+    action = VercelRedeployAction()
+    result = ActionResult(status=ActionResultStatus.SUCCEEDED, summary="ok", detail={"deployment": {"readyState": "READY"}})
+    assert action.verify(_vercel_ctx(tmp_path), result).ok
+
+
+def test_vercel_redeploy_verify_not_ok_when_errored(tmp_path):
+    action = VercelRedeployAction()
+    result = ActionResult(status=ActionResultStatus.SUCCEEDED, summary="ok", detail={"deployment": {"readyState": "ERROR"}})
+    assert not action.verify(_vercel_ctx(tmp_path), result).ok
+
+
+def test_vercel_rollback_fails_honestly_without_deployment_id(tmp_path):
+    ctx = _vercel_ctx(tmp_path, extra={"deployment_id": None})
+    ctx.extra["connectors"] = {"vercel": _FakeVercel()}
+    result = VercelRollbackAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "no --deployment-id" in result.summary
+
+
+def test_vercel_rollback_succeeds_with_deployment_id(tmp_path):
+    vc = _FakeVercel()
+    ctx = _vercel_ctx(tmp_path, vercel=vc, deployment_id="dpl_previous")
+    result = VercelRollbackAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert vc.rolled_back == [("my-app", "dpl_previous")]
+
+
+def test_vercel_rollback_verify_matches_current_deployment(tmp_path):
+    vc = _FakeVercel()
+    ctx = _vercel_ctx(tmp_path, vercel=vc, deployment_id="dpl_previous")
+    result = ActionResult(status=ActionResultStatus.SUCCEEDED, summary="ok", detail={"deployment_id": "dpl_previous"})
+    assert VercelRollbackAction().verify(ctx, result).ok
+
+
+def test_vercel_redeploy_risk_tier_is_safe():
+    assert VercelRedeployAction().spec.risk_tier.value == "safe"
+
+
+def test_vercel_rollback_risk_tier_is_approval():
+    assert VercelRollbackAction().spec.risk_tier.value == "approval"
+
+
+class _FakeDatadog:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.muted = []
+
+    def mute_monitor(self, resource, minutes=60):
+        if self.fail:
+            raise RuntimeError("datadog api error")
+        self.muted.append((resource, minutes))
+        return {"id": resource}
+
+    def poll_state(self, resource, **kwargs):
+        from prash.connectors.base import ConnectorState, ResourceState
+
+        return ResourceState(resource, ConnectorState.FAILED, {"overall_state": "Alert"})
+
+
+def _datadog_ctx(tmp_path, dd=None, **extra):
+    return _ctx(tmp_path, resource="42", extra={"connectors": {"datadog": dd if dd is not None else _FakeDatadog()}, "minutes": 30, **extra})
+
+
+def test_datadog_mute_succeeds(tmp_path):
+    dd = _FakeDatadog()
+    ctx = _datadog_ctx(tmp_path, dd=dd)
+    result = DatadogMuteMonitorAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert dd.muted == [("42", 30)]
+
+
+def test_datadog_mute_fails_honestly_on_api_error(tmp_path):
+    ctx = _datadog_ctx(tmp_path, dd=_FakeDatadog(fail=True))
+    result = DatadogMuteMonitorAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_datadog_mute_risk_tier_is_safe():
+    assert DatadogMuteMonitorAction().spec.risk_tier.value == "safe"
+
+
+class _FakeGrafana:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.silenced = []
+
+    def silence_alert(self, resource, minutes=60):
+        if self.fail:
+            raise RuntimeError("grafana api error")
+        self.silenced.append((resource, minutes))
+        return {"silenceID": "sil-1"}
+
+
+def _grafana_ctx(tmp_path, gf=None, **extra):
+    return _ctx(tmp_path, resource="abc123", extra={"connectors": {"grafana": gf if gf is not None else _FakeGrafana()}, "minutes": 30, **extra})
+
+
+def test_grafana_silence_succeeds(tmp_path):
+    gf = _FakeGrafana()
+    ctx = _grafana_ctx(tmp_path, gf=gf)
+    result = GrafanaSilenceAlertAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert gf.silenced == [("abc123", 30)]
+    assert result.detail["silence_id"] == "sil-1"
+
+
+def test_grafana_silence_fails_honestly_on_api_error(tmp_path):
+    ctx = _grafana_ctx(tmp_path, gf=_FakeGrafana(fail=True))
+    result = GrafanaSilenceAlertAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_grafana_silence_risk_tier_is_safe():
+    assert GrafanaSilenceAlertAction().spec.risk_tier.value == "safe"
+
+
+class _FakeSnyk:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.ignored = []
+
+    def ignore_issue(self, project_id, issue_id, reason, expires_days=30):
+        if self.fail:
+            raise RuntimeError("snyk api error")
+        self.ignored.append((project_id, issue_id, reason))
+        return {"ok": True}
+
+
+def _snyk_ctx(tmp_path, sn=None, **extra):
+    return _ctx(tmp_path, resource="proj-uuid/issue-1", extra={"connectors": {"snyk": sn if sn is not None else _FakeSnyk()}, **extra})
+
+
+def test_snyk_ignore_succeeds_with_reason(tmp_path):
+    sn = _FakeSnyk()
+    ctx = _snyk_ctx(tmp_path, sn=sn, reason="false positive, verified manually")
+    result = SnykIgnoreIssueAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert sn.ignored == [("proj-uuid", "issue-1", "false positive, verified manually")]
+
+
+def test_snyk_ignore_fails_honestly_without_reason(tmp_path):
+    """An ignore with no stated reason is exactly the audit gap this action
+    must not create."""
+    ctx = _snyk_ctx(tmp_path, reason=None)
+    result = SnykIgnoreIssueAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "reason" in result.summary.lower()
+
+
+def test_snyk_ignore_fails_honestly_on_api_error(tmp_path):
+    ctx = _snyk_ctx(tmp_path, sn=_FakeSnyk(fail=True), reason="temp")
+    result = SnykIgnoreIssueAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_snyk_ignore_risk_tier_is_approval():
+    """Deliberately stricter than mute/silence: accepting a known
+    vulnerability is a real security judgment call, not neutral noise
+    suppression."""
+    assert SnykIgnoreIssueAction().spec.risk_tier.value == "approval"
+
+
+class _FakeGitleaksForEscalate:
+    def __init__(self, findings=None):
+        self.findings = findings or []
+
+    def poll_state(self, resource, **kwargs):
+        from prash.connectors.base import ConnectorState, ResourceState
+
+        state = ConnectorState.FAILED if self.findings else ConnectorState.HEALTHY
+        return ResourceState(resource, state, {"leak_count": len(self.findings), "findings": self.findings})
+
+
+class _FakePagerDutyForEscalate:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.triggered = []
+
+    def trigger_event(self, summary, source, severity="critical", custom_details=None):
+        if self.fail:
+            raise PagerDutyError("PagerDuty Events API 500: internal error")
+        self.triggered.append((summary, source, severity, custom_details))
+        return {"dedup_key": "dk-1"}
+
+
+def _gitleaks_escalate_ctx(tmp_path, gitleaks=None, pagerduty=None, **extra):
+    return _ctx(
+        tmp_path,
+        resource="/repo/path",
+        extra={
+            "connectors": {
+                "gitleaks": gitleaks if gitleaks is not None else _FakeGitleaksForEscalate(),
+                "pagerduty": pagerduty if pagerduty is not None else _FakePagerDutyForEscalate(),
+            },
+            **extra,
+        },
+    )
+
+
+def test_gitleaks_escalate_skips_when_no_leaks_found(tmp_path):
+    gitleaks = _FakeGitleaksForEscalate(findings=[])
+    pd = _FakePagerDutyForEscalate()
+    ctx = _gitleaks_escalate_ctx(tmp_path, gitleaks=gitleaks, pagerduty=pd)
+    result = GitleaksEscalateAction().execute(ctx)
+    assert result.status is ActionResultStatus.SKIPPED
+    assert pd.triggered == []
+
+
+def test_gitleaks_escalate_triggers_incident_when_leaks_found(tmp_path):
+    findings = [{"rule_id": "generic-api-key", "file": "config.py", "line": 42, "fingerprint": "abc"}]
+    gitleaks = _FakeGitleaksForEscalate(findings=findings)
+    pd = _FakePagerDutyForEscalate()
+    ctx = _gitleaks_escalate_ctx(tmp_path, gitleaks=gitleaks, pagerduty=pd)
+    result = GitleaksEscalateAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert len(pd.triggered) == 1
+    summary, source, severity, custom_details = pd.triggered[0]
+    assert "1 leaked secret" in summary
+    assert source == "/repo/path"
+    assert severity == "critical"
+    assert custom_details["findings"] == findings
+
+
+def test_gitleaks_escalate_never_includes_secret_value_in_incident_payload(tmp_path):
+    """The whole point of gitleaks.py's safe_findings sanitization -- must
+    hold all the way through to what actually reaches PagerDuty."""
+    findings = [{"rule_id": "aws-access-key", "file": ".env", "line": 3, "fingerprint": "xyz"}]
+    gitleaks = _FakeGitleaksForEscalate(findings=findings)
+    pd = _FakePagerDutyForEscalate()
+    ctx = _gitleaks_escalate_ctx(tmp_path, gitleaks=gitleaks, pagerduty=pd)
+    GitleaksEscalateAction().execute(ctx)
+    import json
+
+    dumped = json.dumps(pd.triggered[0])
+    assert "Secret" not in dumped and "Match" not in dumped
+
+
+def test_gitleaks_escalate_fails_honestly_when_pagerduty_missing(tmp_path):
+    ctx = _ctx(tmp_path, resource="/repo/path", extra={"connectors": {"gitleaks": _FakeGitleaksForEscalate(findings=[{"rule_id": "x", "file": "y", "line": 1, "fingerprint": "z"}])}})
+    result = GitleaksEscalateAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "PagerDuty" in result.summary
+
+
+def test_gitleaks_escalate_fails_honestly_when_pagerduty_call_fails(tmp_path):
+    findings = [{"rule_id": "x", "file": "y", "line": 1, "fingerprint": "z"}]
+    ctx = _gitleaks_escalate_ctx(tmp_path, gitleaks=_FakeGitleaksForEscalate(findings=findings), pagerduty=_FakePagerDutyForEscalate(fail=True))
+    result = GitleaksEscalateAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "1 leak" in result.summary
+
+
+def test_gitleaks_escalate_risk_tier_is_safe():
+    """Escalating a real problem is the opposite of suppressing one --
+    surfacing it to a human is low blast radius, unlike pagerduty-resolve."""
+    assert GitleaksEscalateAction().spec.risk_tier.value == "safe"

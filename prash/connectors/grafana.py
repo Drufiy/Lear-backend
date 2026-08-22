@@ -36,6 +36,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping
 
 from .base import Connector, ConnectorState, ResourceState
@@ -54,6 +55,7 @@ class GrafanaError(RuntimeError):
 class GrafanaConnector(Connector):
     name = "grafana"
     read_capabilities = ("alert_state", "annotations")
+    write_capabilities = ("silence_alert",)
 
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
@@ -142,3 +144,23 @@ class GrafanaConnector(Connector):
             if line:
                 lines.append(line)
         return lines
+
+    def silence_alert(self, resource: str, minutes: int = 60) -> Dict[str, Any]:
+        """Create a time-bounded silence via Grafana's Alertmanager-compatible
+        silences API. Write action added 2026-08-19 (PRASH_V2.md §7b): same
+        role as Datadog's mute_monitor -- stop the paging noise, don't touch
+        whatever's actually firing. Matched by the `alertname` label, same
+        as poll_state()'s own matching logic, so a silence created here
+        actually covers the alert instances poll_state() reads."""
+        handle = self.locate(resource)
+        if not handle:
+            raise GrafanaError(f"alert rule not found: {resource}")
+        now = datetime.now(timezone.utc)
+        body = {
+            "matchers": [{"name": "alertname", "value": handle["title"], "isRegex": False}],
+            "startsAt": now.isoformat(),
+            "endsAt": (now + timedelta(minutes=minutes)).isoformat(),
+            "createdBy": "prash",
+            "comment": "Silenced by Prash",
+        }
+        return self._request("POST", "/api/alertmanager/grafana/api/v2/silences", body=body)
