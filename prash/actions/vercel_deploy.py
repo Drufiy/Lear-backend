@@ -115,8 +115,11 @@ class VercelRollbackAction(Action):
         vercel = ctx.extra.get("connectors", {}).get("vercel")
         if not vercel:
             return VerificationResult(ok=False, detail="could not verify: Vercel connector missing")
-        state = vercel.poll_state(ctx.target.resource)
-        current_id = state.detail.get("latest_deployment", {}).get("uid", "")
+        # Not poll_state() -- a rollback re-points production to an existing,
+        # older deployment rather than creating a new one, so "most recently
+        # created deployment" (poll_state's notion) never changes when a
+        # rollback succeeds. Check what's actually aliased to production.
+        current_id = vercel.production_deployment_id(ctx.target.resource)
         expected_id = result.detail.get("deployment_id", "")
         ok = current_id == expected_id
-        return VerificationResult(ok=ok, detail=f"current deployment now={current_id or 'unknown'}")
+        return VerificationResult(ok=ok, detail=f"production deployment now={current_id or 'unknown'}")

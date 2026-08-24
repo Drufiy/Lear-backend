@@ -116,7 +116,14 @@ class DatadogConnector(Connector):
         if not handle:
             return ResourceState(resource, ConnectorState.NOT_FOUND, {})
         monitor = handle.get("monitor") or {}
-        overall_state = monitor.get("overall_state", "Unknown")
+        # /api/v1/monitor/{id} (numeric resource) returns `overall_state`;
+        # /api/v1/monitor/search (name lookup -- what every real user actually
+        # does, since nobody knows a monitor's numeric id offhand) returns the
+        # same value under `status` instead. Checking only overall_state made
+        # every name-searched monitor silently report "unknown" regardless of
+        # its real state -- found live, 2026-08-24, testing against a monitor
+        # deliberately driven into Alert state.
+        overall_state = monitor.get("overall_state") or monitor.get("status", "Unknown")
         state = _STATE_MAP.get(overall_state, ConnectorState.UNKNOWN)
         return ResourceState(
             resource,

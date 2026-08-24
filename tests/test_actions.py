@@ -1086,6 +1086,9 @@ class _FakeVercel:
 
         return ResourceState(resource, ConnectorState.HEALTHY, {"latest_deployment": {"uid": "dpl_previous"}})
 
+    def production_deployment_id(self, resource):
+        return "dpl_previous"
+
 
 def _vercel_ctx(tmp_path, vercel=None, **extra):
     return _ctx(tmp_path, resource="my-app", extra={"connectors": {"vercel": vercel if vercel is not None else _FakeVercel()}, **extra})

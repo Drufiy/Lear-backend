@@ -97,6 +97,24 @@ class VercelConnector(Connector):
         target_id = deployment_id or self._latest_deployment_id(handle["project"])
         return self._request("POST", "/v13/deployments", {"deploymentId": target_id, "name": handle["project"]})
 
+    def production_deployment_id(self, resource: str) -> str | None:
+        """The deployment currently aliased to production -- NOT the same as
+        "most recent deployment" (poll_state's notion). A rollback re-points
+        the production alias to an existing, older deployment without
+        creating anything new, so the most-recently-created deployment never
+        changes when a rollback succeeds. Verifying rollback against
+        poll_state() was structurally guaranteed to report failure on every
+        successful rollback -- found live, 2026-08-24, testing a real
+        rollback that Vercel confirmed succeeded while verify() called it a
+        failure. This reads /v9/projects/{id}'s targets.production.id, the
+        field that actually reflects what's live."""
+        handle = self.locate(resource)
+        try:
+            project = self._request("GET", f"/v9/projects/{handle['project']}")
+        except VercelError:
+            return None
+        return (project.get("targets") or {}).get("production", {}).get("id")
+
     def rollback(self, resource: str, deployment_id: str) -> Dict[str, Any]:
         """Point production at a specific earlier deployment via Vercel's
         dedicated Rollback API. Unlike redeploy(), this requires an explicit
