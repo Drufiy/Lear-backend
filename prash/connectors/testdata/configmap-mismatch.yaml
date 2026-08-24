@@ -53,5 +53,4 @@ spec:
       volumes:
         - name: config-volume
           configMap:
-            # BUG: should be web-cfg-v2 -- this name doesn't exist.
-            name: web-cfg
+            name: web-cfg-v2
