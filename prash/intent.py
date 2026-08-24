@@ -11,15 +11,22 @@ Two-stage by design:
     resolve(text, session) -> Suggestion | Clarify | None
         Suggestion  -> argv to run (already context-resolved) + an explanation
         Clarify     -> a question to ask, with concrete known options
-        None        -> not free-text intent at all; fall back to the argparse
-                       parser (an exact command line always wins)
+        None        -> genuinely couldn't resolve it, fast or otherwise
 
-Every function here is pure (takes a small context object, returns a
-decision) so stage 2 is unit-testable headlessly on all three OSes.
+The fast path (_verb_hit + the target regexes below) is pure and free --
+zero latency, zero API cost, unit-testable headlessly. When it doesn't
+recognize the text at all (Milestone 2, 2026-08-24), resolve() falls back
+to routing it through the same tool-calling brain the diagnosis pipeline
+uses (prash/brain/kimi_client.py's call_with_tool), built dynamically from
+the real provider/action registries so a new connector never needs a
+hand-added verb here. That fallback does real I/O and can fail (missing
+credentials, model/network trouble) -- it degrades to None on any failure,
+same contract as the fast path, never a crash.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -154,10 +161,19 @@ def _known_options(ctx: _Context) -> list[str]:
 
 def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
     """Parse free text into a command suggestion, a clarifying question, or
-    None (not intent — let the argparse parser handle it)."""
+    None (genuinely couldn't resolve it, fast or otherwise)."""
     verb = _verb_hit(text)
     if verb is None:
-        return None
+        # Milestone 2 (2026-08-24): the fast path only recognizes ~12
+        # hardcoded verbs and fix/restart/rollback/open-pr targets -- it has
+        # no idea Datadog, Grafana, PagerDuty, Snyk, Gitleaks, Azure, or GCP
+        # exist. "what's wrong with our grafana alerts" landed here and
+        # died with "I didn't get that", live, 2026-08-23. Route anything
+        # the keyword table doesn't recognize through the same tool-calling
+        # brain the diagnosis pipeline already uses, instead of adding verb
+        # #13 by hand -- that's the whole reason this needed a second stage
+        # instead of a bigger keyword table.
+        return _resolve_via_llm(text, ctx)
 
     if verb == "watch":
         return Suggestion(["watch"], "watching the remembered namespace")
@@ -220,3 +236,199 @@ def complete(verb: str, choice: str, ctx: _Context) -> Suggestion | None:
     if verb == "open-pr":
         return Suggestion(["run", "open-pr", target], f"opening a PR against {target}")
     return None
+
+
+# ── Milestone 2: LLM fallback (2026-08-24) ─────────────────────────────────
+# Everything below only runs when the fast path above found no verb at all.
+
+import logging  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+_LLM_INTENT_TOOL_NAME = "resolve_repl_intent"
+
+
+def _build_intent_tool_schema() -> dict:
+    """Built at call time from the real registries (prash/cli.py's PROVIDERS
+    dict and the dispatcher's registered actions), not a second hand-written
+    list -- the exact thing that let the fast-path table drift out of sync
+    with 8 of 10 connectors in the first place. Imports are local: cli.py
+    doesn't import this module, but keeping the dependency one-directional
+    and deferred avoids ever having to think about it again."""
+    from .cli import PROVIDERS, _build_dispatcher
+    from .permissions import PermissionMode
+
+    providers = sorted(PROVIDERS.keys()) + ["kubernetes"]
+    dispatcher = _build_dispatcher(PermissionMode.ASK)
+    action_lines = [
+        f"  {aid} ({action.spec.risk_tier.value}): {action.spec.summary}"
+        for aid, action in sorted(dispatcher.available.items())
+    ]
+
+    return {
+        "name": _LLM_INTENT_TOOL_NAME,
+        "description": (
+            "Decide what a Prash user's free-text request maps to: reading "
+            "a resource's state, diagnosing+fixing a Kubernetes pod or CI "
+            "run, running one of the registered write actions below, one "
+            "of the plain utility commands, or -- if genuinely too "
+            "ambiguous to guess -- a clarifying question instead. Never "
+            "guess a target that wasn't stated or previously established; "
+            "ask instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "enum": ["investigate", "fix", "run", "watch", "audit", "actions", "config", "circuit", "clarify"],
+                    "description": (
+                        "investigate = read-only state check on any provider. "
+                        "fix = diagnose+propose a fix for a k8s pod (provider=kubernetes) "
+                        "or a CI run (provider=github/gitlab). "
+                        "run = execute one of the registered write actions below. "
+                        "clarify = you cannot confidently resolve this -- ask instead."
+                    ),
+                },
+                "provider": {
+                    "type": "string",
+                    "enum": providers,
+                    "description": "which connector this targets. Required for investigate/fix. Omit for run/watch/audit/actions/config/circuit.",
+                },
+                "resource": {
+                    "type": "string",
+                    "description": (
+                        "the target exactly as it should be typed on the command line: "
+                        "a namespace/pod, an owner/repo, a monitor or alert name, a project, etc. "
+                        "Only use a target the user actually said or that's already known from context -- never invent one."
+                    ),
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": "only when command=run: the exact action id from this registered list (never invent one):\n" + "\n".join(action_lines),
+                },
+                "minutes": {"type": "integer", "description": "only for mute/silence-style actions, if the user gave a duration"},
+                "reason": {"type": "string", "description": "only for snyk-ignore-issue: the user's stated reason"},
+                "deployment_id": {"type": "string", "description": "only for vercel-rollback/-redeploy, if the user gave one"},
+                "explanation": {
+                    "type": "string",
+                    "description": "one short, plain sentence describing what you're about to do -- shown to the user before it runs.",
+                },
+                "clarify_question": {
+                    "type": "string",
+                    "description": "only when command=clarify: the specific question to ask the user.",
+                },
+            },
+            "required": ["command", "explanation"],
+        },
+    }
+
+
+_INTENT_SYSTEM_PROMPT = (
+    "You are Prash's REPL intent resolver. A user typed a free-text line "
+    "that didn't match any known short command. Call resolve_repl_intent "
+    "with the single best interpretation. Be conservative: if the target "
+    "resource isn't stated and isn't in the remembered context below, use "
+    "command=clarify rather than guessing one. Never invent a provider, "
+    "action id, or resource that wasn't given to you."
+)
+
+
+def _context_summary(ctx: _Context) -> str:
+    known = _known_options(ctx)
+    if not known:
+        return "No remembered targets yet."
+    return "Remembered from this session: " + ", ".join(known)
+
+
+def _args_to_suggestion_or_clarify(args: dict) -> Suggestion | Clarify | None:
+    command = args.get("command")
+    explanation = args.get("explanation", "").strip() or "doing that"
+
+    if command == "clarify":
+        question = args.get("clarify_question", "").strip() or "Which resource should I target?"
+        return Clarify(question)
+
+    if command in ("watch", "audit", "actions", "config", "circuit"):
+        argv = {"watch": ["watch"], "audit": ["audit", "--tail", "20"],
+                "actions": ["actions"], "config": ["config"],
+                "circuit": ["circuit", "status"]}[command]
+        return Suggestion(argv, explanation)
+
+    resource = (args.get("resource") or "").strip()
+
+    if command == "investigate":
+        if not resource:
+            return Clarify("Which resource should I investigate?")
+        provider = args.get("provider") or "github"
+        if provider == "kubernetes":
+            return None  # investigate has no kubernetes provider today (a real, separate gap)
+        return Suggestion(["investigate", resource, "--provider", provider], explanation)
+
+    if command == "fix":
+        if not resource:
+            return Clarify("Which pod or repo should I fix?")
+        provider = args.get("provider")
+        if provider in ("github", "gitlab"):
+            return Suggestion(["fix", resource, "--ci", "--provider", provider], explanation)
+        return Suggestion(["fix", resource], explanation)
+
+    if command == "run":
+        action_id = (args.get("action_id") or "").strip()
+        if not action_id or not resource:
+            return Clarify(f"Run which action, on what? ({explanation})")
+        argv = ["run", action_id, resource]
+        if args.get("minutes") is not None:
+            argv += ["--minutes", str(args["minutes"])]
+        if args.get("reason"):
+            argv += ["--reason", str(args["reason"])]
+        if args.get("deployment_id"):
+            argv += ["--deployment-id", str(args["deployment_id"])]
+        return Suggestion(argv, explanation)
+
+    return None
+
+
+async def _resolve_via_llm_async(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+    from .brain.kimi_client import call_with_tool
+
+    tool_schema = _build_intent_tool_schema()
+    user_prompt = f'User said: "{text}"\n\n{_context_summary(ctx)}'
+    args = await call_with_tool(
+        system_prompt=_INTENT_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        tool_schema=tool_schema,
+        call_type="repl_intent",
+    )
+    return _args_to_suggestion_or_clarify(args)
+
+
+# call_with_tool's retry chain (DeepSeek -> Kimi -> Kimi retry -> DeepSeek
+# fallback, each with their own internal retries and `asyncio.sleep(5)`
+# backoffs on transient errors) is right for a CI diagnosis a human is
+# already waiting minutes for. It is NOT right for an interactive REPL
+# prompt -- found live, 2026-08-24: an unmocked call in the test suite sat
+# for 40+ seconds with the worker's CPU time never advancing (asleep in a
+# retry backoff, not stuck). A REPL fallback needs to fail fast and say so,
+# not silently run a multi-attempt chain a person is sitting at a prompt
+# waiting on.
+_LLM_INTENT_TIMEOUT_SECONDS = 12
+
+
+def _resolve_via_llm(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+    """Sync bridge -- repl.py and tui.py's worker thread both call resolve()
+    synchronously, and neither is already inside a running asyncio loop
+    (run_repl is a plain blocking loop; tui.py's chat handler runs in a
+    plain OS thread via @work(thread=True), not on Textual's event loop),
+    so asyncio.run() here is safe. Degrades to None on any failure --
+    missing credentials, model/network trouble, a timeout, an unparseable
+    response -- same honest contract as the fast path, never a crash or an
+    indefinite hang mid-session."""
+    try:
+        return asyncio.run(asyncio.wait_for(_resolve_via_llm_async(text, ctx), timeout=_LLM_INTENT_TIMEOUT_SECONDS))
+    except TimeoutError:
+        logger.warning(f"REPL intent LLM fallback timed out after {_LLM_INTENT_TIMEOUT_SECONDS}s")
+        return None
+    except Exception as exc:  # noqa: BLE001 — a bad LLM call must not kill the session
+        logger.warning(f"REPL intent LLM fallback failed: {exc}")
+        return None

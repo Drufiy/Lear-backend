@@ -72,9 +72,16 @@ def test_run_repl_exits_cleanly_on_quit():
     assert rc == 0
 
 
-def test_run_repl_survives_bad_line_and_eof():
+def test_run_repl_survives_bad_line_and_eof(monkeypatch):
     from rich.console import Console
 
+    # "this is not a verb" has no recognized keyword, so resolve() now falls
+    # through to the Milestone 2 LLM fallback (prash/intent.py). Stub it out:
+    # this test is about the REPL loop surviving bad input, not about
+    # exercising a real network call in a unit test (found live, 2026-08-24
+    # -- an unmocked call here hung 40+ seconds in call_with_tool's retry
+    # backoff instead of failing fast).
+    monkeypatch.setattr("prash.intent._resolve_via_llm", lambda text, ctx: None)
     rc = repl.run_repl(Console(record=True), lines=["this is not a verb", "fix", ""])
     assert rc == 0
 
@@ -99,12 +106,15 @@ def test_apply_context_does_not_namespace_bare_ci_target():
     assert args.target == "some-repo"
 
 
-def test_run_repl_survives_contraction_without_crashing():
+def test_run_repl_survives_contraction_without_crashing(monkeypatch):
     """Regression: shlex.split raises ValueError on an unbalanced quote
     (any English contraction -- "what's", "it's"), which used to print the
     raw shlex exception and never give stage-2 intent resolution a chance."""
     from rich.console import Console
 
+    # "what's up" has no recognized verb either -- same LLM-fallback stub
+    # as above, this test is about the shlex ValueError path, not the brain.
+    monkeypatch.setattr("prash.intent._resolve_via_llm", lambda text, ctx: None)
     console = Console(record=True)
     rc = repl.run_repl(console, lines=["what's up", "exit"])
     assert rc == 0
