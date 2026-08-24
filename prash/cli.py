@@ -697,12 +697,25 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def cmd_tui(_args: argparse.Namespace) -> int:
+    # Bug, found live 2026-08-25: unlike every other cmd_* here, this never
+    # loaded .env into the process environment. The diagnosis brain
+    # (prash.brain.kimi_client) reads its API keys straight from os.environ,
+    # not from ctx.credentials, so the Chat tab's LLM intent fallback
+    # (Milestone 2) silently failed on every real session -- it worked in
+    # every direct test only because those scripts loaded credentials by
+    # hand first. Same root cause as evals/run_eval.py's 2026-08-17 bug.
+    store = CredentialStore.from_env()
+    _export_cluster_env(store.load())
+
     from .tui import run_tui
 
     return run_tui()
 
 
 def cmd_repl(_args: argparse.Namespace) -> int:
+    store = CredentialStore.from_env()
+    _export_cluster_env(store.load())
+
     from .repl import run_repl
 
     return run_repl()

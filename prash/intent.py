@@ -389,18 +389,30 @@ def _args_to_suggestion_or_clarify(args: dict) -> Suggestion | Clarify | None:
     return None
 
 
-async def _resolve_via_llm_async(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+async def _call_llm_intent(user_prompt: str) -> Suggestion | Clarify | None:
     from .brain.kimi_client import call_with_tool
 
-    tool_schema = _build_intent_tool_schema()
-    user_prompt = f'User said: "{text}"\n\n{_context_summary(ctx)}'
     args = await call_with_tool(
         system_prompt=_INTENT_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        tool_schema=tool_schema,
+        tool_schema=_build_intent_tool_schema(),
         call_type="repl_intent",
     )
     return _args_to_suggestion_or_clarify(args)
+
+
+async def _resolve_via_llm_async(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+    return await _call_llm_intent(f'User said: "{text}"\n\n{_context_summary(ctx)}')
+
+
+async def _resolve_clarify_answer_async(original_text: str, question: str, answer: str, ctx: _Context) -> Suggestion | Clarify | None:
+    return await _call_llm_intent(
+        f'User said: "{original_text}"\n'
+        f'You asked: "{question}"\n'
+        f'User answered: "{answer}"\n\n'
+        f"{_context_summary(ctx)}\n\n"
+        "You now have enough information to resolve this fully -- do not ask another clarifying question unless the answer was itself unusable."
+    )
 
 
 # call_with_tool's retry chain (DeepSeek -> Kimi -> Kimi retry -> DeepSeek
@@ -415,20 +427,36 @@ async def _resolve_via_llm_async(text: str, ctx: _Context) -> Suggestion | Clari
 _LLM_INTENT_TIMEOUT_SECONDS = 12
 
 
-def _resolve_via_llm(text: str, ctx: _Context) -> Suggestion | Clarify | None:
-    """Sync bridge -- repl.py and tui.py's worker thread both call resolve()
-    synchronously, and neither is already inside a running asyncio loop
-    (run_repl is a plain blocking loop; tui.py's chat handler runs in a
-    plain OS thread via @work(thread=True), not on Textual's event loop),
-    so asyncio.run() here is safe. Degrades to None on any failure --
-    missing credentials, model/network trouble, a timeout, an unparseable
-    response -- same honest contract as the fast path, never a crash or an
-    indefinite hang mid-session."""
+def _run_llm_intent_sync(coro) -> Suggestion | Clarify | None:
+    """Sync bridge -- repl.py and tui.py's worker thread both call resolve()/
+    complete_clarify() synchronously, and neither is already inside a
+    running asyncio loop (run_repl is a plain blocking loop; tui.py's chat
+    handler runs in a plain OS thread via @work(thread=True), not on
+    Textual's event loop), so asyncio.run() here is safe. Degrades to None
+    on any failure -- missing credentials, model/network trouble, a
+    timeout, an unparseable response -- same honest contract as the fast
+    path, never a crash or an indefinite hang mid-session."""
     try:
-        return asyncio.run(asyncio.wait_for(_resolve_via_llm_async(text, ctx), timeout=_LLM_INTENT_TIMEOUT_SECONDS))
+        return asyncio.run(asyncio.wait_for(coro, timeout=_LLM_INTENT_TIMEOUT_SECONDS))
     except TimeoutError:
-        logger.warning(f"REPL intent LLM fallback timed out after {_LLM_INTENT_TIMEOUT_SECONDS}s")
+        logger.warning(f"REPL intent LLM call timed out after {_LLM_INTENT_TIMEOUT_SECONDS}s")
         return None
     except Exception as exc:  # noqa: BLE001 — a bad LLM call must not kill the session
-        logger.warning(f"REPL intent LLM fallback failed: {exc}")
+        logger.warning(f"REPL intent LLM call failed: {exc}")
         return None
+
+
+def _resolve_via_llm(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+    return _run_llm_intent_sync(_resolve_via_llm_async(text, ctx))
+
+
+def resolve_clarify_answer(original_text: str, question: str, answer: str, ctx: _Context) -> Suggestion | Clarify | None:
+    """Completes an LLM-originated Clarify. The fast path's complete() only
+    knows fix/restart/rollback/open-pr -- an LLM-sourced clarifying question
+    (any command, e.g. investigate/run) had no way to receive its own
+    answer and always failed with a generic "no targets known" message.
+    Found live, 2026-08-25: asked "what's wrong with our grafana alerts"
+    -> got a real clarifying question -> answering it just broke. Feeds the
+    original text + question + answer back through the same brain rather
+    than a second answer-parsing implementation."""
+    return _run_llm_intent_sync(_resolve_clarify_answer_async(original_text, question, answer, ctx))

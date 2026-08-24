@@ -362,7 +362,10 @@ class PrashApp(App):
         old_file = ui_mod.console.file
         ui_mod.console.file = buf
         try:
-            with contextlib.redirect_stdout(buf):
+            # Both streams: argparse's own usage/error output on a bad line
+            # goes to stderr, not through ui_mod.console at all -- stdout
+            # alone left it invisible (found live, 2026-08-25).
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 new_pending = repl_mod.process_line(
                     line, self._chat_session, self._chat_parser, ui_mod.console, self._chat_pending
                 )

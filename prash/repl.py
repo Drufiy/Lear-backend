@@ -34,6 +34,7 @@ from .intent import (
     _verb_hit,
     complete,
     resolve,
+    resolve_clarify_answer,
 )
 
 # `run` only auto-fills the namespace for actions whose resource is a pod.
@@ -119,12 +120,15 @@ class ReplSession:
 
 _EXIT = object()  # sentinel returned by process_line to mean "end the session"
 
-Pending = "tuple[str, list[str]] | None"
+# (verb, options, original_text, question) -- original_text/question exist
+# so an unanswerable-by-complete() clarify (i.e. LLM-sourced) can be handed
+# back to the brain along with the user's answer instead of failing.
+Pending = "tuple[str, list[str], str, str] | None"
 
 
 def process_line(line: str, session: ReplSession, parser, console, pending):
     """Handle exactly one line of REPL input. Returns the new `pending`
-    state (None, or `_EXIT`, or a (verb, options) clarify-continuation).
+    state (None, or `_EXIT`, or a clarify-continuation tuple).
 
     Pulled out of `run_repl`'s while-loop (2026-08-24) so the Textual chat
     surface can drive the identical interaction logic instead of forking a
@@ -161,7 +165,7 @@ def process_line(line: str, session: ReplSession, parser, console, pending):
         return pending
 
     if pending is not None:
-        verb, options = pending
+        verb, options, original_text, question = pending
         ctx = _Context.from_session(session)
         if line.isdigit() and 1 <= int(line) <= len(options):
             choice = options[int(line) - 1]
@@ -169,8 +173,22 @@ def process_line(line: str, session: ReplSession, parser, console, pending):
             choice = line
         suggestion = complete(verb, choice, ctx)
         if suggestion is None:
+            # Bug, found live 2026-08-25: complete() only ever knew the four
+            # fast-path verbs (fix/restart/rollback/open-pr). An LLM-sourced
+            # clarifying question (verb is None or something complete() has
+            # never heard of, e.g. investigate/run) always failed here with
+            # a generic "no targets known" message, no matter how good the
+            # answer was -- the question looked real but could never
+            # actually be answered. Feed the original question + this
+            # answer back through the same brain instead of a second,
+            # narrower answer-parser.
+            suggestion = resolve_clarify_answer(original_text, question, choice, ctx)
+        if suggestion is None:
             console.print(f"[red]I didn't get that. {options or 'no targets known yet — type one like `api-7f9d` or `ns/pod`.'}[/red]")
             return None
+        if isinstance(suggestion, Clarify):
+            _ask(console, suggestion)
+            return (verb, suggestion.options, original_text, suggestion.question)
         console.print(f"[dim]→ {suggestion.explain}[/dim]")
         run_argv(suggestion.argv)
         return None
@@ -184,7 +202,7 @@ def process_line(line: str, session: ReplSession, parser, console, pending):
             return None
         if isinstance(suggestion, Clarify):
             _ask(console, suggestion)
-            return (_verb_hit(line), suggestion.options)
+            return (_verb_hit(line), suggestion.options, line, suggestion.question)
 
     try:
         argv = shlex.split(line)
@@ -206,15 +224,17 @@ def process_line(line: str, session: ReplSession, parser, console, pending):
             return None
         if isinstance(suggestion, Clarify):
             _ask(console, suggestion)
-            return (_verb_hit(line), suggestion.options)
+            return (_verb_hit(line), suggestion.options, line, suggestion.question)
         console.print("[red]I didn't get that. Try `help`, or describe what you want in plain words.[/red]")
         return None
 
     try:
         parser.parse_args(argv)
     except SystemExit:
-        # argparse printed usage for a bad line. Before giving up on it,
-        # try stage 2: it might be free text ("restart the broken api pod").
+        # argparse printed usage for a bad line (to stderr -- invisible in
+        # the Textual chat surface, which only captures stdout). Before
+        # giving up on it, try stage 2: it might be free text ("restart the
+        # broken api pod").
         suggestion = resolve(line, ctx)
         if isinstance(suggestion, Suggestion):
             console.print(f"[dim]→ {suggestion.explain}[/dim]")
@@ -222,7 +242,12 @@ def process_line(line: str, session: ReplSession, parser, console, pending):
             return None
         if isinstance(suggestion, Clarify):
             _ask(console, suggestion)
-            return (_verb_hit(line), suggestion.options)
+            return (_verb_hit(line), suggestion.options, line, suggestion.question)
+        # Bug, found live 2026-08-25: unlike the shlex-ValueError branch
+        # above, this fell through silently -- no message at all, just the
+        # argparse usage dump (which goes to stderr and was invisible in
+        # the chat surface). Same honest fallback message either way.
+        console.print("[red]I didn't get that. Try `help`, or describe what you want in plain words.[/red]")
         return pending
 
     run_argv(argv)
