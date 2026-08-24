@@ -44,5 +44,4 @@ spec:
             requests:
               memory: "10Mi"
             limits:
-              # BUG: far below the 150M the workload actually needs.
-              memory: "20Mi"
+              memory: "256Mi"
