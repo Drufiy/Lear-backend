@@ -117,17 +117,22 @@ class ReplSession:
                 self.namespace = args.namespace
 
 
-def run_repl(console=None, lines: Iterable[str] | None = None) -> int:
-    """Start the interactive session. `lines` is for tests/CI only — when
-    given, input is consumed from it instead of stdin so the loop is testable
-    headlessly. Returns a shell exit code."""
-    console = console or ui.console
-    parser = build_parser()
-    session = ReplSession(console)
-    iterator = iter(lines) if lines is not None else None
-    pending: tuple[str, list[str]] | None = None  # (intent verb, clarify options)
+_EXIT = object()  # sentinel returned by process_line to mean "end the session"
 
-    console.print("[dim]type a command, or `help` / `exit`.[/dim]")
+Pending = "tuple[str, list[str]] | None"
+
+
+def process_line(line: str, session: ReplSession, parser, console, pending):
+    """Handle exactly one line of REPL input. Returns the new `pending`
+    state (None, or `_EXIT`, or a (verb, options) clarify-continuation).
+
+    Pulled out of `run_repl`'s while-loop (2026-08-24) so the Textual chat
+    surface can drive the identical interaction logic instead of forking a
+    second implementation -- forking is exactly how the REPL and the TUI
+    ended up as two disconnected surfaces in the first place. `run_repl`
+    below is now a thin console-input loop around this function; anything
+    that changes REPL behavior belongs here, not in either caller.
+    """
 
     def run_argv(argv: list[str]) -> None:
         try:
@@ -145,6 +150,97 @@ def run_repl(console=None, lines: Iterable[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 — a bad command must not kill the session
             console.print(f"[red]{exc}[/red]")
 
+    line = line.strip()
+    if not line:
+        return pending
+    if line.lower() in ("exit", "quit", "q"):
+        console.print("[dim]bye[/dim]")
+        return _EXIT
+    if line.lower() in ("help", "?"):
+        parser.print_help()
+        return pending
+
+    if pending is not None:
+        verb, options = pending
+        ctx = _Context.from_session(session)
+        if line.isdigit() and 1 <= int(line) <= len(options):
+            choice = options[int(line) - 1]
+        else:
+            choice = line
+        suggestion = complete(verb, choice, ctx)
+        if suggestion is None:
+            console.print(f"[red]I didn't get that. {options or 'no targets known yet — type one like `api-7f9d` or `ns/pod`.'}[/red]")
+            return None
+        console.print(f"[dim]→ {suggestion.explain}[/dim]")
+        run_argv(suggestion.argv)
+        return None
+
+    ctx = _Context.from_session(session)
+    if _is_it_phrase(line) or _looks_like_talk(line):
+        suggestion = resolve(line, ctx)
+        if isinstance(suggestion, Suggestion):
+            console.print(f"[dim]→ {suggestion.explain}[/dim]")
+            run_argv(suggestion.argv)
+            return None
+        if isinstance(suggestion, Clarify):
+            _ask(console, suggestion)
+            return (_verb_hit(line), suggestion.options)
+
+    try:
+        argv = shlex.split(line)
+    except ValueError:
+        # Bug, found live 2026-08-19: any line with an unbalanced quote
+        # character -- in practice almost always an English contraction
+        # ("what's", "it's", "let's") typed into something advertised as
+        # talkable-to -- raised shlex's raw "No closing quotation" and
+        # was discarded before stage 2 ever got a chance, even though
+        # the exact same free text minus the apostrophe would have been
+        # handled fine. Give it the same intent-resolution fallback the
+        # argparse-SystemExit path below already gets, instead of
+        # leaking a shlex implementation detail as the user-facing
+        # error. See PRASH_V2.md §10.
+        suggestion = resolve(line, ctx)
+        if isinstance(suggestion, Suggestion):
+            console.print(f"[dim]→ {suggestion.explain}[/dim]")
+            run_argv(suggestion.argv)
+            return None
+        if isinstance(suggestion, Clarify):
+            _ask(console, suggestion)
+            return (_verb_hit(line), suggestion.options)
+        console.print("[red]I didn't get that. Try `help`, or describe what you want in plain words.[/red]")
+        return None
+
+    try:
+        parser.parse_args(argv)
+    except SystemExit:
+        # argparse printed usage for a bad line. Before giving up on it,
+        # try stage 2: it might be free text ("restart the broken api pod").
+        suggestion = resolve(line, ctx)
+        if isinstance(suggestion, Suggestion):
+            console.print(f"[dim]→ {suggestion.explain}[/dim]")
+            run_argv(suggestion.argv)
+            return None
+        if isinstance(suggestion, Clarify):
+            _ask(console, suggestion)
+            return (_verb_hit(line), suggestion.options)
+        return pending
+
+    run_argv(argv)
+    return None
+
+
+def run_repl(console=None, lines: Iterable[str] | None = None) -> int:
+    """Start the interactive session. `lines` is for tests/CI only — when
+    given, input is consumed from it instead of stdin so the loop is testable
+    headlessly. Returns a shell exit code."""
+    console = console or ui.console
+    parser = build_parser()
+    session = ReplSession(console)
+    iterator = iter(lines) if lines is not None else None
+    pending = None
+
+    console.print("[dim]type a command, or `help` / `exit`.[/dim]")
+
     while True:
         try:
             line = next(iterator) if iterator is not None else console.input(_PROMPT)
@@ -154,87 +250,9 @@ def run_repl(console=None, lines: Iterable[str] | None = None) -> int:
             console.print("\n[dim]bye[/dim]")
             return 0
 
-        line = line.strip()
-        if not line:
-            continue
-        if line.lower() in ("exit", "quit", "q"):
-            console.print("[dim]bye[/dim]")
+        pending = process_line(line, session, parser, console, pending)
+        if pending is _EXIT:
             return 0
-        if line.lower() in ("help", "?"):
-            parser.print_help()
-            continue
-
-        if pending is not None:
-            verb, options = pending
-            pending = None
-            ctx = _Context.from_session(session)
-            if line.isdigit() and 1 <= int(line) <= len(options):
-                choice = options[int(line) - 1]
-            else:
-                choice = line
-            suggestion = complete(verb, choice, ctx)
-            if suggestion is None:
-                console.print(f"[red]I didn't get that. {options or 'no targets known yet — type one like `api-7f9d` or `ns/pod`.'}[/red]")
-                continue
-            console.print(f"[dim]→ {suggestion.explain}[/dim]")
-            run_argv(suggestion.argv)
-            continue
-
-        ctx = _Context.from_session(session)
-        if _is_it_phrase(line) or _looks_like_talk(line):
-            suggestion = resolve(line, ctx)
-            if isinstance(suggestion, Suggestion):
-                console.print(f"[dim]→ {suggestion.explain}[/dim]")
-                run_argv(suggestion.argv)
-                continue
-            if isinstance(suggestion, Clarify):
-                pending = (_verb_hit(line), suggestion.options)
-                _ask(console, suggestion)
-                continue
-
-        try:
-            argv = shlex.split(line)
-        except ValueError:
-            # Bug, found live 2026-08-19: any line with an unbalanced quote
-            # character -- in practice almost always an English contraction
-            # ("what's", "it's", "let's") typed into something advertised as
-            # talkable-to -- raised shlex's raw "No closing quotation" and
-            # was discarded before stage 2 ever got a chance, even though
-            # the exact same free text minus the apostrophe would have been
-            # handled fine. Give it the same intent-resolution fallback the
-            # argparse-SystemExit path below already gets, instead of
-            # leaking a shlex implementation detail as the user-facing
-            # error. See PRASH_V2.md §10.
-            suggestion = resolve(line, ctx)
-            if isinstance(suggestion, Suggestion):
-                console.print(f"[dim]→ {suggestion.explain}[/dim]")
-                run_argv(suggestion.argv)
-                continue
-            if isinstance(suggestion, Clarify):
-                pending = (_verb_hit(line), suggestion.options)
-                _ask(console, suggestion)
-                continue
-            console.print("[red]I didn't get that. Try `help`, or describe what you want in plain words.[/red]")
-            continue
-
-        try:
-            parser.parse_args(argv)
-        except SystemExit:
-            # argparse printed usage for a bad line. Before giving up on it,
-            # try stage 2: it might be free text ("restart the broken api pod").
-            suggestion = resolve(line, ctx)
-            if isinstance(suggestion, Suggestion):
-                console.print(f"[dim]→ {suggestion.explain}[/dim]")
-                run_argv(suggestion.argv)
-                continue
-            if isinstance(suggestion, Clarify):
-                pending = (_verb_hit(line), suggestion.options)
-                _ask(console, suggestion)
-                continue
-            continue
-
-        run_argv(argv)
-    return 0
 
 
 def _ask(console, suggestion: Clarify) -> None:

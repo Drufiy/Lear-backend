@@ -43,20 +43,23 @@ BAD = "red"
 WARN = "yellow"
 
 # Hex equivalents of the same identity for surfaces that need concrete colour
-# values rather than rich styles (the Textual TUI). Single source so a brand
-# change in the palette updates every surface; the values are the TUI's own
-# GitHub-dark surface, kept unchanged when this was converged (2026-08-16).
+# values rather than rich styles (the Textual app). Single source so a brand
+# change in the palette updates every surface. Repainted 2026-08-24 (black +
+# one neon pink, spent only on the wordmark and live state, never on
+# decoration) -- replaces the GitHub-dark palette this shipped with since
+# 2026-08-16. Semantic good/warn/bad stay deliberately apart from the accent
+# hue so state is never confused with branding.
 TUI_PALETTE = {
-    "bg": "#0d1117",
-    "panel": "#161b22",
-    "panel_border": "#30363d",
-    "text": "#c9d1d9",
-    "dim": "#8b949e",
-    "brand": "#ffd23f",
-    "accent": "#2f81f7",
-    "good": "#3fb950",
-    "bad": "#f85149",
-    "warn": "#d29922",
+    "bg": "#060407",
+    "panel": "#0e0812",
+    "panel_border": "#2c1a2b",
+    "text": "#f3e6ee",
+    "dim": "#8f7488",
+    "brand": "#ff2f8f",
+    "accent": "#ff7ac2",
+    "good": "#35d68f",
+    "bad": "#ff4d6a",
+    "warn": "#ffb020",
 }
 
 _RULE_STYLE = "bright_black"

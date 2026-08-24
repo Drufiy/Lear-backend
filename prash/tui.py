@@ -1,19 +1,31 @@
-"""Prash v2 TUI — a modern, dashboard-style interface (Track A, §6b hardening phase).
+"""Prash v2 terminal app — one merged surface (2026-08-24), replacing the
+repl/tui split.
 
-OpenCode-shaped surface: a dark, keyboard-driven terminal app that turns the
-read-only commands (`actions`, `audit`, `config`, `circuit`, `watch`) into a
-single always-refreshing dashboard, with a live Kubernetes pane when a cluster
-is configured.
+Until now `prash repl` (plain-text, conversational, but only understood ~12
+hardcoded verbs and 2 of 10 connectors via prash/intent.py) and `prash tui`
+(a real dashboard, but read-only -- no input widget existed anywhere in it)
+were two disconnected binaries. Found live testing the REPL against a real
+Grafana alert: a completely reasonable sentence failed because it wasn't in
+the keyword table, and the good-looking surface couldn't have taken that
+input at all. This is the fix: one app, chat as the primary view, the
+existing dashboard panes reachable from inside it instead of a separate
+process.
 
-Built on `textual` (same team as `rich`, so it shares the §8 resolution that
-the interface stays terminal-native — this is the "actual TUI framework"
-option §7b left open, not a GUI). Non-TTY and headless-safe: every data read
-is the same `AuditLog` / `CircuitBreaker` / `CredentialStore` / connector
-call the CLI already uses, so nothing here is a fake dashboard.
+The Chat pane does NOT reimplement REPL logic -- it drives repl.py's
+`process_line()` (the exact function the plain-text `prash repl` loop now
+also calls), in a worker thread so a real connector call never freezes the
+UI. Two surfaces sharing one interaction engine is the whole point; forking
+a second implementation here would repeat the mistake that split them in
+the first place.
+
+Built on `textual` (same team as `rich`). Non-TTY and headless-safe: every
+data read is the same `AuditLog` / `CircuitBreaker` / `CredentialStore` /
+connector call the CLI already uses, so nothing here is a fake dashboard.
 
 Keys:
     q / ctrl+c   quit
     r            refresh all panes now
+    c            switch to Chat
     t            switch to Overview
     a            switch to Actions
     d            switch to Audit
@@ -22,14 +34,20 @@ Keys:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 from typing import ClassVar
 
+from rich.text import Text
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Static, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
+from . import repl as repl_mod
+from . import ui as ui_mod
 from .actions.contract import RiskTier
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
@@ -125,6 +143,44 @@ DataTable > .datatable--cursor {{
     background: #1f6feb33;
 }}
 
+/* ---- chat ---- */
+#chat-container {{
+    height: 1fr;
+    padding: 0;
+}}
+
+#wordmark {{
+    color: {_BRAND};
+    text-style: bold;
+    padding: 1 2 0 2;
+    height: auto;
+}}
+
+#wordmark-tag {{
+    color: {_DIM};
+    padding: 0 2 1 2;
+    height: auto;
+}}
+
+#chat-log {{
+    background: {_BG};
+    height: 1fr;
+    padding: 0 2;
+    scrollbar-color: {_PANEL_BORDER};
+}}
+
+#chat-input {{
+    background: {_PANEL};
+    border: none;
+    border-top: solid {_PANEL_BORDER};
+    padding: 0 2;
+    color: {_TEXT};
+}}
+
+#chat-input:focus {{
+    border-top: solid {_BRAND};
+}}
+
 #status-line {{
     color: {_DIM};
     height: 1;
@@ -200,6 +256,7 @@ class PrashApp(App):
         Binding("q", "quit", "Quit", priority=True),
         Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("r", "refresh", "Refresh"),
+        Binding("c", "tab_chat", "Chat", key_display="c"),
         Binding("t", "tab_overview", "Overview", key_display="t"),
         Binding("a", "tab_actions", "Actions", key_display="a"),
         Binding("d", "tab_audit", "Audit", key_display="d"),
@@ -208,7 +265,9 @@ class PrashApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with TabbedContent(initial="overview"):
+        with TabbedContent(initial="chat"):
+            with TabPane("Chat", id="chat"):
+                yield self._compose_chat()
             with TabPane("Overview", id="overview"):
                 yield self._compose_overview()
             with TabPane("Actions", id="actions"):
@@ -221,6 +280,15 @@ class PrashApp(App):
         yield Footer()
 
     # ---- panes ---------------------------------------------------------
+
+    def _compose_chat(self) -> Container:
+        return Container(
+            Static("prash", id="wordmark"),
+            Static("local ai devops agent — type what's wrong, or `help`", id="wordmark-tag"),
+            RichLog(id="chat-log", wrap=True, markup=False, highlight=False, auto_scroll=True),
+            Input(placeholder="what's broken?", id="chat-input"),
+            id="chat-container",
+        )
 
     def _compose_overview(self) -> Container:
         self._card_mode = _StatCard("PERMISSION MODE")
@@ -258,8 +326,68 @@ class PrashApp(App):
 
     def on_mount(self) -> None:
         self._k8s_enabled = False
+        self._chat_parser = repl_mod.build_parser()
+        self._chat_session = repl_mod.ReplSession(None)
+        self._chat_pending = None
+        self._chat_busy = False
+        self.query_one("#chat-input", Input).focus()
         self._refresh()
         self.set_interval(REFRESH_SECONDS, self._refresh)
+
+    # ---- chat ------------------------------------------------------------
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "chat-input":
+            return
+        line = event.value.strip()
+        event.input.value = ""
+        if not line:
+            return
+        log = self.query_one("#chat-log", RichLog)
+        log.write(f"> {line}")
+        if self._chat_busy:
+            log.write("(still working on the last one — hang on)")
+            return
+        self._chat_busy = True
+        self._run_chat_line(line)
+
+    @work(thread=True)
+    def _run_chat_line(self, line: str) -> None:
+        # Redirect the one global console (prash/ui.py's `console` -- every
+        # cmd_* function in cli.py prints through this same object) so real
+        # command output lands in the chat log instead of the raw stdout
+        # Textual has already taken over the screen buffer for. Runs off
+        # the main thread so a real connector call never freezes the UI.
+        buf = io.StringIO()
+        old_file = ui_mod.console.file
+        ui_mod.console.file = buf
+        try:
+            with contextlib.redirect_stdout(buf):
+                new_pending = repl_mod.process_line(
+                    line, self._chat_session, self._chat_parser, ui_mod.console, self._chat_pending
+                )
+        finally:
+            ui_mod.console.file = old_file
+        self.call_from_thread(self._on_chat_result, new_pending, buf.getvalue())
+
+    def _on_chat_result(self, new_pending, output: str) -> None:
+        self._chat_busy = False
+        log = self.query_one("#chat-log", RichLog)
+        text = output.rstrip("\n")
+        if text:
+            # cmd_* output carries real ANSI (the CLI's Rich-rendered tables/
+            # panels, plus argparse's own help text via a Rich formatter) --
+            # decode it into styled Text instead of writing the raw escape
+            # sequences as literal characters.
+            log.write(Text.from_ansi(text))
+        if new_pending is repl_mod._EXIT:
+            self.exit()
+            return
+        self._chat_pending = new_pending
+
+    def action_tab_chat(self) -> None:
+        self.query_one(TabbedContent).active = "chat"
+        self.query_one("#chat-input", Input).focus()
 
     def _refresh(self) -> None:
         try:
