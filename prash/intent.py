@@ -293,7 +293,15 @@ def _build_intent_tool_schema() -> dict:
                 "provider": {
                     "type": "string",
                     "enum": providers,
-                    "description": "which connector this targets. Required for investigate/fix. Omit for run/watch/audit/actions/config/circuit.",
+                    "description": (
+                        "which connector this targets. Required for investigate/fix. Omit for "
+                        "run/watch/audit/actions/config/circuit. Only set this if the user said "
+                        "it, it's the only provider a stated action id could possibly belong to, "
+                        "or it's already known from context -- a resource's naming style (e.g. "
+                        "kebab-case vs Title Case) is NOT a reliable signal for which connector it "
+                        "lives in. If you cannot tell which connector, use command=clarify instead "
+                        "of guessing -- the same rule as `resource` and `action_id` below."
+                    ),
                 },
                 "resource": {
                     "type": "string",
@@ -329,8 +337,13 @@ _INTENT_SYSTEM_PROMPT = (
     "that didn't match any known short command. Call resolve_repl_intent "
     "with the single best interpretation. Be conservative: if the target "
     "resource isn't stated and isn't in the remembered context below, use "
-    "command=clarify rather than guessing one. Never invent a provider, "
-    "action id, or resource that wasn't given to you."
+    "command=clarify rather than guessing one. The same applies to the "
+    "provider/connector: if the user's line doesn't name or clearly imply "
+    "which connector a resource lives in, ask -- do not guess one just "
+    "because it's the first/most common provider. A resource's naming "
+    "style is not a reliable signal for which connector it belongs to. "
+    "Never invent a provider, action id, or resource that wasn't given "
+    "to you."
 )
 
 
