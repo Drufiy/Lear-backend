@@ -59,23 +59,76 @@ mute prash-test-synthetic-error-rate for 30 minutes
 
 ## Grafana
 
-**Status: not yet set up.**
+**Status: ready.**
 
-Credentials present (`GRAFANA_API_KEY`, `GRAFANA_URL`). Note from earlier
-sessions: this instance is on Grafana Cloud's free tier, which hibernates
-when idle — a `503 "instance is loading"` on first touch after idle time is
+`scripts/testing/break_grafana.py` manages one alert rule end to end,
+`Prash E2E Test Alert` (uid `afw5nq4yyq0owb`, rule group `prash-e2e-test`)
+— its condition is a pure math expression (`1 > 0` / `1 > 2`), no external
+datasource involved, so there's nothing real to accidentally touch.
+
+```bash
+python3 scripts/testing/break_grafana.py          # force Alert
+python3 scripts/testing/break_grafana.py --heal   # force OK
+```
+
+Unlike Datadog, there's no separate "submit a metric point" step — toggling
+the rule's own query takes effect on Grafana's next evaluation cycle
+(seconds, confirmed live 2026-08-26 in both directions).
+
+Note: this instance is on Grafana Cloud's free tier, which hibernates when
+idle — a `503 "instance is loading"` on first touch after idle time is
 expected, not a bug; it clears within ~1 min of the instance waking up.
-Needs: one alert rule this script can flip via a synthetic query, same
-pattern as Datadog above.
+
+**Prash prompt to test with:**
+
+```
+what's wrong with Prash E2E Test Alert
+```
+
+(answer `grafana` if it asks which connector). To test `grafana-silence-alert`:
+
+```
+silence Prash E2E Test Alert for 30 minutes
+```
+
+Worth noting: silencing a firing Grafana alert changes its Alertmanager
+state to `suppressed`, which `poll_state()` maps to `degraded` — so testing
+the silence action also naturally exercises the DEGRADED state, unlike
+Datadog where muting doesn't change `overall_state`.
 
 ## PagerDuty
 
-**Status: not yet set up.**
+**Status: ready.**
 
-Credentials present (`PAGERDUTY_API_KEY`, `PAGERDUTY_FROM_EMAIL`,
-`PAGERDUTY_ROUTING_KEY`). Needs: a test service + a script that fires a
-real event via the Events API v2 (`trigger_event()` already exists in
-`prash/connectors/pagerduty.py`) to create a real open incident on demand.
+`scripts/testing/break_pagerduty.py` fires a real event at the `prash-v2`
+service via the Events API v2, using a fixed `dedup_key` so repeated runs
+update the same incident instead of piling up new ones.
+
+```bash
+python3 scripts/testing/break_pagerduty.py          # trigger (open incident)
+python3 scripts/testing/break_pagerduty.py --heal   # resolve it
+```
+
+Both directions live-verified 2026-08-26 — trigger produces a real
+`triggered` incident within seconds, resolve clears it within seconds.
+
+**Prash prompt to test with:**
+
+```
+what's wrong with prash-v2
+```
+
+(answer `pagerduty` if it asks which connector — note the resource is the
+*service* name, not the dedup key). To test the write actions, once
+there's an open incident:
+
+```
+acknowledge the prash-v2 incident
+```
+
+or `resolve the prash-v2 incident` — you'll need the incident's real id
+from the investigate output first, since `poll_state()`'s detail is what
+surfaces it (same pattern as a pod vs. its Deployment for k8s rollback).
 
 ## Snyk
 
