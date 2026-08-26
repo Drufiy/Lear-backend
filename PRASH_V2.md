@@ -397,6 +397,59 @@ Now a standing repo convention, not just a phase note — see §0c. Two people t
 
 ---
 
+## 8b. The scope ceiling — how far Prash can go, and what stays permanently out of reach
+
+Written 2026-08-26, following straight from the positioning-gap finding above.
+The team keeps adding connectors, actions, and diagnosis coverage — this is
+the honest answer to "where does that road actually end," so the target
+stays clear as scope grows instead of drifting into "eventually it does
+everything" (the exact failure mode §5's inclusion rule already warns
+against).
+
+**Tier 1 — real today.** CI failures (GitHub/GitLab Actions) and Kubernetes
+pods: full diagnosis, a concrete proposed fix, human approves, Prash
+executes and verifies.
+
+**Tier 2 — the actual target, reached by building more, not by removing
+constraints.** For *any* system Prash has a connector into: real
+root-cause diagnosis, a concrete proposed action, human approves before
+anything executes. This is achievable for the full connector list and
+whatever gets added later — it is only engineering work (extend the brain
+per domain, define what "a fix" means there, add the action). **The human
+approval step is exactly what makes this ceiling high**: Prash never has
+to be autonomous-safe, it only has to be correct enough that approving is
+fast and easy. Target framing for the team: *"diagnose and propose a real
+fix for anything Prash has a connector into, always human-approved before
+execution."*
+
+**The permanent floor — four things that stay true no matter how much
+gets built:**
+
+1. **No connector, no fix.** Zero visibility into a system means zero
+   ability to diagnose or touch it. Shrinks as connectors are added, never
+   reaches zero — there is always something not yet integrated.
+2. **Not a technical problem.** A vendor's pricing change, an unhappy
+   customer, a legal call, a real feature-vs-bug tradeoff — these are
+   judgment calls, not bugs. Out of scope by definition of what a DevOps
+   agent is, not a gap to close.
+3. **The physical world.** A dead server, a bad cable, someone needing to
+   walk into a data center. No API reaches that; Prash can alert a human,
+   it cannot act.
+4. **Genuinely first-of-its-kind failures.** Diagnosis reasons from
+   patterns and available evidence; a truly novel failure mode will
+   sometimes be diagnosed wrong or incompletely, permanently, no matter
+   how good the model gets. This is *why* the human-approval system is
+   permanent infrastructure, not a training-wheels phase to remove once
+   Prash is "good enough" — a human catching a wrong diagnosis before it
+   executes is the actual safety net, always.
+
+One more, a deliberate choice rather than a limit: even where Prash could
+technically execute an action, some decisions should stay human-approved
+regardless of confidence, because they're real tradeoffs, not risk to be
+managed down to zero. That line is drawn by the team, not by capability.
+
+---
+
 ## 9. Decision log
 
 **2026-08-22 — Azure and GCP Connectors Added (Anant)**
