@@ -152,6 +152,14 @@ DataTable > .datatable--cursor {{
 #chat-container {{
     height: 1fr;
     padding: 0;
+    align-horizontal: center;
+}}
+
+#chat-column {{
+    height: 1fr;
+    width: 100%;
+    max-width: 104;
+    padding: 0;
 }}
 
 #wordmark {{
@@ -321,11 +329,18 @@ class PrashApp(App):
     # ---- panes ---------------------------------------------------------
 
     def _compose_chat(self) -> Container:
+        # Design reference: https://claude.ai/code/artifact/5ea0ae2a-54ab-408f-8155-e7209b2f12c2
+        # -- a constrained, centered column, not content stretched edge to
+        # edge across whatever width the terminal happens to be. #chat-column
+        # carries the max-width; #chat-container just centers it.
         return Container(
-            Static("prash", id="wordmark"),
-            Static("local ai devops agent — type what's wrong, or `help`  ·  ctrl+p for connectors, tabs, everything else", id="wordmark-tag"),
-            RichLog(id="chat-log", wrap=True, markup=False, highlight=False, auto_scroll=True),
-            Input(placeholder="what's broken?", id="chat-input"),
+            Vertical(
+                Static("prash", id="wordmark"),
+                Static("local ai devops agent — type what's wrong, or `help`  ·  ctrl+p for connectors, tabs, everything else", id="wordmark-tag"),
+                RichLog(id="chat-log", wrap=True, markup=False, highlight=False, auto_scroll=True),
+                Input(placeholder="what's broken?", id="chat-input"),
+                id="chat-column",
+            ),
             id="chat-container",
         )
 
