@@ -41,7 +41,8 @@ from __future__ import annotations
 import contextlib
 import io
 import os
-from typing import ClassVar
+import threading
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import work
@@ -51,6 +52,7 @@ from textual.command import Hit, Hits, Provider
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
+from . import cli as cli_mod
 from . import repl as repl_mod
 from . import ui as ui_mod
 from .actions.contract import RiskTier
@@ -269,6 +271,74 @@ class PrashCommandProvider(Provider):
                 yield Hit(score, matcher.highlight(name), callback, help=help_text)
 
 
+class ChatInteraction:
+    """Answers confirm/secret/choice prompts through the chat surface
+    instead of blocking on real stdin (see the long comment above
+    cli.py's `_confirm_action` for why a plain Prompt.ask() call hangs
+    forever from a Textual worker thread -- found live 2026-08-26,
+    `mute <monitor> for 30 minutes` never returned because
+    datadog-mute-monitor needs approval).
+
+    Renders the question into the chat log from the worker thread via
+    `call_from_thread`, then blocks *this worker thread only* (never the
+    UI -- the app stays fully responsive) on a `threading.Event` that the
+    main thread sets from `on_input_submitted` once the user's next typed
+    line arrives. A generous timeout auto-declines rather than leaking a
+    thread forever if the app is abandoned mid-question."""
+
+    _TIMEOUT_SECONDS = 300
+
+    def __init__(self, app: "PrashApp") -> None:
+        self.app = app
+
+    def _wait_for_answer(self, kind: str, lines: list[str]) -> str | None:
+        log = self.app.query_one("#chat-log", RichLog)
+        chat_input = self.app.query_one("#chat-input", Input)
+        event = threading.Event()
+        box: dict[str, str] = {}
+
+        def announce() -> None:
+            for line in lines:
+                log.write(line)
+            chat_input.placeholder = "y/n?" if kind == "confirm" else "type your answer"
+            self.app._chat_awaiting = (kind, event, box)
+
+        self.app.call_from_thread(announce)
+        answered = event.wait(self._TIMEOUT_SECONDS)
+
+        def restore() -> None:
+            self.app._chat_awaiting = None
+            chat_input.placeholder = "what's broken?"
+
+        if not answered:
+            self.app.call_from_thread(restore)
+            self.app.call_from_thread(log.write, "[no answer within 5 minutes -- treating as decline]")
+            return None
+        return box.get("value")
+
+    def confirm(self, action: Any, plan: Any, ctx: Any) -> bool:
+        hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
+        lines = [
+            f"? Target {ctx.target.resource} ({ctx.target.environment})",
+            f"  {plan.describe()}",
+            f"  Proceed with '{action.spec.id}'{hint}? [y/N]",
+        ]
+        value = self._wait_for_answer("confirm", lines)
+        return value is not None and value.lower().startswith("y")
+
+    def secret(self, name: str, hint: str) -> str:
+        prompt = f"? Value for secret '{name}'" + (f" ({hint})" if hint else "")
+        value = self._wait_for_answer("secret", [prompt])
+        return value or ""
+
+    def choose(self, question: str, choices: list[str], default: str) -> str | None:
+        lines = [f"? {question} [{'/'.join(choices)}] (default {default})"]
+        value = self._wait_for_answer("choice", lines)
+        if value is None:
+            return None
+        return value if value in choices else default
+
+
 class _StatCard(Horizontal):
     DEFAULT_CSS = """
     _StatCard {
@@ -395,6 +465,7 @@ class PrashApp(App):
         self._chat_session = repl_mod.ReplSession(None)
         self._chat_pending = None
         self._chat_busy = False
+        self._chat_awaiting = None
         self.query_one("#chat-input", Input).focus()
         self.query_one("#connectors-table", DataTable).add_columns("connector", "state", "detail")
         self._refresh()
@@ -412,6 +483,18 @@ class PrashApp(App):
             return
         log = self.query_one("#chat-log", RichLog)
         log.write(f"> {line}")
+        if self._chat_awaiting is not None:
+            # A confirm/secret/choice question is outstanding (see
+            # ChatInteraction) -- this line answers it, not a new command.
+            # Must be checked before _chat_busy: the worker that asked the
+            # question is still running (blocked on the answer), so
+            # _chat_busy is still True at this point.
+            _kind, answer_event, box = self._chat_awaiting
+            box["value"] = line
+            self._chat_awaiting = None
+            event.input.placeholder = "what's broken?"
+            answer_event.set()
+            return
         if self._chat_busy:
             log.write("(still working on the last one — hang on)")
             return
@@ -428,6 +511,11 @@ class PrashApp(App):
         buf = io.StringIO()
         old_file = ui_mod.console.file
         ui_mod.console.file = buf
+        # Any approval/secret/choice prompt hit while running this line goes
+        # through ChatInteraction instead of blocking on real stdin, which
+        # this worker thread can never receive (see ChatInteraction's
+        # docstring). Thread-local, so the plain CLI/REPL path is untouched.
+        cli_mod.set_interaction(ChatInteraction(self))
         try:
             # Both streams: argparse's own usage/error output on a bad line
             # goes to stderr, not through ui_mod.console at all -- stdout
@@ -438,6 +526,7 @@ class PrashApp(App):
                 )
         finally:
             ui_mod.console.file = old_file
+            cli_mod.clear_interaction()
         self.call_from_thread(self._on_chat_result, new_pending, buf.getvalue())
 
     def _on_chat_result(self, new_pending, output: str) -> None:

@@ -31,6 +31,11 @@ After running (no `--heal`), the monitor takes ~1-5 min to evaluate into
 2026-08-26: monitor id `316853860` reached real `Alert` state ~2 min after
 submission.
 
+**Update 2026-08-26**: testing this fixture found and fixed the most
+serious bug in the project so far — any action needing approval (the
+default posture) hung Chat forever with zero output. See PRASH_V2.md §10,
+2026-08-26. Fixed; the mute flow below is now live-verified working.
+
 **Prash prompt to test with**, once you've run the break script and waited
 a couple minutes:
 
