@@ -3,11 +3,13 @@
 
 Creates (idempotently) one monitor, `prash-test-synthetic-error-rate`, on a
 synthetic custom metric this script owns end to end -- no real service is
-touched. Run with no args to force it into Alert; `--heal` submits a clean
-value so it settles back to OK. Safe to re-run any number of times.
+touched. Has both a warning and a critical threshold, so the same monitor
+can be driven into three real states by how high a value is submitted.
+Safe to re-run any number of times.
 
-    python3 scripts/testing/break_datadog.py          # force Alert
-    python3 scripts/testing/break_datadog.py --heal    # back to OK
+    python3 scripts/testing/break_datadog.py          # force Alert (critical)
+    python3 scripts/testing/break_datadog.py --warn   # force Warn (degraded)
+    python3 scripts/testing/break_datadog.py --heal   # back to OK
 """
 from __future__ import annotations
 
@@ -63,7 +65,10 @@ def main() -> int:
     }
 
     heal = "--heal" in sys.argv
-    value = 0 if heal else 999
+    warn = "--warn" in sys.argv
+    # Thresholds: warning=20, critical=50. 0 settles OK, 30 sits between the
+    # two (Warn), 999 clears critical outright (Alert).
+    value = 0 if heal else (30 if warn else 999)
 
     now = int(time.time())
     _request(base_url, headers, "POST", "/api/v1/series", {
@@ -79,6 +84,9 @@ def main() -> int:
     monitors = _request(base_url, headers, "GET", "/api/v1/monitor")
     existing = next((m for m in monitors if m.get("name") == MONITOR_NAME), None)
 
+    # A single query (critical threshold) plus a separate `warning` value in
+    # options -- Datadog reports Warn once the metric crosses `warning` but
+    # hasn't reached the query's own (critical) condition yet.
     query = f"avg(last_5m):avg:{METRIC_NAME}{{*}} > 50"
     payload = {
         "name": MONITOR_NAME,
@@ -86,7 +94,7 @@ def main() -> int:
         "query": query,
         "message": "Prash test fixture -- safe to ignore/mute, owned by scripts/testing/break_datadog.py",
         "tags": ["prash:test-fixture"],
-        "options": {"thresholds": {"critical": 50}, "notify_no_data": False},
+        "options": {"thresholds": {"critical": 50, "warning": 20}, "notify_no_data": False},
     }
     if existing:
         _request(base_url, headers, "PUT", f"/api/v1/monitor/{existing['id']}", payload)
@@ -99,8 +107,11 @@ def main() -> int:
 
     if heal:
         print("submitted a clean value -- monitor will settle to OK within ~5min")
+    elif warn:
+        print("submitted a between-thresholds value -- monitor should show Warn within ~1-5min")
+        print(f"check state: prash investigate '{MONITOR_NAME}' --provider datadog")
     else:
-        print(f"submitted an over-threshold value -- monitor should show Alert within ~1-5min")
+        print("submitted an over-threshold value -- monitor should show Alert within ~1-5min")
         print(f"check state: prash investigate '{MONITOR_NAME}' --provider datadog")
 
     return 0
