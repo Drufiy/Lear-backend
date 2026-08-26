@@ -514,6 +514,28 @@ def cmd_fix(args: argparse.Namespace) -> int:
     return _render_run_result(result)
 
 
+# Minimum credential(s) each provider needs for a baseline authenticate()
+# call specifically -- NOT every key that connector's write actions might
+# also need (e.g. DATADOG_APP_KEY, PAGERDUTY_FROM_EMAIL). Diagnostic-only:
+# used solely to tell "genuinely no credentials" apart from "credentials
+# look present but authenticate() failed some other way" in the message
+# below, never as a substitute for the connector's own authenticate() logic.
+# azure/gcp omitted -- both can authenticate via ambient/default credentials
+# (DefaultAzureCredential, gcloud ADC) with none of these env vars set, so
+# "none of these are present" isn't a reliable "no credentials" signal for
+# either.
+_PROVIDER_MIN_CREDS: dict[str, tuple[str, ...]] = {
+    "github": ("GITHUB_TOKEN",),
+    "gitlab": ("GITLAB_TOKEN",),
+    "vercel": ("VERCEL_TOKEN",),
+    "aws": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+    "datadog": ("DATADOG_API_KEY",),
+    "grafana": ("GRAFANA_URL", "GRAFANA_API_KEY"),
+    "pagerduty": ("PAGERDUTY_API_KEY",),
+    "snyk": ("SNYK_API_TOKEN", "SNYK_ORG_ID"),
+}
+
+
 def cmd_investigate(args: argparse.Namespace) -> int:
     store = CredentialStore.from_env()
     creds = store.load()
@@ -534,7 +556,25 @@ def cmd_investigate(args: argparse.Namespace) -> int:
         # .env. True for every API-backed connector, but gitleaks has no
         # token at all -- its authenticate() fails when the local binary
         # isn't installed, so the old wording was simply false for it.
-        hint = "missing binary on PATH" if connector.name == "gitleaks" else "missing token in local .env"
+        #
+        # Found live again 2026-08-25: even for token-based connectors, the
+        # message was wrong a second way -- it blamed "missing token" for
+        # what were actually two separate transient Grafana API hiccups
+        # (confirmed by an immediate retry succeeding cleanly both times).
+        # A real, present token that a health-check call briefly failed to
+        # verify is not the same problem as no token at all, and "missing
+        # token in local .env" actively points the user at the wrong fix.
+        if connector.name == "gitleaks":
+            hint = "missing binary on PATH"
+        else:
+            required = _PROVIDER_MIN_CREDS.get(connector.name, ())
+            missing = [k for k in required if not creds.get(k)]
+            if missing:
+                hint = f"missing {', '.join(missing)} in local .env"
+            elif required:
+                hint = "credentials look present but the health check failed -- likely a transient network/API issue, try again"
+            else:
+                hint = "missing token in local .env"
         console.print(f"[yellow]{connector.name}: auth not configured ({hint})[/yellow]")
         return 1
     if getattr(args, "dependabot", False):
