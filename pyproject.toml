@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prash-v2"
 version = "0.2.0"
-description = "Prash v2 - local-first AI DevOps agent"
+description = "Lear - local-first AI DevOps agent"
 requires-python = ">=3.10"
 dependencies = [
     "rich>=13.0",

@@ -64,7 +64,7 @@ TUI_PALETTE = {
 
 _RULE_STYLE = "bright_black"
 
-MASTHEAD = "[bold yellow]PRASH V2[/]  [dim]local AI DevOps agent[/dim]"
+MASTHEAD = "[bold yellow]LEAR[/]  [dim]local AI DevOps agent[/dim]"
 
 console = Console()
 

@@ -1,4 +1,4 @@
-# Prash v2 — The AI DevOps Agent
+# Lear — The AI DevOps Agent
 
 **Status:** Active build. Single source of truth for the pivot from "CI/CD fixer" to "AI DevOps agent."
 **Repo:** [Drufiy/prash-v2-backend](https://github.com/Drufiy/prash-v2-backend) — new, separate from the v1 hosted service.
@@ -36,7 +36,7 @@ If that sequence works, the sprint succeeded, even if connectors are missing and
 
 **Language/runtime:** Python 3.12. Package name is `prash` (so `python -m prash.cli`). This matches v1, and the brain being ported in Track D is Python.
 
-**Cross-platform is a hard requirement, not a nice-to-have.** Aryan develops on **Windows/PowerShell**, Aradhya on **macOS**. Prash v2 is a CLI tool, so path handling, shell quoting, signal handling, and line endings all differ between your two machines. Use `pathlib` not string paths, never shell out to a Unix-only command without a Windows path, and assume the other person's machine will break your code if you don't. CI runs on Linux + Windows + macOS on every push for exactly this reason.
+**Cross-platform is a hard requirement, not a nice-to-have.** Aryan develops on **Windows/PowerShell**, Aradhya on **macOS**. Lear is a CLI tool, so path handling, shell quoting, signal handling, and line endings all differ between your two machines. Use `pathlib` not string paths, never shell out to a Unix-only command without a Windows path, and assume the other person's machine will break your code if you don't. CI runs on Linux + Windows + macOS on every push for exactly this reason.
 
 **Tests:** `pytest`. Aryan's existing `tests/test_permissions.py` sets the pattern.
 
@@ -74,7 +74,7 @@ This isn't a bug. It's the ceiling of the product as designed. No better prompt 
 
 ---
 
-## 2. What Prash v2 actually is, in one paragraph
+## 2. What Lear actually is, in one paragraph
 
 **Sharpened 2026-08-18 — team positioning decision, full reasoning in §9.** Prash is an AI DevOps agent with two modes on one shared brain, one local credential store, and one audit log. In **autopilot** — the hero mode — Prash runs continuously in the environment a team gives it access to (CI, cloud, Kubernetes, deployments), the way an on-call engineer would, except it never sleeps: the moment something looks wrong it notifies the team over their own channel (Slack, Discord, email — whatever's configured), then acts within whatever permission tier it's been trusted with — safe fixes on its own, anything riskier only with a human's yes. In **copilot** mode, an engineer drops into the local CLI + REPL to drive Prash directly — deep-diving an incident, brainstorming the fix together, watching it land — deliberately the same interaction shape as Claude Code, for familiarity. Same credentials, same audit trail, either way: they stay local, under the team's control, and Drufiy's servers never hold them. Built first for **startups and small tech companies**, where the engineers *are* the on-call rotation and the pain is sharpest — not an enterprise sale that needs a security review before it can prove itself.
 
@@ -475,7 +475,7 @@ Following the Slack/Discord webhook implementation, added `EmailNotifier` (SMTP 
 1. *"Isn't this just Claude Code?"* — §2's own old wording ("in the shape of Claude Code," "watches infrastructure the way Claude Code watches a codebase") invited the question and didn't answer it.
 2. *The always-on contradiction* — §1's stated reason for the whole pivot is 3am production incidents, but the old §3 had the watcher running "on the user's machine," which is asleep at 3am. Two irreconcilable halves of one pitch.
 3. *Who is this for, concretely* — "a developer or ops engineer" is everyone, which is nobody.
-4. *The evidence gap* — every live verification to date (GitLab CI included, see the entry above) diagnoses a fixture someone on the team planted. Prash v2 has never yet caught something nobody planted. Anant's answer doesn't close this gap; it's still open (see "what's still unresolved" below).
+4. *The evidence gap* — every live verification to date (GitLab CI included, see the entry above) diagnoses a fixture someone on the team planted. Lear has never yet caught something nobody planted. Anant's answer doesn't close this gap; it's still open (see "what's still unresolved" below).
 
 **Anant's answer (full text saved separately, see memory / ask Aradhya for the raw version) resolved #1 and #2, and pointed at #3:**
 - Claude Code is a local-first coding CLI; the *interaction shape* (CLI + REPL) is borrowed deliberately for user familiarity, but the actual architecture is an orchestrator watching multiple CI/infra flows and fixing them retroactively — something Claude Code can't do without a lot of external tinkering.
@@ -593,7 +593,7 @@ Removed a hardcoded Gemini API key from `test_live_infra.py` and rewrote the loc
 Per sprint 1 stretch goals (§6) and user request, we are adding an AWS EC2 read-only connector. Decided to stick strictly to the `.env` local credential loading via `prash/credentials.py` instead of relying implicitly on `~/.aws/credentials` to uphold the local-first security posture. The connector will use `boto3` (new dependency added to `pyproject.toml`) and implement the standard `authenticate -> locate -> fetch_logs -> poll_state` pattern.
 **2026-08-16 — ROOT CAUSE FOUND: Prash wasn't being cautious, it was structurally unable to fix Kubernetes. Fixed. CROSS-TRACK — Aryan, PLEASE READ (new action).**
 
-Aradhya pushed back on three days of k8s testing: *"Prash-v2 has not solved anything and mostly denied everything?? what is the point then... this way we won't reach our target of 'AI dev layer replacing engineers'."* He was right, and the earlier entries in this log were reading the symptom as the cause.
+Aradhya pushed back on three days of k8s testing: *"Lear has not solved anything and mostly denied everything?? what is the point then... this way we won't reach our target of 'AI dev layer replacing engineers'."* He was right, and the earlier entries in this log were reading the symptom as the cause.
 
 **What was actually wrong.** Verified in code, not inferred:
 1. `diagnosis_agent.py` instructed the model, for `category="runtime"`: *"There is NO code diff for a running pod... files_changed MUST be []"*.

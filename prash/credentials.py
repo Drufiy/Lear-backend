@@ -1,7 +1,7 @@
 """Local credentials + secrets loader.
 
 Credentials live in a local file under the user's control, always. Drufiy's
-servers never receive them. This is the whole trust model of Prash v2, so the
+servers never receive them. This is the whole trust model of Lear, so the
 loader is deliberately small and dependency-free.
 
 Format is a simple ``KEY=VALUE`` line file (``.env`` style). ``#`` starts a

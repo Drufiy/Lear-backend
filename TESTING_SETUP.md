@@ -1,4 +1,4 @@
-# Prash v2 — Testing Setup Runbook
+# Lear — Testing Setup Runbook
 
 Shareable checklist of what's configured per connector, how to force it into
 a failure state on demand, and how to heal it back. Companion to

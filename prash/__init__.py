@@ -1,4 +1,4 @@
-"""Prash v2 — the AI DevOps agent.
+"""Lear — the AI DevOps agent.
 
 This file intentionally stays minimal. The CLI entry point, config
 loading, and permission engine (Track A) are Aryan's — don't add to

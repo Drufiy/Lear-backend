@@ -1,6 +1,6 @@
 """GCP Compute Engine read-only connector with execution capabilities.
 
-Reads credentials from the injected CredentialStore per Prash v2 philosophy.
+Reads credentials from the injected CredentialStore per Lear philosophy.
 """
 
 from __future__ import annotations

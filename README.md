@@ -1,4 +1,4 @@
-# Prash v2 — the AI DevOps agent
+# Lear — the AI DevOps agent
 
 A local-first agent that watches your infrastructure — CI, Kubernetes, deployments —
 and **acts** on what it finds, not just diagnoses it. Credentials stay in your own

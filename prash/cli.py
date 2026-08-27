@@ -855,7 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
     formatter_class = _BrandedHelp
     parser = argparse.ArgumentParser(
         prog="prash",
-        description="Prash v2 — local AI DevOps agent",
+        description="Lear — local AI DevOps agent",
         epilog="credentials stay on your machine; Drufiy's servers never see them.",
         formatter_class=formatter_class,
     )

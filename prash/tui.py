@@ -1,4 +1,4 @@
-"""Prash v2 terminal app — one merged surface (2026-08-24), replacing the
+"""Lear terminal app — one merged surface (2026-08-24), replacing the
 repl/tui split.
 
 Until now `prash repl` (plain-text, conversational, but only understood ~12
@@ -361,7 +361,7 @@ class _StatCard(Horizontal):
 
 
 class PrashApp(App):
-    TITLE = "PRASH V2"
+    TITLE = "LEAR"
     SUB_TITLE = "local AI DevOps agent"
     CSS = CSS
     COMMANDS = App.COMMANDS | {PrashCommandProvider}
