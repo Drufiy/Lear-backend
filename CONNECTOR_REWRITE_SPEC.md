@@ -111,9 +111,9 @@ class ConnectorEvent(TypedDict):
 
 No connector loses a capability it has today. The existing `run <action>` commands, `poll_state`/`fetch_logs`, `datadog_mute`/`grafana_silence`/etc., and today's `prash watch` all keep working throughout the migration. "Extend, never break" — any milestone that would regress current behavior is not done.
 
-## 5. Terraform — explicitly out of scope
+## 5. Terraform — now real, folded into the rollout
 
-Terraform doesn't exist as a real connector (verified 2026-08-30 — zero references in `prash/`, despite Notion showing "Connect Terraform" Done). Already on hold separately. Do not fold it into this plan.
+Terraform landed 2026-08-30 (Anant, commit `0e3fd33`): `connectors/terraform.py` is a proper `TerraformConnector(Connector)` (`authenticate`/`fetch_logs`/`poll_state`), with `terraform-init` (SAFE) and `terraform-apply` (APPROVAL) as gated Actions in `prash/actions/`. It was built to exactly the two-layer pattern §4 describes — useful independent confirmation the architecture is right. It still needs the `watch()`/`get_stats()`/`alert` treatment like every other connector, so it's included in the Phase 3 rollout (§6). *(Supersedes the earlier "Terraform doesn't exist / out of scope" note — that was true at the start of the day, not after `0e3fd33`.)*
 
 ## 6. Milestone plan
 
@@ -146,7 +146,7 @@ Terraform doesn't exist as a real connector (verified 2026-08-30 — zero refere
 
 ### Phase 3 — Roll out to the rest (repeat M2→M4→M6 per connector)
 
-Priority order, worst-covered surfaces first: **Grafana → PagerDuty → Kubernetes (upgrade to full watch/stats/alert) → GCP → AWS → Azure → GitHub → GitLab → Vercel → Snyk/Gitleaks.** Each connector: Anant real-exec → Aradhya NLP + fold into correlation. Each gets its own §8 line when it lands — don't wait for all ten.
+Priority order, worst-covered surfaces first: **Grafana → PagerDuty → Kubernetes (upgrade to full watch/stats/alert) → GCP → AWS → Azure → GitHub → GitLab → Vercel → Snyk/Gitleaks → Terraform.** Each connector: Anant real-exec → Aradhya NLP + fold into correlation. Each gets its own §8 line when it lands — don't wait for the whole set.
 
 ## 7. Test fixtures (including the one that doesn't exist yet)
 
