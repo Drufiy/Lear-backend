@@ -171,11 +171,30 @@ rollback run needs a fresh token from the account owner before reuse.
 ## GitHub / GitLab
 
 **Status: proven working (multiple sessions), fixtures are the live repos
-already in use** (`Drufiy/prashv2backend` for GitHub,
-`drufiyai-group/prash-ci-test` for GitLab). A broken CI run needs to be
-pushed to trigger a fresh failure — no standing "always broken" branch
-exists yet; consider adding one (a workflow that always fails on a
-dedicated branch) so this doesn't need a fresh push each time.
+already in use** (`Drufiy/Lear-backend` for GitHub,
+`drufiyai-group/prash-ci-test` for GitLab).
+
+**Standing always-broken CI fixture added (2026-08-30):** branch
+`prash-broken-ci` on `Drufiy/Lear-backend` carries a workflow
+(`.github/workflows/always-broken.yml`) that **always fails** — a
+"Simulate a broken step" that prints a realistic error and `exit 1`. It is
+gated to `on: push: branches: [prash-broken-ci]`, so it never runs on main
+or PRs and never affects real CI signal. Verified live: pushing the branch
+and an empty-commit re-trigger both produced `conclusion=failure` runs with
+the intended step failing (checkout/setup all green).
+
+To use the fixture (no fresh push needed — the branch's last run stays
+failed, and an empty commit re-triggers anytime):
+
+```
+prash fix <owner>/<repo> --ci --run-id <run-id> --noninteractive
+prash investigate <owner>/<repo> --ci
+git commit --allow-empty -m "re-trigger" && git push origin prash-broken-ci
+```
+
+GitLab's `drufiyai-group/prash-ci-test` still needs a fresh pipeline
+push to trigger a new failure — the always-broken fixture is GitHub-only
+for now.
 
 ## AWS
 
