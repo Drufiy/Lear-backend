@@ -13,12 +13,14 @@ seam Aradhya's schema built for us (§6 cross-track, schemas.py docstring).
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from rich.panel import Panel
 
 from . import ui
 from .brain.diagnosis_agent import (
+    compute_error_signature,
     deployment_name_from_pod,
     diagnose_failure,
     find_deployment_manifest,
@@ -28,7 +30,10 @@ from .brain.gitlab_log_fetcher import fetch_pipeline_logs
 from .brain.log_fetcher import fetch_workflow_logs
 from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
 from .brain.schemas import Diagnosis
+from .connectors.github import GitHubConnector
 from .connectors.kubernetes import get_pod_events, get_pod_logs, get_pod_status
+
+logger = logging.getLogger(__name__)
 
 # Actions Prash can dispatch on its own once the brain says so. rollback is
 # deliberately absent: it needs the owning Deployment's name, which Track B
@@ -140,33 +145,200 @@ async def diagnose_k8s_pod(
     )
 
 
-async def diagnose_ci_run(run_id: int, repo_full_name: str, access_token: str) -> MultiFailureResult:
+async def diagnose_ci_run(
+    run_id: int, repo_full_name: str, access_token: str, **diagnose_kwargs
+) -> MultiFailureResult:
     """Fetch a GitHub run's logs and split per-job with Track D's multi-failure
     diagnosis. commit_message is best-effort here (fetch_workflow_logs takes
-    run_id + repo only) — the brain still gets run context via workflow_name."""
+    run_id + repo only) — the brain still gets run context via workflow_name.
+    `diagnose_kwargs` (iteration / repeated_failure / previous_diagnosis) are
+    threaded through to diagnose_multi_failure so the reconcile loop's
+    repeated-failure directive reaches the brain."""
     logs = await fetch_workflow_logs(run_id, repo_full_name, access_token)
+    return await _diagnose_ci_logs(
+        logs, run_id, repo_full_name, workflow_name=f"github run {run_id}", **diagnose_kwargs
+    )
+
+
+async def _diagnose_ci_logs(
+    logs: str, run_id: int, repo_full_name: str, workflow_name: str, **diagnose_kwargs
+) -> MultiFailureResult:
+    """Shared log→diagnosis path used by both the one-shot and reconcile
+    flows, so the reconcile loop can pass already-fetched logs through
+    without fetching them twice."""
     return await diagnose_multi_failure(
         logs=logs,
         repo_full_name=repo_full_name,
         commit_message="(unknown — multi-failure diagnosis from run logs)",
-        workflow_name=f"github run {run_id}",
+        workflow_name=workflow_name,
+        **diagnose_kwargs,
     )
 
 
-async def diagnose_gitlab_ci_run(pipeline_id: int, project: str, access_token: str) -> MultiFailureResult:
+async def diagnose_gitlab_ci_run(
+    pipeline_id: int, project: str, access_token: str, **diagnose_kwargs
+) -> MultiFailureResult:
     """GitLab counterpart to diagnose_ci_run (Sprint 2 Tier 2, PRASH_V2.md
     §7b) -- same multi-failure diagnosis brain, fed from a pipeline's job
     traces instead of a workflow run's log ZIP. The brain itself is already
     provider-agnostic (it only ever sees preprocessed log text + a
     workflow_name label), so nothing downstream of fetch_pipeline_logs needs
-    to know this came from GitLab rather than GitHub."""
+    to know this came from GitLab rather than GitHub. `diagnose_kwargs` are
+    threaded to diagnose_multi_failure like diagnose_ci_run's."""
     logs = await fetch_pipeline_logs(pipeline_id, project, access_token)
-    return await diagnose_multi_failure(
-        logs=logs,
-        repo_full_name=project,
-        commit_message="(unknown — multi-failure diagnosis from pipeline logs)",
-        workflow_name=f"gitlab pipeline {pipeline_id}",
+    return await _diagnose_ci_logs(
+        logs, pipeline_id, project, workflow_name=f"gitlab pipeline {pipeline_id}", **diagnose_kwargs
     )
+
+
+def _run_result_succeeded(run_result) -> bool:
+    """True only when the apply-*-fix action actually ran and opened a PR.
+    Anything else (declined, needs approval, skipped, errored, circuit-open)
+    is not a fix attempt we can reconcile against — it never reached the
+    repository, so there is no CI run to wait on."""
+    from .dispatch import ExecutionOutcome
+
+    return (
+        run_result is not None
+        and run_result.outcome is ExecutionOutcome.EXECUTED
+        and run_result.result.status.value == "succeeded"
+    )
+
+
+async def reconcile_ci_fix(
+    *,
+    repo_full_name: str,
+    access_token: str,
+    diagnose_fn,
+    provider: str,
+    run_id: int,
+    apply_action_id: str,
+    ctx,
+    dispatcher,
+    branch: str,
+    first_result: MultiFailureResult,
+    max_iterations: int = 2,
+    poll_seconds: int = 20,
+) -> MultiFailureResult:
+    """Reconcile a CI fix attempt the way the v1 reconciler was supposed to
+    (the dead `repeated_failure` machinery in diagnosis_agent.py, found
+    2026-08-30 — see TESTING_SETUP.md "Repeated-identical-failure handling").
+
+    `first_result` is the diagnosis already computed for the original run
+    (the caller renders it and checks there is something to fix). This loop
+    applies that fix, waits for the fix branch's CI run, and if it fails with
+    the IDENTICAL error signature re-diagnoses with `repeated_failure=True`
+    to force a different hypothesis — the previous fix did not address the
+    real cause. If the signature CHANGED, the fix altered the failure, so
+    re-diagnose normally against the new evidence.
+
+    Bounded: `max_iterations` total fix attempts (default 2 — the retry budget
+    language in the repeated-failure directive: "Repeating the same hypothesis
+    will exhaust the remaining retry budget with no progress"). Stops the
+    moment a run passes. Never silently drops a partial fix: if the budget is
+    exhausted while runs still fail, the last result is returned and the
+    already-open PR stays open for a human.
+    """
+    iteration = 1
+    result = first_result
+    previous_signature = compute_error_signature(
+        await _fetch_run_logs(provider, run_id, repo_full_name, access_token)
+    )
+    previous_diagnosis: dict | None = None
+
+    for _ in range(max_iterations):
+        # Feed this iteration's diagnosis into the apply action, then run it.
+        changes = result.combined_files_changed()
+        if not changes:
+            # Nothing left to apply — the latest diagnosis has no fix.
+            logger.info("reconcile: latest diagnosis has no file changes; stopping")
+            return result
+        ctx.extra["file_changes"] = changes
+
+        run_result = dispatcher.run(apply_action_id, ctx, ask=None)
+        if not _run_result_succeeded(run_result):
+            # Fix never landed (declined/needs_approval/errored). Nothing to
+            # reconcile — report the diagnosis we have and stop.
+            return result
+
+        # The fix branch now has a commit; wait for its CI run to settle.
+        gh = ctx.extra["connectors"]["github"]
+        new_run_id = _wait_for_fix_branch_run(gh, repo_full_name, branch, poll_seconds=poll_seconds)
+        if new_run_id is None:
+            # Run never appeared/settled (branch push may not trigger CI, or
+            # the poll budget ran out). Honest stop — do not loop forever.
+            logger.warning(f"reconcile: no completed run observed for branch {branch!r}; stopping")
+            return result
+
+        run_outcome = _run_conclusion(gh, repo_full_name, new_run_id)
+        if run_outcome == "success":
+            logger.info(f"reconcile: fix branch run {new_run_id} passed — no further iteration needed")
+            return result
+
+        iteration += 1
+        if iteration > max_iterations:
+            logger.warning(f"reconcile: retry budget exhausted after {max_iterations} attempts")
+            return result
+
+        new_logs = await _fetch_run_logs(provider, new_run_id, repo_full_name, access_token)
+        new_signature = compute_error_signature(new_logs)
+        repeated = new_signature == previous_signature
+        logger.info(
+            f"reconcile: iteration {iteration} signature {'IDENTICAL' if repeated else 'changed'} "
+            f"({previous_signature[:8]} vs {new_signature[:8]}) — re-diagnosing"
+        )
+        previous_signature = new_signature
+
+        result = await _diagnose_ci_logs(
+            logs=new_logs,
+            run_id=new_run_id,
+            repo_full_name=repo_full_name,
+            workflow_name=_workflow_name_for(diagnose_fn, new_run_id),
+            iteration=iteration,
+            previous_diagnosis=previous_diagnosis,
+            repeated_failure=repeated,
+        )
+        previous_diagnosis = result.model_dump() if hasattr(result, "model_dump") else result.__dict__
+
+    return result
+
+
+def _workflow_name_for(diagnose_fn, run_id: int) -> str:
+    if diagnose_fn is diagnose_ci_run:
+        return f"github run {run_id}"
+    return f"gitlab pipeline {run_id}"
+
+
+def _wait_for_fix_branch_run(gh: GitHubConnector, repo: str, branch: str, poll_seconds: int = 20) -> int | None:
+    """Poll until a completed workflow run exists on `branch` (the fix branch
+    CI). Returns its id, or None if nothing settled within a bounded budget
+    (80s by default — a branch push that triggers CI usually completes the
+    run within that, and failing fast is better than hanging a CLI)."""
+    import time
+
+    for _ in range(4):
+        time.sleep(poll_seconds)
+        runs = gh.workflow_runs(repo, branch=branch, limit=5)
+        completed = [r for r in runs if r.get("status") == "completed"]
+        if completed:
+            return int(completed[0]["id"])
+    return None
+
+
+def _run_conclusion(gh: GitHubConnector, repo: str, run_id: int) -> str:
+    runs = gh.workflow_runs(repo, limit=5)
+    for r in runs:
+        if int(r.get("id")) == run_id:
+            return r.get("conclusion") or r.get("status") or "unknown"
+    return "unknown"
+
+
+async def _fetch_run_logs(provider: str, run_id: int, repo: str, access_token: str) -> str:
+    """Fetch fresh logs for a specific run, by provider (workflow logs for
+    GitHub, pipeline traces for GitLab)."""
+    if provider == "github":
+        return await fetch_workflow_logs(run_id, repo, access_token)
+    return await fetch_pipeline_logs(run_id, repo, access_token)
 
 
 def render_diagnosis(diagnosis: Diagnosis, console) -> None:

@@ -159,11 +159,68 @@ dedicated branch) so this doesn't need a fresh push each time.
 
 ## AWS
 
-**Status: credentials present, never live-tested this connector.**
+**Status: fixture added and unit-tested (`break_aws.py` + `poll_state()`
+service-level health), still needs a live run against a real EC2 instance
+to be marked proven. Live run is blocked on AWS credentials (see below).**
 
-No fixture exists. Needs a real EC2 instance or equivalent the
-`execute-aws` SSH-fallback path can target, plus a way to force a real
-failure state.
+`scripts/testing/break_aws.py` owns one EC2 instance end to end — a real
+instance tagged `Name=prash-test-fixture` (or the id you pass via
+`EC2_INSTANCE_ID` / `--instance-id`). It forces a real failure state on
+demand: it installs a fake `prash-test-fixture.service` systemd unit whose
+ExecStart is a background loop — the unit reports `active (running)` while
+the simulated app is genuinely wedged. The loop writes a watchdog line to
+BOTH journald and `/tmp/prash-test-fixture-watchdog.log` (the on-disk file
+is what `execute-aws tail` reads). `--heal` removes the unit, the marker,
+and the loop, restoring the instance.
+
+```bash
+python3 scripts/testing/break_aws.py                 # force failure state
+python3 scripts/testing/break_aws.py --heal          # restore the instance
+```
+
+The script requires credentials from `.env` (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_REGION`) and a running instance. It tries the
+SSM path first; if the SSM agent is absent it exercises the exact
+`execute-aws` SSH-fallback path via `--pem <path>`.
+
+**Service-level health:** `poll_state()` now goes one step past instance
+status checks — when a running instance has OK checks, it asks the box
+itself (via SSM, or SSH if a `pem_path` is passed) whether the fixture's
+break marker `/tmp/prash-test-fixture-break` exists. Present → `DEGRADED`
+with `detail["marker"]` set. This is what makes `prash investigate` report
+degraded after `break_aws.py` runs, instead of a misleading `healthy`.
+SSM/SSH failures are swallowed (never fabricate a state we couldn't
+verify).
+
+**`fetch_logs()` reads EC2 console output** (`get_console_output`) — the
+hypervisor serial console, which only captures boot messages, NOT the
+watchdog file. The ONLY way to read the watchdog log is `execute-aws`
+(SSM/SSH), which is what the test command below does.
+
+**Prash prompt to test with** (after running the break script):
+
+```
+what's wrong with prash-test-fixture
+```
+
+or the exact command form:
+
+```
+prash investigate prash-test-fixture --provider aws
+```
+
+To test `execute-aws` itself (needs `--noninteractive` and the SSM agent or
+a `--pem`):
+
+```
+prash run execute-aws prash-test-fixture --command "tail -n 20 /tmp/prash-test-fixture-watchdog.log" --noninteractive
+```
+
+**Live-verify script:** `scripts/verify_aws_live.py` is the "cold verify"
+script — it authenticates, locates/polls/logs a real instance, asks an LLM
+for a lightweight command, and runs it through the connector (SSM with SSH
+fallback). The pem path is no longer hardcoded: pass `--pem <path>` or set
+`PRASH_PEM_PATH` (it errors cleanly instead of prompting interactively).
 
 ## Azure / GCP
 
@@ -182,10 +239,40 @@ Already fully verified end to end in sprint 1.
 
 ## Gitleaks
 
-**Status: connector logic unit-tested only. The `gitleaks` binary is not
-installed on this machine** — `authenticate()` correctly reports that, but
-there's no way to live-test a real scan until it's installed
-(`brew install gitleaks`).
+**Status: live-verified against a real binary and a real leak (2026-08-30).**
+
+The `gitleaks` binary is installed on this machine via winget (Gitleaks
+8.30.1 — no Homebrew on Windows; `winget install Gitleaks.Gitleaks` puts
+`gitleaks.exe` under
+`%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gitleaks.Gitleaks_Microsoft.Winget.Source_8wekyb3d8bbwe\`,
+with a `gitleaks` PATH alias in new shells).
+
+**Live verification performed** against a real git repo fixture containing
+actual committed secrets (random high-entropy `glpat_*` GitLab-style token +
+`AKIA*` AWS-style key, both committed to history so a history scan finds
+them):
+
+- `authenticate()` → `True` (real binary found)
+- `locate()` → correctly reports the fixture as a git repo
+- `poll_state()` on the leaky repo → `FAILED`, `leak_count: 2`, findings
+  scrubbed (only `rule_id` / `file` / `line` / `fingerprint` — the raw
+  `Match`/`Secret` text is stripped, confirmed the secret value never
+  appears in connector or `prash investigate` output)
+- `fetch_logs()` → 2 real lines (`generic-api-key in config.py:1` etc.)
+- `poll_state()` on a clean working tree (`no_git=True`) → `HEALTHY`
+- Full CLI path: `prash investigate <path> --provider gitleaks` → `failed`
+  with the scrubbed findings
+
+Two fixture gotchas worth recording: gitleaks' default rules deliberately
+skip the AWS documentation example key (`AKIAIOSFODNN7EXAMPLE` — contains
+the `example` stopword) and any token containing the literal
+`abcdefghijklmnopqrstuvwxyz` substring (global allowlist stopword). A
+realistic live fixture needs genuinely random high-entropy secrets, not
+docs-style examples.
+
+Unit tests (`tests/test_gitleaks_connector.py`, 12) still mock the binary;
+the live run above proves the connector's subprocess/report-parsing path
+works against the real thing.
 
 ## Terraform
 
@@ -213,16 +300,23 @@ current `prash/brain/diagnosis_agent.py` (this code was ported from
   `verified_rate + 0.2` based on real outcome history, plus a hard
   downgrade path for low-confidence `safe_auto_apply`/`review_recommended`
   fixes.
-- **Repeated-identical-failure handling: built, but dead code.**
+- **Repeated-identical-failure handling: wired up (2026-08-30), opt-in.**
   `compute_error_signature()` exists and is correct, and
   `diagnose_failure(..., repeated_failure=True)` correctly forces a
-  different-hypothesis directive when set — but **nothing in the actual
-  retry path ever calls `compute_error_signature()` or passes
-  `repeated_failure=True`.** Neither `prash/fix.py` nor
-  `prash/brain/multi_diagnosis.py` (the two real callers) wire it in. A
-  stale comment references a `push_handler.py` retry flow that doesn't
-  exist in this repo (leftover from the `drufiy-backend` port). Net
-  effect: today, a second/third diagnosis attempt with the exact same
-  wrong root cause will retry the same hypothesis indefinitely instead of
-  being forced to reconsider — the original June bug is still live in
-  practice, just hidden behind unused-but-correct machinery.
+  different-hypothesis directive when set. **The gap that made it dead code
+  was real: nothing in the actual retry path called either.** `prash/fix.py`
+  and `prash/brain/multi_diagnosis.py` (the two real callers) never
+  computed a signature or passed `repeated_failure=True`, and — the deeper
+  issue — there was no retry loop at all: `cmd_fix --ci` was one-shot
+  (diagnose → apply → exit), so a wrong hypothesis was never revisited. A
+  stale comment referenced a `push_handler.py` retry flow that doesn't
+  exist in this repo (leftover from the `drufiy-backend` port). **Fixed by
+  adding the reconcile loop back:** `prash fix <owner>/<repo> --ci
+  --run-id <n> --reconcile` now applies the fix, waits for the fix branch's
+  CI run, compares `compute_error_signature()` between the original and fix
+  branch runs, and re-diagnoses with `repeated_failure=True` when the
+  signature is identical (forcing a different hypothesis) or normally when
+  it changed. Bounded by `PRASH_CI_RECONCILE_MAX_ITERATIONS` (default 2),
+  stops the moment a run passes, and never silently drops a partial fix —
+  the already-open PR stays open for a human if the budget is exhausted.
+  Default behavior is unchanged (one-shot) unless `--reconcile` is passed.

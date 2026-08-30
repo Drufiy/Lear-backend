@@ -468,6 +468,32 @@ def cmd_fix(args: argparse.Namespace) -> int:
         ctx.extra["file_changes"] = changes
         ctx.extra[run_extra_key] = args.run_id
         try:
+            if args.reconcile:
+                # The v1 reconciler loop (PRASH_V2.md §10, 2026-08-30): after
+                # apply-*-fix opens a PR on the fix branch, wait for that
+                # branch's CI and re-diagnose with repeated_failure=True when
+                # the error signature is unchanged — forcing a different
+                # hypothesis instead of retrying the same wrong fix.
+                from .fix import reconcile_ci_fix
+
+                branch = f"prash/fix-run-{args.run_id}"
+                fix_result = asyncio.run(
+                    reconcile_ci_fix(
+                        repo_full_name=args.target,
+                        access_token=creds[token_key],
+                        diagnose_fn=diagnose_fn,
+                        provider=provider,
+                        run_id=args.run_id,
+                        apply_action_id=apply_action_id,
+                        ctx=ctx,
+                        dispatcher=dispatcher,
+                        branch=branch,
+                        first_result=result,
+                        max_iterations=int(creds.get("PRASH_CI_RECONCILE_MAX_ITERATIONS", "2")),
+                    )
+                )
+                render_multi_failure(fix_result, console)
+                return 0
             run_result = dispatcher.run(apply_action_id, ctx, ask=None if args.noninteractive else CliAsk())
         except KeyError as exc:
             console.print(f"[red]{exc}[/red]")
@@ -926,6 +952,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     fix.add_argument("--env", default=None, help="target environment (k8s: defaults to the pod's namespace)")
+    fix.add_argument("--reconcile", action="store_true", help="(CI only) after applying a fix, wait for the fix branch's CI run and re-diagnose with repeated_failure=True if the error signature is unchanged — the v1 reconciler loop, bounded to PRASH_CI_RECONCILE_MAX_ITERATIONS (default 2)")
     fix.add_argument("--mode", default=None, help="permission mode: read-only|ask|auto-safe|environment-scoped|bypass (default: PRASH_PERMISSION_MODE or ask)")
     fix.add_argument("--dry-run", action="store_true", help="plan only; never touch infrastructure")
     fix.add_argument("--noninteractive", action="store_true", help="never prompt; missing secrets return NEEDS_INPUT")

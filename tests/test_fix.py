@@ -41,6 +41,7 @@ def _args(**over) -> Namespace:
         "run_id": None,
         "env": None,
         "mode": None,
+        "reconcile": False,
         "dry_run": False,
         "noninteractive": True,
         "grant": False,
@@ -389,6 +390,266 @@ def test_diagnose_gitlab_ci_run_passes_logs_to_multi_diagnosis(monkeypatch):
     assert seen["repo_full_name"] == "acme/api"
     assert "=== backend (failed) ===" in seen["logs"]
     assert seen["workflow_name"] == "gitlab pipeline 789"
+
+
+# ── reconcile loop (PRASH_V2.md §10, 2026-08-30) ─────────────────────────────
+# Makes the dead `repeated_failure` machinery live: after apply-*-fix opens a
+# PR on the fix branch, wait for that branch's CI and re-diagnose with
+# repeated_failure=True when the error signature is unchanged.
+
+class _FakeGh:
+    """Minimal GitHubConnector stand-in: workflow_runs returns scripted runs,
+    with the fix-branch run conclusion switchable per test."""
+
+    def __init__(self, runs=None):
+        self.runs = runs or []
+        self.workflow_calls = 0
+
+    def workflow_runs(self, repo, branch="", limit=5):
+        self.workflow_calls += 1
+        if branch:
+            return [r for r in self.runs if r.get("branch") == branch]
+        return self.runs
+
+
+def _reconcile_args(**over):
+    base = {
+        "repo_full_name": "acme/api",
+        "access_token": "gh-token",
+        "provider": "github",
+        "run_id": 456,
+        "apply_action_id": "apply-ci-fix",
+        "branch": "prash/fix-run-456",
+        "max_iterations": 2,
+        "poll_seconds": 0,
+    }
+    base.update(over)
+    return base
+
+
+def _fake_dispatcher(sequence):
+    """Returns a dispatcher whose .run() pops from `sequence` (list of
+    RunResult) so a test can script "fix succeeds then fix fails" etc."""
+    calls = []
+
+    class _D:
+        def run(self, action_id, ctx, ask=None):
+            calls.append(action_id)
+            return sequence.pop(0)
+
+    return _D(), calls
+
+
+def _run_result_for(action_result):
+    from prash.dispatch import ExecutionOutcome
+
+    class _R:
+        outcome = ExecutionOutcome.EXECUTED
+        result = action_result
+
+        @property
+        def ok(self):
+            return self.result.status.value == "succeeded"
+
+    return _R()
+
+
+def _ok_result():
+    from prash.actions.contract import ActionResult, ActionResultStatus
+
+    return _run_result_for(ActionResult(status=ActionResultStatus.SUCCEEDED, summary="opened PR #1"))
+
+
+def _failed_result():
+    from prash.actions.contract import ActionResult, ActionResultStatus
+
+    return _run_result_for(ActionResult(status=ActionResultStatus.FAILED, summary="no file changes with content to apply"))
+
+
+def _reconcile_ctx(gh):
+    class _Ctx:
+        def __init__(self):
+            self.extra = {"connectors": {"github": gh}, "file_changes": []}
+
+    return _Ctx()
+
+
+async def _logs(text: str) -> str:
+    return text
+
+
+def test_reconcile_repeated_failure_when_signature_identical(monkeypatch):
+    """When the fix branch's CI fails with the IDENTICAL error signature, the
+    re-diagnosis receives repeated_failure=True — the exact wiring that was
+    dead before (TESTING_SETUP.md known-gap)."""
+    fixed = _diagnosis(files_changed=[FileChange(path="app.py", new_content="x = 1", explanation="fix")])
+    original = MultiFailureResult(diagnoses=[fixed], job_names=["backend"])
+    # Same error both runs -> identical signature
+    monkeypatch.setattr(fix_mod, "fetch_workflow_logs", lambda run_id, repo, token: "ERROR: boom\nTraceback (most recent call last):")
+    # Fix branch run fails; then re-diagnosis happens (no second dispatch — budget 1)
+    runs = [
+        {"id": 999, "status": "completed", "conclusion": "failure", "branch": "prash/fix-run-456"},
+    ]
+    gh = _FakeGh(runs)
+    dispatcher, calls = _fake_dispatcher([_ok_result()])
+
+    seen = {}
+
+    async def fake_diagnose_ci_run(run_id, repo, token, **kwargs):
+        return MultiFailureResult(
+            diagnoses=[_diagnosis(files_changed=[FileChange(path="app.py", new_content="y = 2", explanation="retry")])],
+            job_names=["backend"],
+        )
+
+    monkeypatch.setattr(fix_mod, "_fetch_run_logs", lambda provider, rid, repo, tok: _logs("ERROR: boom\nTraceback (most recent call last):"))
+    monkeypatch.setattr(fix_mod, "diagnose_ci_run", fake_diagnose_ci_run)
+
+    async def fake_diagnose_logs(**kwargs):
+        seen.update(kwargs)
+        return MultiFailureResult(
+            diagnoses=[_diagnosis(problem_summary="re-diagnosed", files_changed=[])],
+            job_names=["backend"],
+        )
+
+    monkeypatch.setattr(fix_mod, "_diagnose_ci_logs", fake_diagnose_logs)
+
+    asyncio.run(
+        fix_mod.reconcile_ci_fix(
+            **_reconcile_args(diagnose_fn=fake_diagnose_ci_run, ctx=_reconcile_ctx(gh), dispatcher=dispatcher, first_result=original)
+        )
+    )
+    assert seen["repeated_failure"] is True
+    assert seen["iteration"] == 2
+    assert calls == ["apply-ci-fix"]
+
+
+def test_reconcile_normal_rediagnosis_when_signature_changed(monkeypatch):
+    """When the fix branch's CI fails with a DIFFERENT signature, re-diagnose
+    normally (repeated_failure=False) — the fix changed the failure."""
+    fixed = _diagnosis(files_changed=[FileChange(path="app.py", new_content="x = 1", explanation="fix")])
+    original = MultiFailureResult(diagnoses=[fixed], job_names=["backend"])
+    monkeypatch.setattr(fix_mod, "fetch_workflow_logs", lambda run_id, repo, token: "ERROR: original boom")
+    runs = [
+        {"id": 999, "status": "completed", "conclusion": "failure", "branch": "prash/fix-run-456"},
+    ]
+    gh = _FakeGh(runs)
+    dispatcher, calls = _fake_dispatcher([_ok_result()])
+
+    seen = {}
+
+    async def fake_diagnose_ci_run(run_id, repo, token, **kwargs):
+        return MultiFailureResult(
+            diagnoses=[_diagnosis(files_changed=[FileChange(path="app.py", new_content="y = 2", explanation="retry")])],
+            job_names=["backend"],
+        )
+
+    # First fetch returns the ORIGINAL signature, re-fetch returns a NEW one
+    fetch_calls = []
+
+    async def fake_fetch(provider, rid, repo, tok):
+        fetch_calls.append(rid)
+        return "ERROR: brand new failure\nTraceback (most recent call last):" if len(fetch_calls) > 1 else "ERROR: original boom\nTraceback (most recent call last):"
+
+    monkeypatch.setattr(fix_mod, "_fetch_run_logs", fake_fetch)
+    monkeypatch.setattr(fix_mod, "diagnose_ci_run", fake_diagnose_ci_run)
+
+    async def fake_diagnose_logs(**kwargs):
+        seen.update(kwargs)
+        return MultiFailureResult(
+            diagnoses=[_diagnosis(problem_summary="re-diagnosed", files_changed=[])],
+            job_names=["backend"],
+        )
+
+    monkeypatch.setattr(fix_mod, "_diagnose_ci_logs", fake_diagnose_logs)
+
+    asyncio.run(
+        fix_mod.reconcile_ci_fix(
+            **_reconcile_args(diagnose_fn=fake_diagnose_ci_run, ctx=_reconcile_ctx(gh), dispatcher=dispatcher, first_result=original)
+        )
+    )
+    assert seen["repeated_failure"] is False
+    assert seen["iteration"] == 2
+    assert calls == ["apply-ci-fix"]
+
+
+def test_reconcile_stops_when_fix_branch_run_passes(monkeypatch):
+    """If the fix branch's CI run passes, the loop stops immediately — no
+    re-diagnosis, no second dispatch."""
+    fixed = _diagnosis(files_changed=[FileChange(path="app.py", new_content="x = 1", explanation="fix")])
+    original = MultiFailureResult(diagnoses=[fixed], job_names=["backend"])
+    runs = [
+        {"id": 999, "status": "completed", "conclusion": "success", "branch": "prash/fix-run-456"},
+    ]
+    gh = _FakeGh(runs)
+    dispatcher, calls = _fake_dispatcher([_ok_result()])
+    monkeypatch.setattr(fix_mod, "_fetch_run_logs", lambda provider, rid, repo, tok: _logs("ERROR: boom"))
+
+    diagnose_calls = []
+
+    async def fake_diagnose_ci_run(run_id, repo, token, **kwargs):
+        diagnose_calls.append(run_id)
+        return original
+
+    result = asyncio.run(
+        fix_mod.reconcile_ci_fix(
+            **_reconcile_args(diagnose_fn=fake_diagnose_ci_run, ctx=_reconcile_ctx(gh), dispatcher=dispatcher, first_result=original)
+        )
+    )
+    # Only the original run was diagnosed; loop stopped at success
+    assert diagnose_calls == []
+    assert result is original
+    assert calls == ["apply-ci-fix"]
+
+
+def test_reconcile_stops_when_fix_never_lands(monkeypatch):
+    """If the apply action does not succeed (declined/errored), the loop stops
+    and returns the diagnosis it has — nothing to reconcile."""
+    fixed = _diagnosis(files_changed=[FileChange(path="app.py", new_content="x = 1", explanation="fix")])
+    original = MultiFailureResult(diagnoses=[fixed], job_names=["backend"])
+    gh = _FakeGh([])
+    dispatcher, calls = _fake_dispatcher([_failed_result()])
+    monkeypatch.setattr(fix_mod, "_fetch_run_logs", lambda provider, rid, repo, tok: _logs("ERROR: boom"))
+
+    result = asyncio.run(
+        fix_mod.reconcile_ci_fix(
+            **_reconcile_args(diagnose_fn=fake_diagnose_ci_run, ctx=_reconcile_ctx(gh), dispatcher=dispatcher, first_result=original)
+        )
+    )
+    assert result is original
+    assert calls == ["apply-ci-fix"]
+
+
+def test_reconcile_budget_exhausted_stops(monkeypatch):
+    """With max_iterations=1, one failed fix branch run exhausts the budget and
+    the loop stops without a second diagnosis."""
+    fixed = _diagnosis(files_changed=[FileChange(path="app.py", new_content="x = 1", explanation="fix")])
+    original = MultiFailureResult(diagnoses=[fixed], job_names=["backend"])
+    runs = [
+        {"id": 999, "status": "completed", "conclusion": "failure", "branch": "prash/fix-run-456"},
+    ]
+    gh = _FakeGh(runs)
+    dispatcher, calls = _fake_dispatcher([_ok_result()])
+    monkeypatch.setattr(fix_mod, "_fetch_run_logs", lambda provider, rid, repo, tok: _logs("ERROR: boom"))
+
+    diagnose_calls = []
+
+    async def fake_diagnose_ci_run(run_id, repo, token, **kwargs):
+        diagnose_calls.append(run_id)
+        return original
+
+    result = asyncio.run(
+        fix_mod.reconcile_ci_fix(
+            **_reconcile_args(diagnose_fn=fake_diagnose_ci_run, ctx=_reconcile_ctx(gh), dispatcher=dispatcher, first_result=original, max_iterations=1)
+        )
+    )
+    # Budget of 1: one dispatch, run failed, budget exhausted before re-diagnosis
+    assert diagnose_calls == []
+    assert result is original
+    assert calls == ["apply-ci-fix"]
+
+
+async def fake_diagnose_ci_run(run_id, repo, token, **kwargs):
+    return MultiFailureResult(diagnoses=[], job_names=[])
 
 
 # ── the manifest-fix path (PRASH_V2.md §9, 2026-08-16) ──────────────────────

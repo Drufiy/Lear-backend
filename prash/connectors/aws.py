@@ -145,10 +145,83 @@ class AWSConnector(Connector):
                 "instance_type": instance_info["instance_type"],
                 "aws_state": state_name
             }
+
+            # Service-level health, not just instance-level: when the instance
+            # is up and its status checks pass, ask the box itself whether the
+            # prash test fixture is wedged (marker file present). This is what
+            # makes `prash investigate prash-test-fixture --provider aws`
+            # report DEGRADED after scripts/testing/break_aws.py forces the
+            # failure state -- the instance stays HEALTHY at the EC2 level
+            # (a running instance with OK checks) while the app it simulates
+            # is genuinely broken, exactly the split TESTING_SETUP.md promises.
+            # Mirrors the Datadog connector's poll_state(), which actively
+            # reads the monitor's real overall_state rather than mapping
+            # metadata.
+            if state == ConnectorState.HEALTHY:
+                try:
+                    marker_present = self._marker_present(instance_id, kwargs.get("pem_path"))
+                    if marker_present:
+                        state = ConnectorState.DEGRADED
+                        detail["marker"] = "prash-test-fixture-break"
+                except Exception:  # noqa: BLE001 — never fabricate a degraded state we couldn't verify
+                    pass
+
             return ResourceState(resource, state, detail)
             
         except botocore.exceptions.ClientError as e:
             return ResourceState(resource, ConnectorState.UNKNOWN, {"error": str(e)})
+
+    def _marker_present(self, instance_id: str, pem_path: str | None = None) -> bool:
+        """Return True if the prash test fixture's break marker exists on the
+        instance. Uses SSM first; falls back to SSH when pem_path is given
+        (the exact fallback execute-aws exercises). Never raises.
+        """
+        session = self._get_boto_session()
+        ssm = session.client("ssm")
+        cmd = "test -f /tmp/prash-test-fixture-break && echo PRESENT || echo ABSENT"
+        try:
+            resp = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [cmd]},
+                TimeoutSeconds=30,
+            )
+            command_id = resp["Command"]["CommandId"]
+            # Poll until the invocation finishes -- a single immediate read can
+            # catch it still Pending/InProgress and wrongly report ABSENT.
+            for _ in range(15):
+                time.sleep(2)
+                inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+                if inv.get("Status") not in ("Pending", "InProgress"):
+                    return "PRESENT" in inv.get("StandardOutputContent", "")
+            return False
+        except Exception:  # noqa: BLE001 — SSM unavailable; fall through to SSH if we have a pem
+            pass
+
+        if not pem_path or not os.path.exists(pem_path):
+            return False
+
+        try:
+            ec2 = session.client("ec2")
+            inst = ec2.describe_instances(InstanceIds=[instance_id])
+            public_ip = inst["Reservations"][0]["Instances"][0]["PublicIpAddress"]
+        except (KeyError, IndexError):
+            return False
+
+        try:
+            result = subprocess.run(
+                ["ssh", "-i", pem_path,
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "ConnectTimeout=10",
+                 f"ubuntu@{public_ip}", cmd],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            return "PRESENT" in result.stdout
+        except Exception:  # noqa: BLE001 — same honesty rule as the SSM path
+            return False
 
     def fetch_logs(self, resource: str, **kwargs: Any) -> list[str]:
         """Fetch EC2 console output."""

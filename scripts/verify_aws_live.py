@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import os
 import boto3
@@ -6,6 +7,11 @@ from prash.credentials import CredentialStore
 from prash.connectors.aws import AWSConnector
 
 async def main():
+    parser = argparse.ArgumentParser(description="Live-verify the AWS connector against a real instance.")
+    parser.add_argument("--pem", help="Path to an SSH .pem for the SSH fallback (default: PRASH_PEM_PATH env).")
+    args = parser.parse_args()
+    pem_path = args.pem or os.environ.get("PRASH_PEM_PATH")
+
     print("--- Starting Live Infra Verification ---")
     
     # 1. Load Credentials
@@ -134,12 +140,13 @@ async def main():
             print("------------------------")
     except SSMFailedNeedsSSH as e:
         print(f"\n[!] {e}")
-        default_pem = r"C:\Users\anant\Downloads\sensitive\bithub.pem"
-        pem_path = input(f"Enter path to your .pem file [{default_pem}]: ").strip()
         if not pem_path:
-            pem_path = default_pem
-            
-        print("\nRetrying execution with SSH fallback...")
+            print("ERROR: No PEM path given. Pass --pem or set PRASH_PEM_PATH to use the SSH fallback.")
+            return
+        if not os.path.exists(pem_path):
+            print(f"ERROR: PEM file not found at {pem_path}")
+            return
+        print(f"\nRetrying execution with SSH fallback (pem: {pem_path})...")
         res = connector.execute_command(instance_id, command, pem_path=pem_path)
         if "error" in res:
             print(f"ERROR: {res['error']}")

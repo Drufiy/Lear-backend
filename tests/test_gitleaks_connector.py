@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from prash.connectors.gitleaks import GitleaksConnector, GitleaksError
+from prash.connectors.gitleaks import GitleaksConnector
 
 
 def _fake_run_writing_report(findings):

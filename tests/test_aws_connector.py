@@ -119,8 +119,9 @@ def test_poll_state_running(mock_credentials):
     session = boto3.Session(region_name="us-east-1")
     ec2_client = session.client("ec2")
     sts_client = session.client("sts")
+    ssm_client = session.client("ssm")
     
-    with Stubber(ec2_client) as ec2_stubber, Stubber(sts_client) as sts_stubber:
+    with Stubber(ec2_client) as ec2_stubber, Stubber(sts_client) as sts_stubber, Stubber(ssm_client) as ssm_stubber:
         sts_stubber.add_response("get_caller_identity", {})
         sts_stubber.add_response("get_caller_identity", {})
         
@@ -133,15 +134,70 @@ def test_poll_state_running(mock_credentials):
             "InstanceStatuses": [{"InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "ok"}}]
         })
         
+        # Marker check: no marker present -> stays HEALTHY
+        ssm_stubber.add_response("send_command", {
+            "Command": {"CommandId": "aaaaaaaa-1111-2222-3333-444444444444"}
+        })
+        ssm_stubber.add_response("get_command_invocation", {
+            "Status": "Success",
+            "StandardOutputContent": "ABSENT\n",
+            "StandardErrorContent": "",
+        })
+        
         def mock_client(svc):
             if svc == "ec2": return ec2_client
             if svc == "sts": return sts_client
+            if svc == "ssm": return ssm_client
             
         connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
         
         state = connector.poll_state("i-123")
         assert state.state == ConnectorState.HEALTHY
         assert state.detail["aws_state"] == "running"
+
+
+def test_poll_state_running_marker_degraded(mock_credentials):
+    """When the prash test fixture's break marker is present, a running
+    instance with OK status checks reports DEGRADED, not HEALTHY -- the
+    service-level health split TESTING_SETUP.md promises."""
+    connector = AWSConnector(mock_credentials)
+    session = boto3.Session(region_name="us-east-1")
+    ec2_client = session.client("ec2")
+    sts_client = session.client("sts")
+    ssm_client = session.client("ssm")
+    
+    with Stubber(ec2_client) as ec2_stubber, Stubber(sts_client) as sts_stubber, Stubber(ssm_client) as ssm_stubber:
+        sts_stubber.add_response("get_caller_identity", {})
+        sts_stubber.add_response("get_caller_identity", {})
+        
+        ec2_stubber.add_response("describe_instances", {
+            "Reservations": [{"Instances": [{"InstanceId": "i-123", "InstanceType": "t2", "State": {"Name": "running"}}]}]
+        })
+        
+        ec2_stubber.add_response("describe_instance_status", {
+            "InstanceStatuses": [{"InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "ok"}}]
+        })
+        
+        # Marker present -> DEGRADED
+        ssm_stubber.add_response("send_command", {
+            "Command": {"CommandId": "bbbbbbbb-1111-2222-3333-444444444444"}
+        })
+        ssm_stubber.add_response("get_command_invocation", {
+            "Status": "Success",
+            "StandardOutputContent": "PRESENT\n",
+            "StandardErrorContent": "",
+        })
+        
+        def mock_client(svc):
+            if svc == "ec2": return ec2_client
+            if svc == "sts": return sts_client
+            if svc == "ssm": return ssm_client
+            
+        connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
+        
+        state = connector.poll_state("i-123")
+        assert state.state == ConnectorState.DEGRADED
+        assert state.detail["marker"] == "prash-test-fixture-break"
 
 
 def test_poll_state_status_check_failed(mock_credentials):
