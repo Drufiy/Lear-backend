@@ -22,6 +22,8 @@ import sys
 import time
 
 from prash.connectors.kubernetes import PodStatus, get_pod_status
+from prash.connectors.terraform import TerraformConnector
+from prash.connectors.base import ConnectorState
 from prash.notifications import send_team_notifications
 
 logger = logging.getLogger(__name__)
@@ -156,4 +158,58 @@ def run_watch_loop(
         if max_iterations is None or iterations < max_iterations:
             time.sleep(interval)
 
+    return state
+
+
+def _notify_terraform(resource: str, state_val: str, info: str, console=None, creds: dict | None = None) -> None:
+    title = f"Prash: Terraform {state_val} — {resource}"
+    message = f"Terraform state changed to {state_val}: {info}. Run `prash fix {resource}` to diagnose."
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    if console is not None:
+        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def run_terraform_watch_loop(
+    resource: str,
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+):
+    """Poll Terraform state to detect drift or state lock errors."""
+    interval = interval or _interval_from_env()
+    state = None
+    iterations = 0
+    connector = TerraformConnector(creds or {})
+    
+    while max_iterations is None or iterations < max_iterations:
+        # Check drift if configured, otherwise just parse state
+        check_drift = str((creds or {}).get("TERRAFORM_WATCH_DRIFT", "false")).lower() == "true"
+        current_res = connector.poll_state(resource, check_drift=check_drift)
+        
+        current_problem = None
+        if current_res.state in (ConnectorState.DEGRADED, ConnectorState.FAILED):
+            current_problem = current_res.detail.get("error") or current_res.detail.get("info") or current_res.state.value
+            
+        if current_problem is not None and current_problem != state:
+            _notify_terraform(resource, current_res.state.value, current_problem, console, creds)
+            state = current_problem
+        elif current_problem is None and state is not None:
+             state = None # resolved
+             
+        if console is not None and current_problem == state:
+            console.print(f"[dim]{resource}: State {current_res.state.value}, no new problems[/dim]")
+            
+        iterations += 1
+        if max_iterations is None or iterations < max_iterations:
+            time.sleep(interval)
+    
     return state

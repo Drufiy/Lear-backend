@@ -53,6 +53,8 @@ from .actions.restart_pod import RestartPodAction
 from .actions.snyk_ignore import SnykIgnoreIssueAction
 from .actions.rollback import RollbackAction
 from .actions.scale import ScaleAction
+from .actions.terraform_init import TerraformInitAction
+from .actions.terraform_apply import TerraformApplyAction
 from .actions.vercel_deploy import VercelRedeployAction, VercelRollbackAction
 from .audit import AuditLog
 from .circuit_breaker import CircuitBreaker
@@ -67,6 +69,7 @@ from .connectors.gitlab import GitLabConnector
 from .connectors.grafana import GrafanaConnector
 from .connectors.pagerduty import PagerDutyConnector
 from .connectors.snyk import SnykConnector
+from .connectors.terraform import TerraformConnector
 from .connectors.vercel import VercelConnector
 from .credentials import CredentialStore
 from .dispatch import AskFn, Dispatcher, ExecutionOutcome, RunResult
@@ -87,6 +90,7 @@ PROVIDERS: dict[str, type[Connector]] = {
     "pagerduty": PagerDutyConnector,
     "snyk": SnykConnector,
     "gitleaks": GitleaksConnector,
+    "terraform": TerraformConnector,
 }
 
 # Providers --ci diagnosis on `prash fix` knows how to drive. Not all of
@@ -314,6 +318,8 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             GrafanaSilenceAlertAction(),
             SnykIgnoreIssueAction(),
             GitleaksEscalateAction(),
+            TerraformInitAction(),
+            TerraformApplyAction(),
         ]
     )
     return dispatcher
@@ -615,7 +621,7 @@ def cmd_investigate(args: argparse.Namespace) -> int:
         # A real, present token that a health-check call briefly failed to
         # verify is not the same problem as no token at all, and "missing
         # token in local .env" actively points the user at the wrong fix.
-        if connector.name == "gitleaks":
+        if connector.name in ("gitleaks", "terraform"):
             hint = "missing binary on PATH"
         else:
             required = _PROVIDER_MIN_CREDS.get(connector.name, ())
@@ -707,11 +713,28 @@ def cmd_config(_args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    from .watcher import run_watch_loop
+    from .watcher import run_watch_loop, run_terraform_watch_loop
 
     store = CredentialStore.from_env()
     creds = store.load()
     _export_cluster_env(creds)
+    
+    provider = getattr(args, "provider", "kubernetes") or "kubernetes"
+
+    if provider == "terraform":
+        resource = getattr(args, "resource", ".")
+        console.print(f"[bold]Watching Terraform state in '{resource}'...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_terraform_watch_loop(resource, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    # Default kubernetes watcher
     # Read from os.environ (post-passthrough), not creds directly -- a
     # KUBE_NAMESPACE the user exported in their own shell must win over
     # .env, matching _export_cluster_env's own "shell wins" contract. creds
@@ -933,6 +956,8 @@ def build_parser() -> argparse.ArgumentParser:
     watch = sub.add_parser("watch", help="poll a namespace for CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck pods, notify on new problems", formatter_class=formatter_class)
     watch.add_argument("--namespace", default=None, help="default: KUBE_NAMESPACE from .env, or 'default'")
     watch.add_argument("--interval", type=int, default=None, help="poll interval in seconds (default: PRASH_WATCH_INTERVAL_SECONDS or 30)")
+    watch.add_argument("--provider", default="kubernetes", help="provider to poll: kubernetes (default) or terraform")
+    watch.add_argument("--resource", default=".", help="resource to poll (for terraform)")
     watch.set_defaults(func=cmd_watch)
 
     notify = sub.add_parser("notify", help="send a message to every configured team channel (Slack/Discord webhooks)", formatter_class=formatter_class)

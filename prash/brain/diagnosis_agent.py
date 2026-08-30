@@ -106,7 +106,7 @@ DIAGNOSIS_TOOL = {
             },
             "category": {
                 "type": "string",
-                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "unknown"],
+                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "unknown"],
                 "description": (
                     "code: app code bug. workflow_config: .github/workflows/*.yml wrong. "
                     "dependency: package.json/requirements.txt/go.mod issue. "
@@ -115,6 +115,7 @@ DIAGNOSIS_TOOL = {
                     "runtime: a RUNNING service is unhealthy right now (Kubernetes pod "
                     "CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck) — not a CI failure, "
                     "nothing to diff. See the KUBERNETES / RUNTIME FAILURES section below. "
+                    "infra_as_code: Terraform drift, missing modules, state lock errors, or provider auth failures. "
                     "unknown: cannot determine."
                 ),
             },
@@ -136,12 +137,14 @@ DIAGNOSIS_TOOL = {
             },
             "recommended_action": {
                 "type": ["string", "null"],
-                "enum": ["restart_pod", "rollback", None],
+                "enum": ["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply", None],
                 "description": (
-                    "ONLY populate when category='runtime'. Which infrastructure action "
+                    "ONLY populate when category='runtime' or 'infra_as_code'. Which infrastructure action "
                     "addresses this failure: restart_pod (clears a wedged/stuck container — "
                     "does NOT help if the image or command is genuinely broken, it will just "
-                    "crash-loop again), rollback (the last deployment introduced the problem). "
+                    "crash-loop again), rollback (the last deployment introduced the problem), "
+                    "terraform_init (resolves missing modules or uninitialized backend), "
+                    "terraform_apply (resolves config drift or applies pending state changes). "
                     "Leave null if no action can help, OR if you are instead populating `options` "
                     "below for a genuinely ambiguous case, OR — importantly — if you are proposing "
                     "a corrected Deployment manifest in files_changed (the manifest change IS the "
@@ -169,7 +172,7 @@ DIAGNOSIS_TOOL = {
                     "properties": {
                         "action": {
                             "type": ["string", "null"],
-                            "enum": ["restart_pod", "rollback", "scale", None],
+                            "enum": ["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply", None],
                             "description": "This option's action id, or null for 'no automated action, escalate to a human' as one of the ranked choices.",
                         },
                         "rationale": {
@@ -796,6 +799,17 @@ POD EVENTS: "Failed to pull image \"myapp:v2.1.0\": not found"
   root_cause: "Kubernetes cannot pull myapp:v2.1.0 — the tag doesn't exist in the registry (typo, or the build/push step for this tag never completed)."
   fix_description: "No available action fixes this — restarting the pod would retry pulling the exact same missing tag and fail identically. Verify the image tag was actually pushed, or that the Deployment references the correct tag."
   ← WRONG would be recommended_action="restart_pod" — this is exactly the state restart can never fix; recommending it anyway would waste a real action and give false hope.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INFRASTRUCTURE AS CODE / TERRAFORM FAILURES (category: infra_as_code)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When the failure is in Terraform (detected drift or plan errors):
+- If the logs mention "Plugin reinitialization required" or "Backend configuration changed": 
+  recommended_action="terraform_init", confidence: 0.9.
+- If the logs show Terraform drift (exit code 2) or pending changes: 
+  recommended_action="terraform_apply", confidence: 0.9.
+- If the logs show missing credentials or invalid configuration, fix the config or environment first before applying.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ASK, DON'T QUIT — WHEN TO OFFER OPTIONS INSTEAD OF ONE GUESS
