@@ -1,4 +1,4 @@
-"""Prash v2 terminal app — one merged surface (2026-08-24), replacing the
+"""Lear terminal app — one merged surface (2026-08-24), replacing the
 repl/tui split.
 
 Until now `prash repl` (plain-text, conversational, but only understood ~12
@@ -30,6 +30,10 @@ Keys:
     a            switch to Actions
     d            switch to Audit
     k            switch to Kubernetes
+    n            switch to Connectors
+    ctrl+p       command palette (Textual's own -- /connectors, tab jumps,
+                 config/circuit shortcuts; not model/mode, no runtime
+                 switch for either exists yet)
 """
 
 from __future__ import annotations
@@ -37,15 +41,18 @@ from __future__ import annotations
 import contextlib
 import io
 import os
-from typing import ClassVar
+import threading
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import Hit, Hits, Provider
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
+from . import cli as cli_mod
 from . import repl as repl_mod
 from . import ui as ui_mod
 from .actions.contract import RiskTier
@@ -147,6 +154,14 @@ DataTable > .datatable--cursor {{
 #chat-container {{
     height: 1fr;
     padding: 0;
+    align-horizontal: center;
+}}
+
+#chat-column {{
+    height: 1fr;
+    width: 100%;
+    max-width: 104;
+    padding: 0;
 }}
 
 #wordmark {{
@@ -226,6 +241,104 @@ def _verified_style(ok: bool) -> str:
     return _GOOD if ok else _DIM
 
 
+class PrashCommandProvider(Provider):
+    """ctrl+p command palette (Textual's own -- not a custom overlay).
+    Scoped to things Prash actually does today: jump to a tab, or run a
+    utility command already handled by process_line(). Deliberately does
+    NOT list /model or /mode -- there is no runtime model/permission-mode
+    switch implemented anywhere in this codebase yet; putting them in the
+    palette would advertise a feature that doesn't exist."""
+
+    def _commands(self):
+        app: PrashApp = self.app  # type: ignore[assignment]
+        return [
+            ("chat", "Switch to Chat", app.action_tab_chat),
+            ("overview", "Switch to Overview", app.action_tab_overview),
+            ("actions", "Switch to Actions — registered write actions", app.action_tab_actions),
+            ("audit", "Switch to Audit — recent action history", app.action_tab_audit),
+            ("kubernetes", "Switch to Kubernetes — live pod status", app.action_tab_k8s),
+            ("connectors", "Check every configured connector's auth, right now", app.action_check_connectors),
+            ("circuit status", "Run `circuit status` in Chat", lambda: app.run_chat_command("circuit status")),
+            ("config", "Run `config` in Chat — show local settings", lambda: app.run_chat_command("config")),
+            ("refresh", "Refresh dashboard data now", app.action_refresh),
+        ]
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for name, help_text, callback in self._commands():
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(score, matcher.highlight(name), callback, help=help_text)
+
+
+class ChatInteraction:
+    """Answers confirm/secret/choice prompts through the chat surface
+    instead of blocking on real stdin (see the long comment above
+    cli.py's `_confirm_action` for why a plain Prompt.ask() call hangs
+    forever from a Textual worker thread -- found live 2026-08-26,
+    `mute <monitor> for 30 minutes` never returned because
+    datadog-mute-monitor needs approval).
+
+    Renders the question into the chat log from the worker thread via
+    `call_from_thread`, then blocks *this worker thread only* (never the
+    UI -- the app stays fully responsive) on a `threading.Event` that the
+    main thread sets from `on_input_submitted` once the user's next typed
+    line arrives. A generous timeout auto-declines rather than leaking a
+    thread forever if the app is abandoned mid-question."""
+
+    _TIMEOUT_SECONDS = 300
+
+    def __init__(self, app: "PrashApp") -> None:
+        self.app = app
+
+    def _wait_for_answer(self, kind: str, lines: list[str]) -> str | None:
+        log = self.app.query_one("#chat-log", RichLog)
+        chat_input = self.app.query_one("#chat-input", Input)
+        event = threading.Event()
+        box: dict[str, str] = {}
+
+        def announce() -> None:
+            for line in lines:
+                log.write(line)
+            chat_input.placeholder = "y/n?" if kind == "confirm" else "type your answer"
+            self.app._chat_awaiting = (kind, event, box)
+
+        self.app.call_from_thread(announce)
+        answered = event.wait(self._TIMEOUT_SECONDS)
+
+        def restore() -> None:
+            self.app._chat_awaiting = None
+            chat_input.placeholder = "what's broken?"
+
+        if not answered:
+            self.app.call_from_thread(restore)
+            self.app.call_from_thread(log.write, "[no answer within 5 minutes -- treating as decline]")
+            return None
+        return box.get("value")
+
+    def confirm(self, action: Any, plan: Any, ctx: Any) -> bool:
+        hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
+        lines = [
+            f"? Target {ctx.target.resource} ({ctx.target.environment})",
+            f"  {plan.describe()}",
+            f"  Proceed with '{action.spec.id}'{hint}? [y/N]",
+        ]
+        value = self._wait_for_answer("confirm", lines)
+        return value is not None and value.lower().startswith("y")
+
+    def secret(self, name: str, hint: str) -> str:
+        prompt = f"? Value for secret '{name}'" + (f" ({hint})" if hint else "")
+        value = self._wait_for_answer("secret", [prompt])
+        return value or ""
+
+    def choose(self, question: str, choices: list[str], default: str) -> str | None:
+        lines = [f"? {question} [{'/'.join(choices)}] (default {default})"]
+        value = self._wait_for_answer("choice", lines)
+        if value is None:
+            return None
+        return value if value in choices else default
+
+
 class _StatCard(Horizontal):
     DEFAULT_CSS = """
     _StatCard {
@@ -248,9 +361,10 @@ class _StatCard(Horizontal):
 
 
 class PrashApp(App):
-    TITLE = "PRASH V2"
+    TITLE = "LEAR"
     SUB_TITLE = "local AI DevOps agent"
     CSS = CSS
+    COMMANDS = App.COMMANDS | {PrashCommandProvider}
 
     BINDINGS: ClassVar[list] = [
         Binding("q", "quit", "Quit", priority=True),
@@ -261,6 +375,7 @@ class PrashApp(App):
         Binding("a", "tab_actions", "Actions", key_display="a"),
         Binding("d", "tab_audit", "Audit", key_display="d"),
         Binding("k", "tab_k8s", "Kubernetes", key_display="k"),
+        Binding("n", "tab_connectors", "Connectors", key_display="n"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -276,17 +391,26 @@ class PrashApp(App):
                 yield self._compose_audit()
             with TabPane("Kubernetes", id="k8s"):
                 yield self._compose_k8s()
+            with TabPane("Connectors", id="connectors"):
+                yield self._compose_connectors()
         yield Static("", id="status-line")
         yield Footer()
 
     # ---- panes ---------------------------------------------------------
 
     def _compose_chat(self) -> Container:
+        # Design reference: https://claude.ai/code/artifact/5ea0ae2a-54ab-408f-8155-e7209b2f12c2
+        # -- a constrained, centered column, not content stretched edge to
+        # edge across whatever width the terminal happens to be. #chat-column
+        # carries the max-width; #chat-container just centers it.
         return Container(
-            Static("prash", id="wordmark"),
-            Static("local ai devops agent — type what's wrong, or `help`", id="wordmark-tag"),
-            RichLog(id="chat-log", wrap=True, markup=False, highlight=False, auto_scroll=True),
-            Input(placeholder="what's broken?", id="chat-input"),
+            Vertical(
+                Static("prash", id="wordmark"),
+                Static("local ai devops agent — type what's wrong, or `help`  ·  ctrl+p for connectors, tabs, everything else", id="wordmark-tag"),
+                RichLog(id="chat-log", wrap=True, markup=False, highlight=False, auto_scroll=True),
+                Input(placeholder="what's broken?", id="chat-input"),
+                id="chat-column",
+            ),
             id="chat-container",
         )
 
@@ -322,6 +446,17 @@ class PrashApp(App):
             DataTable(id="k8s-table", cursor_type="row"),
         )
 
+    def _compose_connectors(self) -> Vertical:
+        # Deliberately NOT on the 5s auto-refresh timer everything else uses
+        # -- unlike the Kubernetes tab's single local kubectl call, this is
+        # a real network round-trip to up to 10 separate external services.
+        # Checked once on first mount, and again on the shared 'r' refresh
+        # key, never on a background loop.
+        return Vertical(
+            Static("press [bold]r[/bold] to refresh — real auth checks, not free", id="connectors-hint"),
+            DataTable(id="connectors-table", cursor_type="row"),
+        )
+
     # ---- lifecycle -----------------------------------------------------
 
     def on_mount(self) -> None:
@@ -330,8 +465,11 @@ class PrashApp(App):
         self._chat_session = repl_mod.ReplSession(None)
         self._chat_pending = None
         self._chat_busy = False
+        self._chat_awaiting = None
         self.query_one("#chat-input", Input).focus()
+        self.query_one("#connectors-table", DataTable).add_columns("connector", "state", "detail")
         self._refresh()
+        self._refresh_connectors_tab()
         self.set_interval(REFRESH_SECONDS, self._refresh)
 
     # ---- chat ------------------------------------------------------------
@@ -345,6 +483,18 @@ class PrashApp(App):
             return
         log = self.query_one("#chat-log", RichLog)
         log.write(f"> {line}")
+        if self._chat_awaiting is not None:
+            # A confirm/secret/choice question is outstanding (see
+            # ChatInteraction) -- this line answers it, not a new command.
+            # Must be checked before _chat_busy: the worker that asked the
+            # question is still running (blocked on the answer), so
+            # _chat_busy is still True at this point.
+            _kind, answer_event, box = self._chat_awaiting
+            box["value"] = line
+            self._chat_awaiting = None
+            event.input.placeholder = "what's broken?"
+            answer_event.set()
+            return
         if self._chat_busy:
             log.write("(still working on the last one — hang on)")
             return
@@ -361,6 +511,11 @@ class PrashApp(App):
         buf = io.StringIO()
         old_file = ui_mod.console.file
         ui_mod.console.file = buf
+        # Any approval/secret/choice prompt hit while running this line goes
+        # through ChatInteraction instead of blocking on real stdin, which
+        # this worker thread can never receive (see ChatInteraction's
+        # docstring). Thread-local, so the plain CLI/REPL path is untouched.
+        cli_mod.set_interaction(ChatInteraction(self))
         try:
             # Both streams: argparse's own usage/error output on a bad line
             # goes to stderr, not through ui_mod.console at all -- stdout
@@ -371,6 +526,7 @@ class PrashApp(App):
                 )
         finally:
             ui_mod.console.file = old_file
+            cli_mod.clear_interaction()
         self.call_from_thread(self._on_chat_result, new_pending, buf.getvalue())
 
     def _on_chat_result(self, new_pending, output: str) -> None:
@@ -391,6 +547,72 @@ class PrashApp(App):
     def action_tab_chat(self) -> None:
         self.query_one(TabbedContent).active = "chat"
         self.query_one("#chat-input", Input).focus()
+
+    def run_chat_command(self, line: str) -> None:
+        """Programmatic equivalent of a user typing `line` into Chat and
+        pressing enter -- used by the command palette so `/circuit status`
+        etc. run through the exact same engine, not a shortcut around it."""
+        self.action_tab_chat()
+        if self._chat_busy:
+            return
+        log = self.query_one("#chat-log", RichLog)
+        log.write(f"> {line}")
+        self._chat_busy = True
+        self._run_chat_line(line)
+
+    def action_check_connectors(self) -> None:
+        """/connectors in the palette -- writes into Chat."""
+        self.action_tab_chat()
+        if self._chat_busy:
+            return
+        log = self.query_one("#chat-log", RichLog)
+        log.write("> /connectors")
+        self._chat_busy = True
+        self._run_connector_check("chat")
+
+    def _refresh_connectors_tab(self) -> None:
+        """The Connectors tab's own check -- same underlying worker, table
+        destination instead of chat. Never on the 5s auto timer (real
+        network calls to up to 10 external services); only on first mount
+        and the shared 'r' refresh key."""
+        if self._chat_busy:
+            return
+        self._chat_busy = True
+        self._run_connector_check("table")
+
+    @work(thread=True)
+    def _run_connector_check(self, destination: str) -> None:
+        from .cli import PROVIDERS
+        from .credentials import CredentialStore
+
+        creds = CredentialStore.from_env().load()
+        results = []
+        for name, cls in sorted(PROVIDERS.items()):
+            try:
+                ok = cls(creds).authenticate()
+            except Exception as exc:  # noqa: BLE001 — one connector's crash must not block the rest
+                results.append((name, False, str(exc)[:60]))
+                continue
+            results.append((name, ok, ""))
+        self.call_from_thread(self._on_connectors_checked, destination, results)
+
+    def _on_connectors_checked(self, destination: str, results: list[tuple[str, bool, str]]) -> None:
+        self._chat_busy = False
+        if destination == "chat":
+            log = self.query_one("#chat-log", RichLog)
+            for name, ok, err in results:
+                mark = f"[{_GOOD}]ok[/]" if ok else f"[{_BAD}]not configured[/]"
+                suffix = f"  {err}" if err else ""
+                log.write(Text.from_markup(f"  {name:<10} {mark}{suffix}"))
+            return
+        table = self.query_one("#connectors-table", DataTable)
+        table.clear()
+        for name, ok, err in results:
+            table.add_row(
+                f"[bold]{name}[/]",
+                f"[{_GOOD}]ok[/]" if ok else f"[{_BAD}]not configured[/]",
+                err or "",
+            )
 
     def _refresh(self) -> None:
         try:
@@ -502,6 +724,7 @@ class PrashApp(App):
 
     def action_refresh(self) -> None:
         self._refresh()
+        self._refresh_connectors_tab()
         self.notify("refreshed", timeout=2)
 
     def action_tab_overview(self) -> None:
@@ -515,6 +738,9 @@ class PrashApp(App):
 
     def action_tab_k8s(self) -> None:
         self.query_one(TabbedContent).active = "k8s"
+
+    def action_tab_connectors(self) -> None:
+        self.query_one(TabbedContent).active = "connectors"
 
 
 def run_tui() -> int:

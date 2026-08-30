@@ -1,6 +1,6 @@
 """AWS EC2 read-only connector.
 
-Reads credentials from the injected CredentialStore per Prash v2 philosophy.
+Reads credentials from the injected CredentialStore per Lear philosophy.
 Does not fall back to `~/.aws/credentials` implicitly unless the user added it to the env.
 """
 

@@ -1,4 +1,4 @@
-# Prash v2 — Hardening Phase Test Checklist
+# Lear — Hardening Phase Test Checklist
 
 Shared by Aradhya (macOS) and Aryan (Windows) — see `PRASH_V2.md` §6b for why this
 phase exists and the exit criteria this checklist exists to satisfy (specifically

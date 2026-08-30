@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -143,31 +144,72 @@ def _export_cluster_env(creds: dict[str, Any]) -> None:
             os.environ[key] = str(creds[key])
 
 
+# Real bug, caught live (2026-08-26): every prompt below reads real stdin
+# via Rich's Prompt.ask(). That's exactly right for the plain CLI/REPL --
+# both run on the main thread, and console.input() reads the same terminal
+# the user is typing into. But the Textual Chat surface runs each command
+# on a worker thread (`@work(thread=True)` in tui.py) while Textual's own
+# driver has exclusive raw-mode control of the real terminal; a blocking
+# input() call in that worker thread never receives a byte and hangs
+# forever, silently -- no error, no prompt visible, nothing. Live-verified:
+# `mute <monitor> for 30 minutes` from Chat hung indefinitely because
+# datadog-mute-monitor needs approval and CliAsk.ask() blocked on stdin
+# that could never arrive.
+#
+# Fix: every place that needs a human answer goes through one of these
+# three functions instead of calling Prompt.ask() directly. Each checks a
+# thread-local override first (set_interaction()/clear_interaction(),
+# used by tui.py's chat worker to hand the question to the chat log and
+# block only that worker thread on the user's next typed line) and falls
+# back to the exact original stdin-reading behavior when nothing has been
+# overridden -- the plain CLI/REPL path is byte-for-byte unchanged.
+_interaction_local = threading.local()
+
+
+def set_interaction(interaction: Any) -> None:
+    _interaction_local.current = interaction
+
+
+def clear_interaction() -> None:
+    _interaction_local.current = None
+
+
+def _current_interaction() -> Any:
+    return getattr(_interaction_local, "current", None)
+
+
+def _confirm_action(action: Any, plan: Plan, ctx: ActionContext) -> bool:
+    interaction = _current_interaction()
+    if interaction is not None:
+        return interaction.confirm(action, plan, ctx)
+    console.print(
+        Panel(
+            f"[bold]Target[/bold] [yellow]{ctx.target.resource}[/yellow]  [dim]({ctx.target.environment})[/dim]\n\n{plan.describe()}",
+            title=f"[bold]PRASH proposes · {action.spec.id}[/bold]",
+            border_style=ui.ACCENT,
+        )
+    )
+    hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
+    try:
+        answer = Prompt.ask(
+            f"Proceed with '{action.spec.id}'{hint}? [y/N]",
+            choices=["y", "n", "yes", "no"],
+            default="n",
+        )
+    except (EOFError, KeyboardInterrupt):
+        # Real bug, caught live (2026-08-14): no stdin available (piped
+        # input closed, Ctrl+D, or a script that forgot --noninteractive)
+        # raised an uncaught EOFError with a full traceback instead of a
+        # clean decline. Treat "can't get an answer" the same as "no" --
+        # never proceed with an action nobody actually confirmed.
+        console.print("\n[yellow]No input received -- treating as decline.[/yellow]")
+        return False
+    return answer.lower().startswith("y")
+
+
 class CliAsk(AskFn):
     def ask(self, action: Any, plan: Plan, ctx: ActionContext) -> bool:
-        console.print(
-            Panel(
-                f"[bold]Target[/bold] [yellow]{ctx.target.resource}[/yellow]  [dim]({ctx.target.environment})[/dim]\n\n{plan.describe()}",
-                title=f"[bold]PRASH proposes · {action.spec.id}[/bold]",
-                border_style=ui.ACCENT,
-            )
-        )
-        hint = f" ({action.spec.approval_hint})" if action.spec.approval_hint else ""
-        try:
-            answer = Prompt.ask(
-                f"Proceed with '{action.spec.id}'{hint}? [y/N]",
-                choices=["y", "n", "yes", "no"],
-                default="n",
-            )
-        except (EOFError, KeyboardInterrupt):
-            # Real bug, caught live (2026-08-14): no stdin available (piped
-            # input closed, Ctrl+D, or a script that forgot --noninteractive)
-            # raised an uncaught EOFError with a full traceback instead of a
-            # clean decline. Treat "can't get an answer" the same as "no" --
-            # never proceed with an action nobody actually confirmed.
-            console.print("\n[yellow]No input received -- treating as decline.[/yellow]")
-            return False
-        return answer.lower().startswith("y")
+        return _confirm_action(action, plan, ctx)
 
 
 def _parse_set_flags(pairs: list | None) -> dict[str, str]:
@@ -197,6 +239,9 @@ def _make_context(
     secret_input = None
     if not getattr(args, "noninteractive", False):
         def secret_input(name: str, hint: str) -> str:
+            interaction = _current_interaction()
+            if interaction is not None:
+                return interaction.secret(name, hint)
             prompt = f"Value for secret '{name}'" + (f" ({hint})" if hint else "")
             try:
                 return Prompt.ask(prompt, password=True)
@@ -348,11 +393,17 @@ def _pick_option(diagnosis: Any) -> str | None:
     options = diagnosis.options or []
     choices = [str(i) for i in range(1, len(options) + 1)]
     default = str(next((i for i, o in enumerate(options, start=1) if o.is_default), 1))
-    try:
-        raw = Prompt.ask("Which option should Prash execute?", choices=choices, default=default)
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[yellow]No input received — treating as decline.[/yellow]")
-        return None
+    interaction = _current_interaction()
+    if interaction is not None:
+        raw = interaction.choose("Which option should Prash execute?", choices, default)
+        if raw is None:
+            return None
+    else:
+        try:
+            raw = Prompt.ask("Which option should Prash execute?", choices=choices, default=default)
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]No input received — treating as decline.[/yellow]")
+            return None
     return options[int(raw) - 1].action
 
 
@@ -514,6 +565,28 @@ def cmd_fix(args: argparse.Namespace) -> int:
     return _render_run_result(result)
 
 
+# Minimum credential(s) each provider needs for a baseline authenticate()
+# call specifically -- NOT every key that connector's write actions might
+# also need (e.g. DATADOG_APP_KEY, PAGERDUTY_FROM_EMAIL). Diagnostic-only:
+# used solely to tell "genuinely no credentials" apart from "credentials
+# look present but authenticate() failed some other way" in the message
+# below, never as a substitute for the connector's own authenticate() logic.
+# azure/gcp omitted -- both can authenticate via ambient/default credentials
+# (DefaultAzureCredential, gcloud ADC) with none of these env vars set, so
+# "none of these are present" isn't a reliable "no credentials" signal for
+# either.
+_PROVIDER_MIN_CREDS: dict[str, tuple[str, ...]] = {
+    "github": ("GITHUB_TOKEN",),
+    "gitlab": ("GITLAB_TOKEN",),
+    "vercel": ("VERCEL_TOKEN",),
+    "aws": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+    "datadog": ("DATADOG_API_KEY",),
+    "grafana": ("GRAFANA_URL", "GRAFANA_API_KEY"),
+    "pagerduty": ("PAGERDUTY_API_KEY",),
+    "snyk": ("SNYK_API_TOKEN", "SNYK_ORG_ID"),
+}
+
+
 def cmd_investigate(args: argparse.Namespace) -> int:
     store = CredentialStore.from_env()
     creds = store.load()
@@ -534,7 +607,25 @@ def cmd_investigate(args: argparse.Namespace) -> int:
         # .env. True for every API-backed connector, but gitleaks has no
         # token at all -- its authenticate() fails when the local binary
         # isn't installed, so the old wording was simply false for it.
-        hint = "missing binary on PATH" if connector.name == "gitleaks" else "missing token in local .env"
+        #
+        # Found live again 2026-08-25: even for token-based connectors, the
+        # message was wrong a second way -- it blamed "missing token" for
+        # what were actually two separate transient Grafana API hiccups
+        # (confirmed by an immediate retry succeeding cleanly both times).
+        # A real, present token that a health-check call briefly failed to
+        # verify is not the same problem as no token at all, and "missing
+        # token in local .env" actively points the user at the wrong fix.
+        if connector.name == "gitleaks":
+            hint = "missing binary on PATH"
+        else:
+            required = _PROVIDER_MIN_CREDS.get(connector.name, ())
+            missing = [k for k in required if not creds.get(k)]
+            if missing:
+                hint = f"missing {', '.join(missing)} in local .env"
+            elif required:
+                hint = "credentials look present but the health check failed -- likely a transient network/API issue, try again"
+            else:
+                hint = "missing token in local .env"
         console.print(f"[yellow]{connector.name}: auth not configured ({hint})[/yellow]")
         return 1
     if getattr(args, "dependabot", False):
@@ -764,7 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
     formatter_class = _BrandedHelp
     parser = argparse.ArgumentParser(
         prog="prash",
-        description="Prash v2 — local AI DevOps agent",
+        description="Lear — local AI DevOps agent",
         epilog="credentials stay on your machine; Drufiy's servers never see them.",
         formatter_class=formatter_class,
     )

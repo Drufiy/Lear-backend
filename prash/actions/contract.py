@@ -1,4 +1,4 @@
-"""The Prash v2 action contract.
+"""The Lear action contract.
 
 This is the Days 1-2 shared foundation. Every action in the system must
 implement this contract, and every permission engine decision is made against

@@ -1,4 +1,4 @@
-# Prash v2 — End-to-End Test Checklist
+# Lear — End-to-End Test Checklist
 
 Goal: prove Prash actually solves problems, from a cold user's point of view —
 no pre-known answers, no hand-holding. Seed a real failure → run CLI/REPL →

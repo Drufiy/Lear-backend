@@ -1,9 +1,9 @@
-# Prash v2 — Agent Guidelines
+# Lear — Agent Guidelines
 
 This document outlines the coding traditions, architectural guidelines, and workflows to be followed by any AI agents (like Claude Code, Antigravity, etc.) working on this repository.
 
 ## 1. Project Philosophy
-**Prash v2 is a local-first AI DevOps agent.**
+**Lear is a local-first AI DevOps agent.**
 - **Credentials:** Credentials NEVER leave the user's machine. They are stored locally (e.g. in `.env`) and passed into connectors at runtime. No cloud-hosted backend stores these keys.
 - **Cross-Platform:** This is a CLI tool that runs on Windows, macOS, and Linux. Path handling (`pathlib`), shell quoting, and line endings must be OS-agnostic. 
 
