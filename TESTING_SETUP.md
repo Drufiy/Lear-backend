@@ -141,12 +141,32 @@ real to act on.
 
 ## Vercel
 
-**Status: proven working (sprint 1), no standing fixture script yet.**
+**Status: fixture script added (`break_vercel.py`, 2026-08-30); live re-run
+blocked on credentials — the 2026-08-24 sprint token is gone.**
 
-Real redeploy/rollback already live-verified against a real project in the
-2026-08-24 E2E sprint. Not yet turned into a reusable
-`scripts/testing/break_vercel.py` — the project id/deployment history used
-then may no longer be current; needs a quick re-check before reuse.
+`scripts/testing/break_vercel.py` is the reusable fixture: Vercel has no
+"incident" toggle, so the natural break/heal pair is the two write actions
+the connector already live-verified in the 2026-08-24 E2E sprint —
+**redeploy (break)** creates a fresh deployment (real churn, makes
+`poll_state()` briefly non-READY), **rollback (`--heal`)** re-points
+production at the pre-break deployment. Same API endpoints the connector
+uses (`/v13/deployments`, `/v9/projects/{id}/rollback/{deploymentId}`).
+
+```bash
+python3 scripts/testing/break_vercel.py --project <name>          # redeploy (break)
+python3 scripts/testing/break_vercel.py --project <name> --heal   # rollback (heal)
+```
+
+Requires `VERCEL_TOKEN` (and optionally `VERCEL_PROJECT`, or `--project`)
+in `.env`. The 2026-08-24 sprint's project id may no longer be current —
+confirm the project first with `prash investigate <project> --provider vercel`.
+
+**Re-check result (2026-08-30):** no valid `VERCEL_TOKEN` exists on this
+machine anymore — `~/.prash/.env` has both `VERCEL_TOKEN` and
+`GITHUB_TOKEN` as **empty placeholders** (len=0), `test.env` is empty too,
+and no env var is set. The script's failure paths were verified (clean
+"VERCEL_TOKEN not set" / "No project given" exits); the live redeploy/
+rollback run needs a fresh token from the account owner before reuse.
 
 ## GitHub / GitLab
 
