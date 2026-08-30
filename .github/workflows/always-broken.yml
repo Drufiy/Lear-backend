@@ -1,0 +1,36 @@
+name: Always Broken (CI fixture)
+
+# Standing "always broken" CI fixture for testing `prash fix --ci` and
+# `prash investigate <repo> --ci` without needing a fresh push each time.
+# This workflow ONLY runs when something is pushed to the `prash-broken-ci`
+# branch -- it deliberately does NOT run on main or on pull requests, so it
+# never affects the real CI signal. The job always fails (exit 1) after
+# producing a realistic-looking error, giving the diagnosis brain a stable,
+# re-runnable failing run to chew on.
+#
+# To use the fixture:
+#   prash fix <owner>/<repo> --ci --run-id <run-id> --noninteractive
+#   prash investigate <owner>/<repo> --ci
+#
+# To trigger a fresh failure without touching main, push any commit to this
+# branch (an empty commit works): git commit --allow-empty -m "re-trigger"
+
+on:
+  push:
+    branches: [prash-broken-ci]
+
+jobs:
+  always-broken:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Simulate a broken step
+        shell: bash
+        run: |
+          echo "::error::intentional fixture failure on prash-broken-ci"
+          echo "flaky-network-error: connection reset by peer"
+          echo "Traceback (most recent call last):"
+          echo "  File \"app/deploy.py\", line 42, in deploy"
+          echo "    raise DeploymentError(\"upstream service unavailable\")"
+          exit 1
