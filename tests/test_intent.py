@@ -6,6 +6,8 @@ REPL loop headlessly with scripted lines. No TTY, CI-safe on all 3 OSes.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from prash import repl
@@ -173,3 +175,26 @@ def test_talk_heuristics():
     assert _looks_like_talk("restart the broken api pod")
     assert not _looks_like_talk("fix api-7f9d")
     assert not _looks_like_talk("watch")
+
+
+def test_run_llm_intent_sync_never_hangs_on_stuck_coroutine():
+    """Regression for the 2026-08-24 'test_intent.py hangs under pytest'
+    report: a coroutine that never completes (sync-blocked, ignoring
+    cancellation) must still return None within a bounded time instead of
+    hanging the caller forever. The sync bridge runs the LLM call in a
+    worker thread with a bounded join, so a stuck task cannot block pytest."""
+    import time
+
+    from prash.intent import _LLM_INTENT_TIMEOUT_SECONDS, _run_llm_intent_sync
+
+    async def never_completes():
+        await asyncio.sleep(3600)  # pragma: no cover - would hang if reached
+
+    start = time.monotonic()
+    result = _run_llm_intent_sync(never_completes())
+    elapsed = time.monotonic() - start
+    assert result is None
+    # Bounded: must return well before the sleep(3600) would finish. The
+    # bridge's own timeout + join margin is _LLM_INTENT_TIMEOUT_SECONDS + 5,
+    # so assert comfortably inside that.
+    assert elapsed < _LLM_INTENT_TIMEOUT_SECONDS + 10

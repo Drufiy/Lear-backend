@@ -442,21 +442,44 @@ _LLM_INTENT_TIMEOUT_SECONDS = 12
 
 def _run_llm_intent_sync(coro) -> Suggestion | Clarify | None:
     """Sync bridge -- repl.py and tui.py's worker thread both call resolve()/
-    complete_clarify() synchronously, and neither is already inside a
-    running asyncio loop (run_repl is a plain blocking loop; tui.py's chat
-    handler runs in a plain OS thread via @work(thread=True), not on
-    Textual's event loop), so asyncio.run() here is safe. Degrades to None
-    on any failure -- missing credentials, model/network trouble, a
-    timeout, an unparseable response -- same honest contract as the fast
-    path, never a crash or an indefinite hang mid-session."""
-    try:
-        return asyncio.run(asyncio.wait_for(coro, timeout=_LLM_INTENT_TIMEOUT_SECONDS))
-    except TimeoutError:
-        logger.warning(f"REPL intent LLM call timed out after {_LLM_INTENT_TIMEOUT_SECONDS}s")
+    complete_clarify() synchronously. The coroutine is run via asyncio.run()
+    in a dedicated worker thread so it can never collide with an already-
+    running event loop in the calling thread (a pytest-asyncio test, the
+    Textual event loop, or any async caller), which would otherwise raise
+    RuntimeError -- or, in some environments, leave asyncio.run() waiting on
+    a task that ignored cancellation (the 2026-08-24 "test_intent.py hangs
+    indefinitely under pytest" report). Degrades to None on any failure --
+    missing credentials, model/network trouble, a timeout, an unparseable
+    response -- same honest contract as the fast path, never a crash or an
+    indefinite hang mid-session.
+    """
+    import threading
+
+    result_holder: list = []
+    error_holder: list = []
+
+    def _runner() -> None:
+        try:
+            result_holder.append(
+                asyncio.run(asyncio.wait_for(coro, timeout=_LLM_INTENT_TIMEOUT_SECONDS))
+            )
+        except TimeoutError:
+            logger.warning(f"REPL intent LLM call timed out after {_LLM_INTENT_TIMEOUT_SECONDS}s")
+        except Exception as exc:  # noqa: BLE001 — a bad LLM call must not kill the session
+            logger.warning(f"REPL intent LLM call failed: {exc}")
+            error_holder.append(exc)
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout=_LLM_INTENT_TIMEOUT_SECONDS + 5)
+    if t.is_alive():
+        # The coroutine ignored cancellation (sync-blocked in a connect).
+        # Bounded-join already returned; report None rather than hanging.
+        logger.warning(f"REPL intent LLM call did not stop after {_LLM_INTENT_TIMEOUT_SECONDS}s; giving up")
         return None
-    except Exception as exc:  # noqa: BLE001 — a bad LLM call must not kill the session
-        logger.warning(f"REPL intent LLM call failed: {exc}")
+    if error_holder:
         return None
+    return result_holder[0] if result_holder else None
 
 
 def _resolve_via_llm(text: str, ctx: _Context) -> Suggestion | Clarify | None:
