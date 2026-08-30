@@ -244,11 +244,36 @@ fallback). The pem path is no longer hardcoded: pass `--pem <path>` or set
 
 ## Azure / GCP
 
-**Status: GCP has credentials (`GCP_PROJECT_ID`, `GCP_REGION`,
-`GOOGLE_APPLICATION_CREDENTIALS`) but never live-tested. Azure has no
-credentials configured at all** — `.env` has zero `AZURE_*` keys. Setting
-up Azure needs an account/subscription, which is Aradhya's to create (not
-something I can do on your behalf).
+**Status (2026-08-30): GCP connector unit-tested (gcloud-fallback path) +
+fixture script added; live run still blocked — this machine has no GCP
+credentials. Azure has no credentials configured at all.**
+
+The earlier "GCP has credentials" note is **stale for this machine** —
+re-checked 2026-08-30: no `GCP_PROJECT_ID`/`GCP_REGION`/
+`GOOGLE_APPLICATION_CREDENTIALS` anywhere (`~/.prash/.env` has only empty
+`GITHUB_TOKEN`/`VERCEL_TOKEN`, no repo `.env`, no env vars, no service-
+account JSON, no `gcloud` on PATH). The google API libs aren't installed
+either, so the connector runs entirely through its `gcloud` CLI fallback
+here.
+
+**Added:** `scripts/testing/break_gcp.py` — the reusable fixture. GCP's
+natural break/heal is stop/start: **break** stops the instance
+(`gcloud compute instances stop` → `poll_state()` reports STABLE),
+**`--heal`** starts it again (→ HEALTHY). Requires `GCP_PROJECT_ID` +
+`GCP_ZONE` (or `GCP_REGION`) and either `GOOGLE_APPLICATION_CREDENTIALS`
+or `gcloud auth`.
+
+**Added:** `tests/test_gcp_connector.py` — 10 unit tests mocking the
+`gcloud` fallback path (auth gate, locate, state mapping RUNNING→HEALTHY /
+STOPPED→STABLE / PROVISIONING→DEPLOYING, not-found, fetch_logs serial
+output). The connector previously had zero test coverage.
+
+Live run (blocked): needs a real project + service-account JSON or
+`gcloud auth`, then `break_gcp.py` → `prash investigate <name>
+--provider gcp` → `--heal`.
+
+Azure still needs an account/subscription, which is Aradhya's to create
+(not something I can do on your behalf).
 
 ## Kubernetes
 
