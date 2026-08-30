@@ -132,12 +132,38 @@ surfaces it (same pattern as a pod vs. its Deployment for k8s rollback).
 
 ## Snyk
 
-**Status: not yet set up.**
+**Status: fixture script added + fixture repo live (2026-08-30); full
+live run blocked — no Snyk credentials on this machine.**
 
-Credentials present (`SNYK_API_TOKEN`, `SNYK_ORG_ID`). Needs: a test
-project with a real known-vulnerable dependency, so `poll_state()` reports
-a genuine `critical`/`high` finding and `snyk-ignore-issue` has something
-real to act on.
+`scripts/testing/break_snyk.py` owns a Snyk test project end to end, the
+same way `break_datadog.py` owns its monitor. The resource is the git repo
+**`ALavent/prash-snyk-fixture`** (created live 2026-08-30 via the ALavent
+token; verified containing the vulnerable manifest), whose `package.json`
+toggles a **real known-vulnerable dependency**:
+
+- **break** → `lodash@4.17.20` (CVE-2021-23337, prototype pollution, high
+  severity) pushed to the fixture repo → Snyk scan reports critical/high →
+  `poll_state()` reports `FAILED`
+- **`--heal`** → `lodash@4.17.21` (patched) pushed → next scan clean →
+  `poll_state()` reports `HEALTHY`
+
+```bash
+python3 scripts/testing/break_snyk.py [--repo <owner/repo>]           # break
+python3 scripts/testing/break_snyk.py [--repo <owner/repo>] --heal    # heal
+```
+
+Requires `GITHUB_TOKEN` (to push the fixture repo) plus
+`SNYK_API_TOKEN` + `SNYK_ORG_ID` (to trigger the Snyk re-import; without
+them the script still toggles the manifest and tells you to import
+manually). **Credential status:** this machine has no Snyk credentials —
+`~/.prash/.env` holds only empty `GITHUB_TOKEN`/`VERCEL_TOKEN`, no repo
+`.env`, no env vars (the earlier "Credentials present" note was stale, same
+as GCP/Vercel). The GitHub half (repo create + push) was verified live;
+the Snyk import/scan half needs a real `SNYK_API_TOKEN` + `SNYK_ORG_ID`.
+
+Resource name to investigate with: the Snyk project name is the repo path,
+`prash investigate ALavent/prash-snyk-fixture --provider snyk` (after
+importing the repo into Snyk once).
 
 ## Vercel
 
