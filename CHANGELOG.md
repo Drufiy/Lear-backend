@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Terraform Integration (Tracks B, C, D, E)**: Added comprehensive Terraform support across the entire architecture.
+  - *Connectors*: Added `TerraformConnector` to monitor `.tfstate` and execute drift detection locally, with stubs for future Terraform Cloud integrations.
+  - *Actions*: Added `terraform_init` (SAFE tier) and `terraform_apply` (dynamic risk tier defaulting to APPROVAL) to resolve config drift and setup failures.
+  - *Brain*: Taught the `SYSTEM_PROMPT` to identify `infra_as_code` category issues, interpret Terraform drift, and recommend appropriate fixes.
+  - *Watcher*: Extended `prash watch --provider terraform` to periodically poll local Terraform state. During testing, it gracefully handled missing `.tfstate` files with safe degradation messages without crashing the main watcher loop.
 - **Slack/Discord team notifications (Sprint 2 Tier 2)**: New `prash/notifications.py` with `SlackNotifier`/`DiscordNotifier` incoming-webhook channels (stdlib-only urllib). `prash watch` now pushes every new-problem ping to any configured channel in addition to the desktop toast, and a new **`prash notify <message>`** command sends a message to every configured channel (`SLACK_WEBHOOK_URL` / `DISCORD_WEBHOOK_URL` in `.env`).
 - **Email/WhatsApp team notifications (Sprint 2 Tier 3)**: Added `EmailNotifier` (SMTP with basic HTML formatting) and `WhatsAppNotifier` (via Twilio API) to `prash/notifications.py`. They integrate directly into `team_notifiers` so `prash watch` and `prash notify` automatically utilize them when configured. Supports multiple recipients via CSV lists.
 - **`prash setup` v0.1 (Configuration Wizard)**: Introduced an interactive terminal UI for setting up Prash. It prompts for all relevant `.env` API keys and configurations grouped by category, masks secrets to prevent terminal history leaks, supports skipping fields to keep existing defaults, and writes the output back while preserving `.env.example` comments.

@@ -29,6 +29,7 @@ _CATEGORY_ALIASES = {
     "ci": "workflow_config", "ci_config": "workflow_config", "workflow": "workflow_config",
     "flaky": "flaky_test", "test": "code",
     "k8s": "runtime", "kubernetes": "runtime", "infra": "runtime", "pod": "runtime",
+    "terraform": "infra_as_code", "iac": "infra_as_code",
 }
 
 
@@ -165,7 +166,7 @@ class DiagnosisOption(BaseModel):
     ranked choices with reasoning instead of either guessing or dead-ending
     on recommended_action=None."""
 
-    action: Literal["restart_pod", "rollback", "scale"] | None = Field(
+    action: Literal["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply"] | None = Field(
         default=None,
         description=(
             "The action id for this option, or null for 'take no automated "
@@ -187,7 +188,7 @@ class Diagnosis(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
     is_flaky_test: bool = Field(default=False)
     files_changed: list[FileChange] = Field(default_factory=list)
-    category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "unknown"]
+    category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "unknown"]
 
     @field_validator("category", mode="before")
     @classmethod
@@ -202,7 +203,7 @@ class Diagnosis(BaseModel):
         default_factory=list,
         description="Exact names of missing secrets/env vars that must be added to fix this failure (e.g. STRIPE_KEY, DATABASE_URL). Only populated when category='environment'.",
     )
-    recommended_action: Literal["restart_pod", "rollback", "scale"] | None = Field(
+    recommended_action: Literal["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply"] | None = Field(
         default=None,
         description=(
             "Only populated when category='runtime'. The infrastructure action that "
