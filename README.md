@@ -19,8 +19,8 @@ something isn't in that file, treat it as undecided, not assumed.
 Requires **Python 3.10+**. Takes about two minutes.
 
 ```bash
-git clone https://github.com/Drufiy/prashv2backend.git
-cd prashv2backend
+git clone https://github.com/Drufiy/Lear-backend.git
+cd Lear-backend
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
@@ -54,7 +54,7 @@ Check it loaded — this never prints secret values, only which keys it found:
 prash config
 ```
 
-Run the test suite (should be **182 passed, 7 skipped** — the skips are live-cluster
+Run the test suite (should be **457 passed, 7 skipped** — the skips are live-cluster
 tests that only run in CI):
 
 ```bash
@@ -144,8 +144,8 @@ parser, so it's never out of date.
 ## Who's building this
 
 - **Aradhya** (founder) — read connectors, diagnosis brain, the watcher
-- **Aryan** (CTO) — CLI spine, permission engine, write actions, REPL/TUI
-- **Anant** — onboarding & packaging, AWS
+- **Aryan** (CTO) — CLI spine, permission engine, write actions, REPL/TUI, test coverage
+- **Anant** — leading the connector rewrite (`CONNECTOR_REWRITE_SPEC.md`): `watch`/`get_stats`/`alert` on every connector, real execution, Terraform
 - **Maneesh** — distribution, marketing, fundraising (development as needed)
 
 Day-by-day breakdown in `PRASH_V2.md` §6 and §6b.
@@ -155,15 +155,20 @@ Day-by-day breakdown in `PRASH_V2.md` §6 and §6b.
 ## Status
 
 Working end to end today: the `prash` CLI and REPL, a five-mode permission engine,
-circuit breaker and audit log, a real Kubernetes connector (status/logs/events/restart),
-the diagnosis brain with a golden-case eval harness, the background watcher, and six
-actions — `open-pr`, `request-secret`, `restart-pod`, `rollback`, `apply-ci-fix`,
-`apply-manifest-fix`.
+circuit breaker and audit log, **13 connectors** (AWS, Azure, Datadog, GCP, GitHub,
+GitLab, Gitleaks, Grafana, Kubernetes, PagerDuty, Snyk, Terraform, Vercel), **20
+actions** across them, the diagnosis brain with a golden-case eval harness, and the
+background watcher. Run `prash actions` for the live, current list — it's generated
+from the real registry, so unlike this paragraph it can't go stale.
 
 Both fix paths are **live-verified against real infrastructure**, not mocks: a real CI
 failure and a real broken Kubernetes manifest each produced a real pull request with a
-correct diff.
+correct diff. Gitleaks is live-verified against a real binary and real committed
+secrets; AWS, GCP, Vercel, and Snyk each have a reusable `scripts/testing/break_*.py`
+fixture, though several are currently blocked on live credentials (tracked honestly
+in `PRASH_V2.md`, not hidden).
 
-Currently in a **hardening phase** (`PRASH_V2.md` §6b) — real-user testing on both macOS
-and Windows before any new platform work starts. 182 tests passing. Known gaps and open
+Current focus is the **connector rewrite** (`CONNECTOR_REWRITE_SPEC.md`): a shared
+interface so every connector supports proactive watching and multi-connector
+correlation, not just read-then-diagnose. **457 tests passing.** Known gaps and open
 questions are tracked honestly in `PRASH_V2.md` §9/§10 and in GitHub Issues.
