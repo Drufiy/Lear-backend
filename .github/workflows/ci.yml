@@ -114,3 +114,41 @@ jobs:
         env:
           PRASH_LIVE_K8S_TESTS: "1"
         run: pytest tests/test_kubernetes_connector_live.py -v
+
+  grafana-mock-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Start Grafana mock
+        run: |
+          docker run --detach --name grafana-mock --publish 8080:8080 wiremock/wiremock:3.13.1
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/__admin/mappings >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs grafana-mock
+          exit 1
+
+      - name: Run Grafana mock integration test
+        env:
+          GRAFANA_URL: http://127.0.0.1:8080
+          GRAFANA_API_KEY: ci-test-token
+          WIREMOCK_BASE_URL: http://127.0.0.1:8080
+        run: python -m pytest tests/integration/test_grafana_mock_service.py -v
+
+      - name: Show mock logs on failure
+        if: failure()
+        run: docker logs grafana-mock
