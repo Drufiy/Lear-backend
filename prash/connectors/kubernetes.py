@@ -24,9 +24,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Iterator
 
-from kubernetes import client, config
+from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
+
+# Import the base interfaces for the new Connector pattern
+from prash.connectors.base import Connector, ResourceState, ConnectorState, ConnectorEvent
 
 
 @dataclass
@@ -50,21 +54,6 @@ _ERR_IMAGE_REASONS = {"ImagePullBackOff", "ErrImagePull"}
 _core_api: client.CoreV1Api | None = None
 
 
-def _client() -> client.CoreV1Api:
-    """Lazy singleton so tests can monkeypatch this module's _core_api
-    directly instead of every function reaching into the kubernetes lib.
-    """
-    global _core_api
-    if _core_api is not None:
-        return _core_api
-
-    kubeconfig = os.environ.get("KUBECONFIG")
-    context = os.environ.get("KUBE_CONTEXT") or None
-    config.load_kube_config(config_file=kubeconfig, context=context)
-    _core_api = client.CoreV1Api()
-    return _core_api
-
-
 def _default_namespace(namespace: str | None) -> str:
     return namespace or os.environ.get("KUBE_NAMESPACE", "default")
 
@@ -79,12 +68,7 @@ def _seconds_since(ts) -> float:
 
 
 def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
-    """Derive (problem, restart_count, ready) from a pod's real status.
-
-    Checks every container, not just the first -- a multi-container pod
-    with one healthy sidecar and one crash-looping main container must
-    still be flagged.
-    """
+    """Derive (problem, restart_count, ready) from a pod's real status."""
     statuses = pod.status.container_statuses or []
     restart_count = sum(s.restart_count for s in statuses) if statuses else 0
     ready = bool(statuses) and all(s.ready for s in statuses)
@@ -108,19 +92,6 @@ def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
             problem = "OOMKilled"
             break
 
-    # A pod that's already restarted at least once and currently isn't ready
-    # is exhibiting crash-loop behavior NOW, independent of whether
-    # container_statuses.waiting.reason happens to say "CrashLoopBackOff" at
-    # this exact instant. It often doesn't: state.waiting briefly clears
-    # during the split-second a container is actually mid-restart-attempt
-    # between backoff waits, which a point-in-time snapshot can catch --
-    # confirmed live (PRASH_V2.md §10, 2026-08-09) and then confirmed again
-    # by real CI flakiness on exactly this race, same day: a genuinely
-    # crash-looping pod (restart_count=3, not ready, phase=Running) polled
-    # with problem=None, no CrashLoopBackOff and not even the StuckPending
-    # fallback below (too young for the 120s threshold). Checked BEFORE the
-    # StuckPending fallback and with no age requirement -- waiting for the
-    # 120s threshold here would just reproduce the same bug for two minutes.
     if problem is None and not ready and pod.status.phase == "Running" and restart_count > 0:
         problem = "CrashLoopBackOff"
 
@@ -137,13 +108,151 @@ def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
     return problem, restart_count, ready
 
 
-def get_pod_status(namespace: str, pod_name: str | None = None) -> list[PodStatus]:
-    """Read-only. All pods in `namespace`, or just `pod_name` if given.
+# --- PHASE A & B & C: THE NEW CONNECTOR CLASS ---
 
-    Returns an empty list if the pod/namespace doesn't exist -- never
-    raises for "not found", since Track C's restart-pod verify() step
-    already handles an empty list as its "pod missing" case.
+class KubernetesConnector(Connector):
+    def __init__(self, credentials: dict | None = None):
+        self.read_capabilities = ("pod_status", "logs", "events", "watch", "stats")
+        self.write_capabilities = ("restart", "rollback", "scale")
+        self.api_client = None
+        self.core_v1 = None
+        self.apps_v1 = None
+        self.credentials = credentials or {}
+
+    def authenticate(self, credentials=None):
+        if credentials:
+            self.credentials.update(credentials)
+            
+        kubeconfig = self.credentials.get("KUBECONFIG") or os.environ.get("KUBECONFIG")
+        context = self.credentials.get("KUBE_CONTEXT") or os.environ.get("KUBE_CONTEXT") or None
+        
+        config.load_kube_config(config_file=kubeconfig, context=context)
+        self.api_client = client.ApiClient()
+        self.core_v1 = client.CoreV1Api(self.api_client)
+        self.apps_v1 = client.AppsV1Api(self.api_client)
+
+    def locate(self, resource: str) -> dict:
+        env_namespace = self.credentials.get("KUBE_NAMESPACE") or _default_namespace(None)
+        if "/" in resource:
+            ns, name = resource.split("/", 1)
+            return {"namespace": ns or env_namespace, "name": name}
+        return {"namespace": env_namespace, "name": resource}
+
+    def poll_state(self, resource: str) -> ResourceState:
+        # Reuses the legacy wrapper to ensure perfect behavior matching
+        target = self.locate(resource)
+        pods = get_pod_status(target["namespace"], target["name"])
+        
+        if not pods:
+            return ResourceState(status=ConnectorState.UNKNOWN, raw_data=None)
+            
+        p = pods[0]
+        
+        mapping = {
+            "CrashLoopBackOff": ConnectorState.CRASH_LOOPING,
+            "OOMKilled": ConnectorState.FAILED,
+            "ImagePullBackOff": ConnectorState.FAILED,
+            "StuckPending": ConnectorState.DEGRADED,
+        }
+        
+        status = mapping.get(p.problem, ConnectorState.UNKNOWN)
+        if p.problem is None and p.phase == "Running" and p.ready:
+            status = ConnectorState.HEALTHY
+            
+        return ResourceState(status=status, raw_data=p.__dict__)
+
+    def fetch_logs(self, resource: str) -> list[str]:
+        target = self.locate(resource)
+        logs = get_pod_logs(target["namespace"], target["name"])
+        return logs.splitlines()
+
+    def watch(self, target: str) -> Iterator[ConnectorEvent]:
+        if not self.core_v1:
+            self.authenticate()
+            
+        target_info = self.locate(target)
+        w = watch.Watch()
+        
+        kwargs = {"namespace": target_info["namespace"]}
+        name = target_info["name"]
+        
+        # Support namespace-wide if name is empty or wildcard
+        if name and name != "*":
+            kwargs["field_selector"] = f"metadata.name={name}"
+            
+        stream = w.stream(self.core_v1.list_namespaced_pod, **kwargs)
+        
+        for event in stream:
+            pod = event['object']
+            problem, restart_count, ready = _classify(pod)
+            
+            if problem in ["CrashLoopBackOff", "OOMKilled", "ImagePullBackOff", "StuckPending"]:
+                yield ConnectorEvent(
+                    timestamp=datetime.now(timezone.utc),
+                    connector="kubernetes",
+                    event_type=problem.lower(),
+                    summary=f"Pod '{pod.metadata.name}' {problem} (restart_count={restart_count}) in namespace '{pod.metadata.namespace}'",
+                    raw=pod.to_dict()
+                )
+
+    def get_stats(self, target: str, since: datetime) -> list[ConnectorEvent]:
+        if not self.core_v1:
+            self.authenticate()
+            
+        target_info = self.locate(target)
+        
+        kwargs = {"namespace": target_info["namespace"]}
+        name = target_info["name"]
+        if name and name != "*":
+            kwargs["field_selector"] = f"involvedObject.name={name}"
+            
+        try:
+            events = self.core_v1.list_namespaced_event(**kwargs).items
+        except ApiException as exc:
+            if exc.status == 404:
+                return []
+            raise
+            
+        normalized = []
+        for e in events:
+            ts = e.last_timestamp or e.event_time
+            if not ts:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+                
+            if ts >= since:
+                normalized.append(
+                    ConnectorEvent(
+                        timestamp=ts,
+                        connector="kubernetes",
+                        event_type=e.reason or "unknown",
+                        summary=f"{e.reason}: {e.message}",
+                        raw=e.to_dict()
+                    )
+                )
+        return sorted(normalized, key=lambda x: x.timestamp)
+
+
+# --- BACKWARD COMPATIBILITY WRAPPERS ---
+
+_global_k8s_connector = KubernetesConnector()
+
+def _client() -> client.CoreV1Api:
+    """Lazy singleton so tests can monkeypatch this module's _core_api
+    directly instead of every function reaching into the kubernetes lib.
     """
+    global _core_api
+    if _core_api is not None:
+        return _core_api
+
+    _global_k8s_connector.authenticate()
+    _core_api = _global_k8s_connector.core_v1
+    return _core_api
+
+
+def get_pod_status(namespace: str, pod_name: str | None = None) -> list[PodStatus]:
+    """Read-only. All pods in `namespace`, or just `pod_name` if given."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -174,20 +283,6 @@ def get_pod_status(namespace: str, pod_name: str | None = None) -> list[PodStatu
 
 
 def _read_pod_log_raw(api, *, name: str, namespace: str, tail_lines: int, previous: bool) -> str:
-    """Real bug found live 2026-08-17 building `prash logs`: calling
-    read_namespaced_pod_log() WITHOUT `_preload_content=False` on this
-    kubernetes client version (36.0.3) does not return decoded text the way
-    its own type hint (-> str) promises -- it returns the raw response
-    stringified, i.e. the literal characters "b'...actual log text...'"
-    (a bytes repr, not bytes itself, so `.strip()`/`str` checks elsewhere
-    never caught it -- it silently looked like a valid non-empty string).
-    This had been feeding the diagnosis brain corrupted log text for every
-    runtime diagnosis since the connector was built; never noticed because
-    nothing printed raw log content to a human until this command existed.
-    `_preload_content=False` + manual decode (the same pattern
-    stream_pod_logs() already uses) is the actual fix -- confirmed live
-    against a real pod, real log lines, no more `b'...'` wrapper.
-    """
     resp = api.read_namespaced_pod_log(
         name=name, namespace=namespace, tail_lines=tail_lines, previous=previous, _preload_content=False
     )
@@ -198,16 +293,7 @@ def _read_pod_log_raw(api, *, name: str, namespace: str, tail_lines: int, previo
 
 
 def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
-    """Read-only. Recent logs for a pod.
-
-    Tries the current container attempt first. A crash-looping pod's
-    *current* attempt often has zero logs (it just restarted and hasn't
-    logged anything new yet) -- the real story is in the previous
-    attempt, so this falls back to `previous=True` when the current
-    attempt is empty. Verified against a real CrashLoopBackOff pod
-    during development (see PRASH_V2.md §10) -- this fallback is not
-    theoretical, the first attempt genuinely came back empty.
-    """
+    """Read-only. Recent logs for a pod."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -227,17 +313,7 @@ def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
 
 
 def stream_pod_logs(namespace: str, pod_name: str, tail_lines: int = 10):
-    """Read-only. Live-follows a pod's logs (like `kubectl logs -f`), yielding
-    one decoded line at a time as they arrive. Sprint-2 Kubernetes Depth
-    (PRASH_V2.md §7b).
-
-    A generator, not a one-shot read like get_pod_logs() above -- the
-    caller drives how long to keep iterating (the CLI breaks on Ctrl+C).
-    Uses `_preload_content=False` so the underlying urllib3 response is
-    streamed rather than buffered whole, which is the whole point of
-    "live" here. `resp.release_conn()` in `finally` matters: without it,
-    breaking out of iteration early (e.g. Ctrl+C) leaks the connection.
-    """
+    """Read-only. Live-follows a pod's logs."""
     namespace = _default_namespace(namespace)
     api = _client()
     resp = api.read_namespaced_pod_log(
@@ -251,12 +327,7 @@ def stream_pod_logs(namespace: str, pod_name: str, tail_lines: int = 10):
 
 
 def get_pod_events(namespace: str, pod_name: str) -> list[dict]:
-    """Read-only. Kubernetes Events involving this pod, most recent first.
-
-    Events are where the real story usually is for ImagePullBackOff /
-    scheduling failures -- logs alone often won't show why a pod never
-    started.
-    """
+    """Read-only. Kubernetes Events involving this pod, most recent first."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -283,21 +354,7 @@ def get_pod_events(namespace: str, pod_name: str) -> list[dict]:
 
 
 def restart_pod(namespace: str, pod_name: str) -> bool:
-    """WRITE. Safe-tier action per PRASH_V2.md §5 -- Track C's
-    RestartPodAction wires the permission check; this function assumes
-    it has already been granted and just does the deletion (the
-    Deployment/ReplicaSet recreates it).
-
-    Returns True if the delete succeeded. Track C is responsible for
-    the post-action verification step (§3) -- re-checking the pod here
-    is NOT this function's job, keep it a single clear action.
-
-    Honest caveat, worth stating plainly: deleting a pod whose
-    *application* is broken will just recreate the same broken pod
-    under a new name. Restart fixes stuck/wedged processes; it cannot
-    fix a genuinely broken container image or command. Track D's
-    diagnosis is what tells a user which case they're in.
-    """
+    """WRITE. Safe-tier action per PRASH_V2.md §5"""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -310,20 +367,7 @@ def restart_pod(namespace: str, pod_name: str) -> bool:
 
 
 def get_previous_revision(namespace: str, deployment_name: str) -> dict | None:
-    """Read-only. The last known-good revision for a Deployment, from the
-    ReplicaSet revision history Kubernetes already keeps -- no separate
-    state store. See PRASH_V2.md §6, cross-track dependency #2.
-
-    Returns {"revision": <int>} matching what Track C's rollback action
-    expects (`previous.get("revision")`), or None if there's no prior
-    revision to roll back to.
-
-    Real mechanics: a Deployment's revision history is tracked via each
-    ReplicaSet's `deployment.kubernetes.io/revision` annotation, not on
-    the Deployment object itself. This lists the Deployment's owned
-    ReplicaSets and returns the second-highest revision number (the
-    highest is the current one).
-    """
+    """Read-only. The last known-good revision for a Deployment."""
     namespace = _default_namespace(namespace)
     api = _client()
     apps_api = client.AppsV1Api(api.api_client)
@@ -350,16 +394,8 @@ def get_previous_revision(namespace: str, deployment_name: str) -> dict | None:
     return {"revision": revisions[1]}
 
 
-
 def scale_deployment(namespace: str, deployment_name: str, replicas: int) -> bool:
-    """WRITE. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b) -- Track C's
-    ScaleAction wires the permission check; this function assumes it has
-    already been granted and just patches the replica count.
-
-    Returns True if the patch succeeded, False if the Deployment doesn't
-    exist. Track C is responsible for post-action verification (§3), same
-    split as restart_pod() above -- keep this a single clear write.
-    """
+    """WRITE. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b)."""
     namespace = _default_namespace(namespace)
     api = _client()
     apps_api = client.AppsV1Api(api.api_client)
@@ -375,8 +411,7 @@ def scale_deployment(namespace: str, deployment_name: str, replicas: int) -> boo
 
 
 def get_deployment_replicas(namespace: str, deployment_name: str) -> int | None:
-    """Read-only. Current replica count for verify() after a scale action.
-    Returns None if the Deployment doesn't exist."""
+    """Read-only. Current replica count for verify() after a scale action."""
     namespace = _default_namespace(namespace)
     api = _client()
     apps_api = client.AppsV1Api(api.api_client)
@@ -390,10 +425,7 @@ def get_deployment_replicas(namespace: str, deployment_name: str) -> int | None:
 
 
 def get_configmap(namespace: str, name: str) -> dict[str, str] | None:
-    """Read-only. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b). Returns the
-    ConfigMap's key/value data, or None if it doesn't exist. ConfigMap data
-    is not sensitive by definition -- safe to read and surface directly,
-    unlike Secret below."""
+    """Read-only. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b)."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -406,12 +438,7 @@ def get_configmap(namespace: str, name: str) -> dict[str, str] | None:
 
 
 def update_configmap(namespace: str, name: str, data: dict[str, str]) -> bool:
-    """WRITE. Merge-patches the given keys into an existing ConfigMap --
-    only the keys passed in data change, every other key is left exactly
-    as-is (a JSON merge patch on .data, not a replace). Returns True if
-    the patch succeeded, False if the ConfigMap doesn't exist. Same split
-    as scale_deployment()/restart_pod(): Track C's action wires the
-    permission check and calls this once already granted."""
+    """WRITE. Merge-patches the given keys into an existing ConfigMap."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -424,14 +451,7 @@ def update_configmap(namespace: str, name: str, data: dict[str, str]) -> bool:
 
 
 def get_secret_keys(namespace: str, name: str) -> list[str] | None:
-    """Read-only. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b). Returns only
-    the Secret's key NAMES, never decoded values -- Secret data is
-    sensitive by definition and Prash's whole security posture is "your
-    credentials never leave your machine" (§4); there is no legitimate
-    reason for this connector to ever decode and hold a Secret's plaintext
-    value in memory, let alone return it somewhere it could be printed to
-    a console or written to the audit log. Returns None if the Secret
-    doesn't exist."""
+    """Read-only. Sprint-2 Kubernetes Depth (PRASH_V2.md §7b)."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -444,14 +464,7 @@ def get_secret_keys(namespace: str, name: str) -> list[str] | None:
 
 
 def update_secret(namespace: str, name: str, data: dict[str, str]) -> bool:
-    """WRITE. Merge-patches the given keys into an existing Secret. data
-    values are plain text -- passed via the API's stringData field, which
-    the API server base64-encodes server-side (the same mechanism kubectl
-    itself uses), so this function never base64-encodes or otherwise holds
-    an encoded copy of a secret value in memory. Like update_configmap(),
-    this only changes the keys passed in; every other key is untouched.
-    Returns True if the patch succeeded, False if the Secret doesn't exist.
-    """
+    """WRITE. Merge-patches the given keys into an existing Secret."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
@@ -462,51 +475,14 @@ def update_secret(namespace: str, name: str, data: dict[str, str]) -> bool:
             return False
         raise
 
-# Cap on captured stdout/stderr -- a runaway command (cat on a huge file,
-# an infinite-ish loop that got interrupted by the timeout) must not blow
-# up memory or flood the terminal/audit log. Matches the truncation pattern
-# already used elsewhere for untrusted-size text (diagnosis_agent.py's
-# fetch_file caps at 20000 chars for the same reason).
+
 _EXEC_OUTPUT_CAP = 20_000
 
 
 def exec_in_pod(
     namespace: str, pod_name: str, command: list[str], container: str | None = None, timeout: int = 30
 ) -> dict:
-    """WRITE (arbitrary command execution). Sprint-2 Kubernetes Depth
-    (PRASH_V2.md §7b). Runs `command` inside the pod via the kubernetes
-    client's WebSocket exec API and captures stdout/stderr + exit code.
-
-    This is the highest-blast-radius primitive in this connector -- unlike
-    every other write here (restart_pod, scale_deployment, update_configmap/
-    update_secret), which are each one well-defined Kubernetes API mutation,
-    this can do anything the container's own user and filesystem permit.
-    There is deliberately no allowlist or restriction at this layer --
-    Track C's ExecAction's RiskTier.APPROVAL gate (same pattern as
-    scale/rollback/config edits: always prompts, even in bypass mode,
-    unless explicitly granted) is the actual safety net, matching how every
-    other write in this connector already relies on the permission system
-    rather than baking restrictions into the connector itself.
-
-    Uses the documented WSClient pattern (`kubernetes.stream.stream(...,
-    _preload_content=False)` + `run_forever` + `returncode`), not manual
-    channel parsing -- `WSClient.returncode` already does the ERROR_CHANNEL
-    YAML parsing correctly and is what the kubernetes client's own examples
-    use. `container` disambiguates a multi-container pod; if omitted,
-    behaves like `kubectl exec` without `-c` (the pod's only container, or
-    an API-level error if there's more than one).
-
-    Returns {"stdout": str, "stderr": str, "exit_code": int}. Unlike
-    get_configmap()/scale_deployment() above, this does NOT catch and
-    translate a not-found pod into a clean None/False return -- the
-    WebSocket upgrade for a nonexistent pod fails at a different layer
-    than a plain REST call, and the exact exception shape isn't a single
-    clean ApiException(404) the way the REST-based functions get. Left to
-    propagate; Track C's ExecAction wraps it in the same broad
-    except-Exception-report-honestly pattern every other action here
-    already uses for its own failure paths, so the user still gets an
-    honest message either way, just not a specially-classified one.
-    """
+    """WRITE (arbitrary command execution). Sprint-2 Kubernetes Depth"""
     from kubernetes.stream import stream
 
     namespace = _default_namespace(namespace)

@@ -7,8 +7,17 @@ Cloud Run, AWS) and Track C write actions all share one contract. Connectors
 hold no credentials of their own: they receive them per-call from the local
 CredentialStore.
 """
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict
 
-from __future__ import annotations
+@dataclass
+class ConnectorEvent:
+    timestamp: datetime
+    connector: str
+    event_type: str
+    summary: str
+    raw: Dict[str, Any]
 
 import abc
 import enum
