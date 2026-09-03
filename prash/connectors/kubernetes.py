@@ -112,6 +112,7 @@ def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
 
 class KubernetesConnector(Connector):
     def __init__(self, credentials: dict | None = None):
+        super().__init__()
         self.read_capabilities = ("pod_status", "logs", "events", "watch", "stats")
         self.write_capabilities = ("restart", "rollback", "scale")
         self.api_client = None
