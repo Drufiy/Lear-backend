@@ -111,26 +111,29 @@ def _classify(pod: client.V1Pod) -> tuple[str | None, int, bool]:
 # --- PHASE A & B & C: THE NEW CONNECTOR CLASS ---
 
 class KubernetesConnector(Connector):
+    name = "kubernetes"
+    read_capabilities = ("pod_status", "logs", "events", "watch", "stats")
+    write_capabilities = ("restart", "rollback", "scale")
+
     def __init__(self, credentials: dict | None = None):
-        super().__init__()
-        self.read_capabilities = ("pod_status", "logs", "events", "watch", "stats")
-        self.write_capabilities = ("restart", "rollback", "scale")
+        super().__init__(credentials or {})
         self.api_client = None
         self.core_v1 = None
         self.apps_v1 = None
-        self.credentials = credentials or {}
 
-    def authenticate(self, credentials=None):
-        if credentials:
-            self.credentials.update(credentials)
-            
+    def authenticate(self) -> bool:
         kubeconfig = self.credentials.get("KUBECONFIG") or os.environ.get("KUBECONFIG")
         context = self.credentials.get("KUBE_CONTEXT") or os.environ.get("KUBE_CONTEXT") or None
-        
-        config.load_kube_config(config_file=kubeconfig, context=context)
+
+        try:
+            config.load_kube_config(config_file=kubeconfig, context=context)
+        except Exception:
+            return False
+
         self.api_client = client.ApiClient()
         self.core_v1 = client.CoreV1Api(self.api_client)
         self.apps_v1 = client.AppsV1Api(self.api_client)
+        return True
 
     def locate(self, resource: str) -> dict:
         env_namespace = self.credentials.get("KUBE_NAMESPACE") or _default_namespace(None)
@@ -140,27 +143,40 @@ class KubernetesConnector(Connector):
         return {"namespace": env_namespace, "name": resource}
 
     def poll_state(self, resource: str) -> ResourceState:
-        # Reuses the legacy wrapper to ensure perfect behavior matching
         target = self.locate(resource)
-        pods = get_pod_status(target["namespace"], target["name"])
-        
-        if not pods:
-            return ResourceState(status=ConnectorState.UNKNOWN, raw_data=None)
-            
-        p = pods[0]
-        
+        if not self.core_v1 and not self.authenticate():
+            return ResourceState(resource=resource, state=ConnectorState.UNKNOWN, detail={})
+
+        try:
+            pod = self.core_v1.read_namespaced_pod(name=target["name"], namespace=target["namespace"])
+        except ApiException as exc:
+            if exc.status == 404:
+                return ResourceState(resource=resource, state=ConnectorState.NOT_FOUND, detail={})
+            raise
+
+        problem, restart_count, ready = _classify(pod)
+
         mapping = {
             "CrashLoopBackOff": ConnectorState.CRASH_LOOPING,
             "OOMKilled": ConnectorState.FAILED,
             "ImagePullBackOff": ConnectorState.FAILED,
             "StuckPending": ConnectorState.DEGRADED,
         }
-        
-        status = mapping.get(p.problem, ConnectorState.UNKNOWN)
-        if p.problem is None and p.phase == "Running" and p.ready:
+
+        status = mapping.get(problem, ConnectorState.UNKNOWN)
+        if problem is None and (pod.status.phase or "Unknown") == "Running" and ready:
             status = ConnectorState.HEALTHY
-            
-        return ResourceState(status=status, raw_data=p.__dict__)
+
+        return ResourceState(
+            resource=f"{target['namespace']}/{target['name']}",
+            state=status,
+            detail={
+                "phase": pod.status.phase or "Unknown",
+                "problem": problem,
+                "restart_count": restart_count,
+                "ready": ready,
+            },
+        )
 
     def fetch_logs(self, resource: str) -> list[str]:
         target = self.locate(resource)
