@@ -12,6 +12,7 @@ from .contract import (
     Target,
     VerificationResult,
 )
+from .aws_alert import AWSAlertAction
 from .execute_aws import ExecuteAwsAction
 from .execute_azure import ExecuteAzureAction
 from .execute_gcp import ExecuteGCPAction
@@ -29,6 +30,7 @@ __all__ = [
     "RiskTier",
     "Target",
     "VerificationResult",
+    "AWSAlertAction",
     "ExecuteAwsAction",
     "ExecuteAzureAction",
     "ExecuteGCPAction",

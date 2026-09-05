@@ -43,6 +43,7 @@ from .actions.contract import (
 from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
+from .actions.aws_alert import AWSAlertAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.datadog_mute import DatadogMuteMonitorAction
 from .actions.gitleaks_escalate import GitleaksEscalateAction
@@ -310,6 +311,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ApplyGitlabCiFixAction(),
             ApplyManifestFixAction(),
             ExecuteAwsAction(),
+            AWSAlertAction(),
             PagerdutyAcknowledgeAction(),
             PagerdutyResolveAction(),
             VercelRedeployAction(),
@@ -419,6 +421,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
         diagnose_ci_run,
         diagnose_gitlab_ci_run,
         diagnose_k8s_pod,
+        diagnose_aws_instance,
         recommended_action_id,
         render_diagnosis,
         render_multi_failure,
@@ -499,6 +502,37 @@ def cmd_fix(args: argparse.Namespace) -> int:
             console.print(f"[red]{exc}[/red]")
             return 2
         return _render_run_result(run_result)
+
+    provider = getattr(args, "provider", "kubernetes") or "kubernetes"
+    
+    if provider == "aws":
+        try:
+            diagnosis = asyncio.run(diagnose_aws_instance(args.target, creds))
+        except FixTargetError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]AWS instance diagnosis failed: {exc}[/red]")
+            return 2
+        
+        render_diagnosis(diagnosis, console)
+        
+        action_id = recommended_action_id(diagnosis.recommended_action)
+        if action_id is None:
+            _render_no_auto_action(diagnosis.recommended_action, args.target)
+            return 0
+
+        dispatcher = _build_dispatcher(mode)
+        ctx = _make_context(args, store, creds, resource=args.target, env=args.env)
+        try:
+            result = dispatcher.run(action_id, ctx, ask=None if args.noninteractive else CliAsk())
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except MissingSecretError as exc:
+            console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
+            return 3
+        return _render_run_result(result)
 
     try:
         namespace, pod = split_k8s_target(args.target)
@@ -739,7 +773,7 @@ def cmd_config(_args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    from .watcher import run_watch_loop, run_terraform_watch_loop
+    from .watcher import run_watch_loop, run_terraform_watch_loop, run_aws_watch_loop
 
     store = CredentialStore.from_env()
     creds = store.load()
@@ -755,6 +789,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
             console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
         try:
             run_terraform_watch_loop(resource, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "aws":
+        resource = getattr(args, "resource", ".")
+        console.print(f"[bold]Watching AWS metrics/events for '{resource}'...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_aws_watch_loop(resource, interval=args.interval, console=console, creds=creds)
         except Exception as exc:
             console.print(f"[red]watch stopped: {exc}[/red]")
             return 2

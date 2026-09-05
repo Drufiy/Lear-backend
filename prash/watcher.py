@@ -23,6 +23,7 @@ import time
 
 from prash.connectors.kubernetes import PodStatus, get_pod_status
 from prash.connectors.terraform import TerraformConnector
+from prash.connectors.aws import AWSConnector
 from prash.connectors.base import ConnectorState
 from prash.notifications import send_team_notifications
 
@@ -210,6 +211,75 @@ def run_terraform_watch_loop(
             
         iterations += 1
         if max_iterations is None or iterations < max_iterations:
-            time.sleep(interval)
+    return state
+
+
+def _notify_aws(target: str, summary: str, console=None, creds: dict | None = None) -> None:
+    title = f"Prash: AWS Issue — {target}"
+    message = f"{summary}. Run `prash fix {target} --provider aws` to diagnose."
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    if console is not None:
+        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def run_aws_watch_loop(
+    target: str,
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+):
+    """Poll AWS state and metrics to detect anomalies or state changes."""
+    import datetime
     
+    interval = interval or _interval_from_env()
+    state = {} # dict of event_type -> latest_timestamp to avoid repeating
+    iterations = 0
+    connector = AWSConnector(creds or {})
+    last_poll = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=interval)
+    
+    while max_iterations is None or iterations < max_iterations:
+        try:
+            # Poll state
+            res_state = connector.poll_state(target)
+            if res_state.state in (ConnectorState.DEGRADED, ConnectorState.FAILED, ConnectorState.UNKNOWN):
+                problem = f"Instance is in state: {res_state.state.value}"
+                if state.get("instance_state") != res_state.state.value:
+                    _notify_aws(target, problem, console, creds)
+                    state["instance_state"] = res_state.state.value
+            elif res_state.state == ConnectorState.HEALTHY:
+                state["instance_state"] = "healthy"
+                
+            # Check metrics and alarms
+            events = connector.get_stats(target, since=last_poll)
+            new_events = False
+            for event in events:
+                event_type = event["event_type"]
+                event_time = event["timestamp"]
+                # Only notify if we haven't seen this specific event recently or it's a new occurrence
+                if event_type not in state or state[event_type] < event_time:
+                    _notify_aws(target, event["summary"], console, creds)
+                    state[event_type] = event_time
+                    new_events = True
+                    
+            if console is not None and state.get("instance_state") == "healthy" and not new_events:
+                console.print(f"[dim]{target}: Healthy, no new issues[/dim]")
+                
+        except Exception as e:
+            if console is not None:
+                console.print(f"[yellow]Error polling AWS: {e}[/yellow]")
+                
+        last_poll = datetime.datetime.now(datetime.timezone.utc)
+        iterations += 1
+        if max_iterations is None or iterations < max_iterations:
+            time.sleep(interval)
+            
     return state
