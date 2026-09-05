@@ -44,6 +44,7 @@ from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
 from .actions.aws_alert import AWSAlertAction
+from .actions.gcp_alert import GCPAlertAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.datadog_mute import DatadogMuteMonitorAction
 from .actions.gitleaks_escalate import GitleaksEscalateAction
@@ -310,6 +311,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ApplyCiFixAction(),
             ApplyGitlabCiFixAction(),
             ApplyManifestFixAction(),
+            GCPAlertAction(),
             ExecuteAwsAction(),
             AWSAlertAction(),
             PagerdutyAcknowledgeAction(),
@@ -422,6 +424,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
         diagnose_gitlab_ci_run,
         diagnose_k8s_pod,
         diagnose_aws_instance,
+    diagnose_gcp_instance,
         recommended_action_id,
         render_diagnosis,
         render_multi_failure,

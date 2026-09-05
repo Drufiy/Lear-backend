@@ -19,6 +19,8 @@ All notable changes to this project will be documented in this file.
 - **agent_guidelines.md**: Added a guidelines file to establish conventions for AI agents working on this project.
 - **Azure & GCP Connectors (Execution & SSH Fallback)**: Added `AzureConnector` and `GCPConnector` mirroring the AWS EC2 execution pattern. They support read operations (`instance_status`, `logs`) and use official SDKs with CLI fallbacks (`az`, `gcloud`), ultimately falling back to native SSH execution with `.pem` files if execution APIs fail.
 - **Azure/GCP execute actions**: Wired `execute-azure` and `execute-gcp` into the dispatcher as formal actions under the APPROVAL Risk Tier, matching the interactive fallback workflow of AWS.
+- **AWS Watcher & Metrics (Sprint 3)**: Enriched `AWSConnector` to fetch `DiskReadOps`, `DiskWriteOps`, `NetworkIn`, `NetworkOut`, `StatusCheckFailed`, and CloudWatch Alarms. Added a dedicated `run_aws_watch_loop` to `prash watch` to continuously monitor EC2 state and metric spikes.
+- **AWS Brain Integration**: Wired AWS EC2 context directly into the `DiagnosisAgent` via `format_aws_context` and `diagnose_aws_instance`, allowing `prash fix <instance> --provider aws` to produce AI-driven root cause analyses based on instance metrics and logs.
 - **Wizard enhancements**: `prash setup` now prompts for Azure VM configurations (`AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_LOCATION`) and Google Cloud Compute Engine keys (`GCP_PROJECT_ID`, `GCP_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`).
 ### Fixed
 - **AWS Connector — registered and hardened**: `AWSConnector` is now registered in `prash/cli.py`'s `PROVIDERS`, making `prash investigate <resource> --provider aws` usable. `authenticate()` now caches its result per connector instance instead of re-hitting STS on every method call. `read_capabilities` corrected from copy-pasted Kubernetes names (`pod_status`) to `instance_status`/`logs`. `execute_command` remains unwired to any dispatcher action — read-only only, per spec.
@@ -28,3 +30,11 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **`test_live_infra.py` relocated**: Moved from the repo root to `scripts/verify_aws_live.py`. It's a manual live-verification script, not a pytest test file (no `test_` functions), and its old name/location was misleading.
+
+## [Unreleased]
+
+### Added
+- GCP connector implementation with poll_state(), get_stats(), etch_logs(), and execute_command().
+- Native SSH fallback logic for executing commands on GCP instances when gcloud is unavailable or fails.
+- reak_gcp.py testing fixture for simulating and healing GCP instance service failures.
+- Integrated GCP connector with prash watch and prash fix loops and the GCPAlertAction.

@@ -13,6 +13,7 @@ from .contract import (
     VerificationResult,
 )
 from .aws_alert import AWSAlertAction
+from .gcp_alert import GCPAlertAction
 from .execute_aws import ExecuteAwsAction
 from .execute_azure import ExecuteAzureAction
 from .execute_gcp import ExecuteGCPAction
@@ -31,6 +32,7 @@ __all__ = [
     "Target",
     "VerificationResult",
     "AWSAlertAction",
+    "GCPAlertAction",
     "ExecuteAwsAction",
     "ExecuteAzureAction",
     "ExecuteGCPAction",
