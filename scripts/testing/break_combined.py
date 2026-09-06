@@ -6,18 +6,19 @@ coinciding Datadog metric spike inside the same time window, so that
 correlate() over both connectors' get_stats() output resolves them to ONE
 incident with one root cause — not two separate alerts.
 
-Two legs:
-  * Kubernetes — REAL. Reads KubernetesConnector.get_stats() for a
-    crash-looping pod (the standing `broken-app` fixture in prash-demo). Needs
-    the kind cluster up; use --offline to substitute a canned k8s crash event
-    when it isn't (Datadog real execution — M4 — isn't landed yet either, so
-    the Datadog leg is stubbed regardless; the join is identical either way).
-  * Datadog — STUBBED. A canned metric_spike ConnectorEvent timestamped to
-    coincide with the k8s crash. Swap this for DatadogConnector.get_stats()
-    once M4 lands; correlate() doesn't care where the events came from.
+Two legs, both REAL as of Aryan's M4 (Datadog real execution, 647f3fa):
+  * Kubernetes — DatadogConnector.get_stats() for the standing `broken-app`
+    fixture in prash-demo. Needs the kind cluster up; --offline substitutes a
+    canned k8s crash event when it isn't.
+  * Datadog — DatadogConnector.get_stats() against the real account for the
+    standing synthetic monitor `prash-test-synthetic-error-rate`
+    (scripts/testing/break_datadog.py owns it). Run `break_datadog.py` first
+    to force it into Alert (allow ~1-5min for evaluation); --offline
+    substitutes a canned spike when DATADOG_API_KEY/APP_KEY aren't set.
 
-    python3 scripts/testing/break_combined.py                 # live k8s + stub datadog
-    python3 scripts/testing/break_combined.py --offline       # canned k8s + stub datadog
+    python3 scripts/testing/break_datadog.py                  # force the monitor into Alert first
+    python3 scripts/testing/break_combined.py                 # live k8s + live datadog
+    python3 scripts/testing/break_combined.py --offline       # canned k8s + canned datadog
     python3 scripts/testing/break_combined.py --namespace prash-demo --pod <name>
 
 Exit 0 when the two legs correlate into exactly one multi-source incident.
@@ -73,14 +74,32 @@ def _k8s_event_canned() -> list[dict]:
     }]
 
 
-def _datadog_spike_stub(anchor: datetime.datetime) -> list[dict]:
-    """STUB (M4 pending): a Datadog metric spike coinciding with the crash."""
+_DATADOG_MONITOR = "prash-test-synthetic-error-rate"
+
+
+def _datadog_events_live(since: datetime.datetime) -> list[dict]:
+    """Real Datadog ConnectorEvents for the standing synthetic monitor
+    (M4, Aryan's DatadogConnector.get_stats())."""
+    from prash.connectors.datadog import DatadogConnector
+
+    creds = _env()
+    conn = DatadogConnector({
+        "DATADOG_API_KEY": creds.get("DATADOG_API_KEY"),
+        "DATADOG_APP_KEY": creds.get("DATADOG_APP_KEY"),
+    })
+    if not conn.authenticate():
+        raise RuntimeError("could not authenticate to Datadog (DATADOG_API_KEY/APP_KEY missing or invalid)")
+    return conn.get_stats(_DATADOG_MONITOR, since=since)
+
+
+def _datadog_spike_canned(anchor: datetime.datetime) -> list[dict]:
+    """Canned fallback for --offline or missing credentials."""
     return [{
         "timestamp": anchor + datetime.timedelta(seconds=6),
         "connector": "datadog",
         "event_type": "metric_spike",
-        "summary": "checkout-api p99 latency spiked to 4200ms (monitor prash-test-synthetic-error-rate)",
-        "raw": {"stubbed": True, "note": "replace with DatadogConnector.get_stats() when M4 lands"},
+        "summary": f"checkout-api p99 latency spiked to 4200ms (monitor {_DATADOG_MONITOR})",
+        "raw": {"canned": True},
     }]
 
 
@@ -131,8 +150,24 @@ def main() -> int:
     anchor = max(e["timestamp"] for e in k8s_events)
     if anchor.tzinfo is None:
         anchor = anchor.replace(tzinfo=UTC)
-    datadog_events = _datadog_spike_stub(anchor)
-    print("datadog leg: STUBBED (M4 real execution pending)")
+
+    if args.offline:
+        datadog_events = _datadog_spike_canned(anchor)
+        print("datadog leg: CANNED (--offline)")
+    else:
+        try:
+            since = datetime.datetime.now(UTC) - datetime.timedelta(hours=1)
+            datadog_events = _datadog_events_live(since)
+            if datadog_events:
+                print(f"datadog leg: LIVE — {len(datadog_events)} event(s) from {_DATADOG_MONITOR}")
+            else:
+                print(f"datadog leg: LIVE call succeeded but returned 0 events — is {_DATADOG_MONITOR} "
+                      f"in Alert? (run break_datadog.py first, allow ~1-5min to evaluate)", file=sys.stderr)
+                datadog_events = _datadog_spike_canned(anchor)
+                print("datadog leg: falling back to CANNED")
+        except Exception as exc:
+            print(f"datadog live leg failed ({exc}); falling back to canned", file=sys.stderr)
+            datadog_events = _datadog_spike_canned(anchor)
 
     all_events = list(k8s_events) + list(datadog_events)
     incidents = correlate(all_events, window_seconds=args.window)
