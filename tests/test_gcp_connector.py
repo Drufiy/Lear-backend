@@ -159,3 +159,48 @@ def test_fetch_logs_uses_serial_port_output(monkeypatch):
     # The call must carry the zone and project
     serial_calls = [c for c in calls if len(c) > 3 and c[3] == "get-serial-port-output"]
     assert serial_calls and "--zone" in serial_calls[0]
+
+
+# ---- get_stats / watch: the new surface PR #33 added, previously untested ----
+
+def test_get_stats_empty_when_unauthenticated():
+    # no project -> authenticate() False -> get_stats returns [] (never raises)
+    assert GCPConnector({}).get_stats("any-instance") == []
+
+
+def test_get_stats_empty_when_instance_not_found(monkeypatch):
+    _patch_gcloud(monkeypatch, {"list": ""})  # no zone -> unknown instance
+    assert GCPConnector(_creds()).get_stats("missing") == []
+
+
+def test_watch_returns_active_handle(monkeypatch):
+    _patch_gcloud(
+        monkeypatch,
+        {
+            "list": "us-central1-a",
+            "describe": '{"name": "fix", "zone": "z/us-central1-a", "machineType": "m/e2-micro", "status": "RUNNING"}',
+        },
+    )
+    handle = GCPConnector(_creds()).watch("prash-test-fixture")
+    assert handle.is_active is True
+    assert handle.connector == "gcp"
+    assert handle.target == "prash-test-fixture"
+    handle.stop()
+    assert handle.is_active is False
+
+
+def test_watch_raises_when_instance_not_found(monkeypatch):
+    import pytest
+
+    _patch_gcloud(monkeypatch, {"list": ""})  # no zone
+    with pytest.raises(ValueError):
+        GCPConnector(_creds()).watch("missing")
+
+
+def test_execute_gcp_action_registered():
+    # PR #33 claimed execute-gcp was "wired into the dispatcher"; it wasn't.
+    from prash.cli import _build_dispatcher
+    from prash.permissions import PermissionMode
+
+    dispatcher = _build_dispatcher(PermissionMode.ASK)
+    assert "execute-gcp" in dispatcher.available
