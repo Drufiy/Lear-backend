@@ -663,3 +663,126 @@ def test_get_stats_filters_events_before_since():
     since = datetime(2026, 9, 6, 11, 0, tzinfo=timezone.utc)
     events = conn.get_stats("prash-demo/broken-app", since=since)
     assert len(events) == 1 and events[0]["event_type"] == "New"
+
+
+# -- KubernetesConnector.watch(): the other new class surface with zero
+# -- coverage (Notion: "Add test coverage for KubernetesConnector
+# -- (poll_state/watch/get_stats)"). watch() is a generator wrapping the k8s
+# -- watch API (kubernetes.watch.Watch().stream(...)); these mock that stream
+# -- the same way _patched_core_api mocks the plain client -- no real cluster.
+
+class _FakeWatchStream:
+    """Mimics kubernetes.watch.Watch(): .stream(fn, **kwargs) replays a
+    scripted list of watch events and records the kwargs it was called with."""
+
+    def __init__(self, events, captured_kwargs):
+        self._events = events
+        self._captured = captured_kwargs
+
+    def stream(self, fn, **kwargs):
+        self._captured.update(kwargs)
+        return iter(self._events)
+
+
+def _watchable_pod(name="broken-app-abc", namespace="prash-demo", **kw):
+    """A _pod() with a working to_dict() -- watch() puts the raw pod dict on
+    the yielded ConnectorEvent, which SimpleNamespace doesn't provide."""
+    pod = _pod(name=name, namespace=namespace, **kw)
+    pod.to_dict = lambda: {"metadata": {"name": name, "namespace": namespace}}
+    return pod
+
+
+def _patch_watch_stream(monkeypatch, events):
+    captured: dict = {}
+    monkeypatch.setattr(k8s, "watch", SimpleNamespace(Watch=lambda: _FakeWatchStream(events, captured)))
+    return captured
+
+
+@pytest.mark.parametrize("waiting_reason,expected_type", [
+    ("CrashLoopBackOff", "crashloopbackoff"),
+    ("ImagePullBackOff", "imagepullbackoff"),
+])
+def test_watch_yields_event_for_known_problem_states(monkeypatch, waiting_reason, expected_type):
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    pod = _watchable_pod(container_statuses=[
+        _container_status(ready=False, restart_count=5, waiting_reason=waiting_reason)
+    ])
+    _patch_watch_stream(monkeypatch, [{"object": pod}])
+
+    events = list(conn.watch("prash-demo/broken-app-abc"))
+
+    assert len(events) == 1
+    assert events[0]["connector"] == "kubernetes"
+    assert events[0]["event_type"] == expected_type
+    assert "broken-app-abc" in events[0]["summary"]
+    assert "restart_count=5" in events[0]["summary"]
+    assert events[0]["raw"] == {"metadata": {"name": "broken-app-abc", "namespace": "prash-demo"}}
+
+
+def test_watch_yields_event_for_oom_killed(monkeypatch):
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    pod = _watchable_pod(container_statuses=[
+        _container_status(ready=True, restart_count=2, last_terminated_reason="OOMKilled")
+    ])
+    _patch_watch_stream(monkeypatch, [{"object": pod}])
+
+    events = list(conn.watch("prash-demo/broken-app-abc"))
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "oomkilled"
+
+
+def test_watch_ignores_healthy_pod_updates(monkeypatch):
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    healthy = _watchable_pod(container_statuses=[_container_status(ready=True, restart_count=0)])
+    _patch_watch_stream(monkeypatch, [{"object": healthy}])
+
+    events = list(conn.watch("prash-demo/broken-app-abc"))
+
+    assert events == []
+
+
+def test_watch_scopes_to_named_pod_via_field_selector(monkeypatch):
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    captured = _patch_watch_stream(monkeypatch, [])
+
+    list(conn.watch("prash-demo/broken-app-abc"))
+
+    assert captured["namespace"] == "prash-demo"
+    assert captured["field_selector"] == "metadata.name=broken-app-abc"
+
+
+def test_watch_namespace_wide_when_no_pod_name(monkeypatch):
+    """target='namespace/*' (or bare namespace) watches every pod --
+    locate() maps a bare name to name='*' is not the contract here, but an
+    explicit wildcard must skip the field selector entirely."""
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    captured = _patch_watch_stream(monkeypatch, [])
+
+    list(conn.watch("prash-demo/*"))
+
+    assert captured["namespace"] == "prash-demo"
+    assert "field_selector" not in captured
+
+
+def test_watch_authenticates_when_not_already_connected(monkeypatch):
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    assert conn.core_v1 is None
+    called = {"authenticate": False}
+
+    def _fake_authenticate():
+        called["authenticate"] = True
+        conn.core_v1 = MagicMock()
+        return True
+
+    monkeypatch.setattr(conn, "authenticate", _fake_authenticate)
+    _patch_watch_stream(monkeypatch, [])
+
+    list(conn.watch("prash-demo/broken-app-abc"))
+
+    assert called["authenticate"] is True
