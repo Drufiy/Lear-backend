@@ -137,20 +137,42 @@ DIAGNOSIS_TOOL = {
             },
             "recommended_action": {
                 "type": ["string", "null"],
-                "enum": ["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply", None],
+                "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", None],
                 "description": (
                     "ONLY populate when category='runtime' or 'infra_as_code'. Which infrastructure action "
                     "addresses this failure: restart_pod (clears a wedged/stuck container — "
                     "does NOT help if the image or command is genuinely broken, it will just "
                     "crash-loop again), rollback (the last deployment introduced the problem), "
-                    "terraform_init (resolves missing modules or uninitialized backend), "
-                    "terraform_apply (resolves config drift or applies pending state changes). "
-                    "Leave null if no action can help, OR if you are instead populating `options` "
-                    "below for a genuinely ambiguous case, OR — importantly — if you are proposing "
-                    "a corrected Deployment manifest in files_changed (the manifest change IS the "
-                    "fix; a restart on top of it is noise). Only leave files_changed=[] for "
-                    "category='runtime' when you have no manifest repo available, or when the fix "
-                    "genuinely isn't in the manifest. See the KUBERNETES / RUNTIME FAILURES section."
+                    "edit_configmap (a specific ConfigMap key holds a wrong value and the pod's "
+                    "own logs name both the key and what the correct value should be — see "
+                    "config_patch/config_patch_target below and the KUBERNETES / RUNTIME "
+                    "FAILURES section), terraform_init (resolves missing modules or uninitialized "
+                    "backend), terraform_apply (resolves config drift or applies pending state "
+                    "changes). Leave null if no action can help, OR if you are instead populating "
+                    "`options` below for a genuinely ambiguous case, OR — importantly — if you are "
+                    "proposing a corrected Deployment manifest in files_changed (the manifest "
+                    "change IS the fix; a restart on top of it is noise). Only leave "
+                    "files_changed=[] for category='runtime' when you have no manifest repo "
+                    "available, or when the fix genuinely isn't in the manifest. See the "
+                    "KUBERNETES / RUNTIME FAILURES section."
+                ),
+            },
+            "config_patch": {
+                "type": ["object", "null"],
+                "description": (
+                    "ONLY populate when recommended_action='edit_configmap'. Maps key -> "
+                    "corrected_value for the ConfigMap merge-patch, e.g. "
+                    "{'DATABASE_HOST': 'postgres'}. Every key/value must be named with high "
+                    "confidence directly from the pod's own logs — never guess a value that "
+                    "isn't evidenced there. Leave null otherwise."
+                ),
+                "additionalProperties": {"type": "string"},
+            },
+            "config_patch_target": {
+                "type": ["string", "null"],
+                "description": (
+                    "ONLY populate when recommended_action='edit_configmap'. The ConfigMap's "
+                    "own name (not the pod's), e.g. 'checkout-api-config'. Leave null otherwise."
                 ),
             },
             "options": {
@@ -172,7 +194,7 @@ DIAGNOSIS_TOOL = {
                     "properties": {
                         "action": {
                             "type": ["string", "null"],
-                            "enum": ["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply", None],
+                            "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", None],
                             "description": "This option's action id, or null for 'no automated action, escalate to a human' as one of the ranked choices.",
                         },
                         "rationale": {
@@ -182,6 +204,15 @@ DIAGNOSIS_TOOL = {
                         "is_default": {
                             "type": "boolean",
                             "description": "True for exactly one option: what you would pick if forced to choose a single action.",
+                        },
+                        "config_patch": {
+                            "type": ["object", "null"],
+                            "description": "Only populated when this option's action='edit_configmap'. Same shape as the top-level config_patch field.",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "config_patch_target": {
+                            "type": ["string", "null"],
+                            "description": "Only populated when this option's action='edit_configmap'. Same shape as the top-level config_patch_target field.",
                         },
                     },
                 },
@@ -665,7 +696,20 @@ have been given access to the repository holding the Deployment manifest:
 **WITHOUT a manifest repo** (no investigation tools available): there is no
 code diff you can write. files_changed MUST be [] (fix_type auto-resolves to
 manual_required) and you communicate what to do via recommended_action:
-"restart_pod", "rollback", or null if no available action can help.
+"restart_pod", "rollback", "edit_configmap", or null if no available action
+can help.
+
+edit_configmap is the one exception to "no code diff you can write" — it is a
+live patch, not a manifest edit, so it needs no repo access. Use it ONLY when
+BOTH hold: (1) the pod's own logs name the exact ConfigMap key/value at fault
+with high confidence (e.g. the app logs "could not reach postgres-wrong:5432"
+and also logs which ConfigMap/key that came from — you are reading the value
+out of the evidence, never guessing it), and (2) you can name the ConfigMap
+itself (config_patch_target) — usually visible in the pod's own log line, or
+inferable with high confidence from a "<deployment>-config" naming pattern
+you've actually seen evidenced. If the logs show a broken value but not which
+key/ConfigMap it lives in, that's still recommended_action: null — a
+low-confidence guess at the target is worse than surfacing nothing.
 
 **WITH a manifest repo** (fetch_file / list_directory / search_code are
 available to you): most real Kubernetes failures are NOT fixed by restarting —
@@ -771,6 +815,31 @@ available, so the Deployment is readable and editable.
     being useless — but instead of stopping at "a human must fix the Deployment", you hand the
     human the corrected Deployment. Do not fall back to files_changed=[] just because the
     category is "runtime"; if you can read the manifest, fix the manifest.
+
+EXAMPLE 20c — CrashLoopBackOff, wrong ConfigMap value, NO manifest repo (edit_configmap)
+POD STATUS: problem=CrashLoopBackOff, restart_count=6
+POD LOGS:
+  "[checkout-api] starting up, DATABASE_HOST='postgres-wrong' DATABASE_PORT=5432"
+  "[checkout-api] attempt 1/8: could not reach postgres-wrong:5432 -- ConnectionRefusedError"
+  ... (7 more identical attempts) ...
+  "[checkout-api] FATAL: could not connect to database at postgres-wrong:5432 after 8 attempts -- ConnectionRefusedError"
+  "[checkout-api] check configmap/checkout-api-config key DATABASE_HOST -- current value is 'postgres-wrong'"
+No investigation tools available — you cannot see or edit the Deployment or the ConfigMap.
+  category: "runtime", fix_type: "manual_required", confidence: 0.9
+  recommended_action: "edit_configmap"
+  config_patch: {"DATABASE_HOST": "postgres"}
+  config_patch_target: "checkout-api-config"
+  files_changed: []
+  root_cause: "checkout-api's ConfigMap key DATABASE_HOST is set to 'postgres-wrong', a host that doesn't exist — every connection attempt is refused, and the app's own logs confirm both the ConfigMap name and the key."
+  fix_description: "Patch configmap/checkout-api-config so DATABASE_HOST points at the real service name 'postgres' (the cluster's Service for the database, inferred from the app's naming convention and the fact that 'postgres-wrong' is a corrupted variant of it), then restart the deployment to pick up the change."
+  ← Why this is safe to name without fetch_file: the pod's own log line names BOTH the exact
+    ConfigMap (checkout-api-config) and the exact key (DATABASE_HOST) at fault — that's not a
+    guess, it's the app doing your investigation for you. The corrected value ("postgres") is
+    inferred from the broken value being an obvious corruption of the real Service name; if the
+    logs gave no hint at all what the right value should be, this would drop to
+    recommended_action: null instead of fabricating a value.
+  ← WRONG would be recommended_action="restart_pod" — DATABASE_HOST is unchanged after a restart,
+    so the pod fails identically every time, exactly like EXAMPLE 20's missing-file case.
 
 EXAMPLE 21 — CrashLoopBackOff, no clear cause (manual_required, tentative restart)
 POD STATUS: problem=CrashLoopBackOff, restart_count=4

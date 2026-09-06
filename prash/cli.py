@@ -566,7 +566,14 @@ def cmd_fix(args: argparse.Namespace) -> int:
             _render_no_auto_action(chosen, namespace)
             return 0
         dispatcher = _build_dispatcher(mode)
-        ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
+        if action_id == "edit-configmap":
+            # The brain named a specific ConfigMap (not the pod) as the
+            # target — mirror the apply-manifest-fix pattern of overriding
+            # ctx.target.resource before dispatching (PRASH_V2.md §9).
+            ctx = _make_context(args, store, creds, resource=f"{namespace}/{chosen.config_patch_target}", env=args.env or namespace)
+            ctx.extra["config_data"] = chosen.config_patch
+        else:
+            ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
         try:
             # Whatever the user picked still runs through the normal pipeline:
             # risk tiers, circuit breaker, and the audit log all apply.
@@ -585,7 +592,14 @@ def cmd_fix(args: argparse.Namespace) -> int:
         return 0
 
     dispatcher = _build_dispatcher(mode)
-    ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
+    if action_id == "edit-configmap":
+        # The brain named a specific ConfigMap (not the pod) as the target —
+        # mirror the apply-manifest-fix pattern of overriding
+        # ctx.target.resource before dispatching (PRASH_V2.md §9).
+        ctx = _make_context(args, store, creds, resource=f"{namespace}/{diagnosis.config_patch_target}", env=args.env or namespace)
+        ctx.extra["config_data"] = diagnosis.config_patch
+    else:
+        ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
     try:
         result = dispatcher.run(action_id, ctx, ask=None if args.noninteractive else CliAsk())
     except KeyError as exc:

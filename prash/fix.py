@@ -40,7 +40,10 @@ logger = logging.getLogger(__name__)
 # doesn't derive from a pod (no pod->deployment lookup), so it surfaces as a
 # manual next-step instead of us guessing. scale has no action this sprint
 # (§7 out of scope) — same honest surface, no fabricated capability.
-_AUTO_ACTIONS = {"restart_pod": "restart-pod"}
+# edit_configmap dispatches to edit-configmap when the brain names a specific
+# ConfigMap key/value fix with high-confidence log evidence (schemas.py
+# Diagnosis.config_patch / config_patch_target).
+_AUTO_ACTIONS = {"restart_pod": "restart-pod", "edit_configmap": "edit-configmap"}
 
 
 class FixTargetError(Exception):

@@ -166,7 +166,7 @@ class DiagnosisOption(BaseModel):
     ranked choices with reasoning instead of either guessing or dead-ending
     on recommended_action=None."""
 
-    action: Literal["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply"] | None = Field(
+    action: Literal["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply"] | None = Field(
         default=None,
         description=(
             "The action id for this option, or null for 'take no automated "
@@ -177,6 +177,14 @@ class DiagnosisOption(BaseModel):
     is_default: bool = Field(
         default=False,
         description="True for exactly one option in the list: what the brain would pick if forced to choose one.",
+    )
+    config_patch: dict[str, str] | None = Field(
+        default=None,
+        description="Only populated when action='edit_configmap'. Same shape as Diagnosis.config_patch.",
+    )
+    config_patch_target: str | None = Field(
+        default=None,
+        description="Only populated when action='edit_configmap'. Same shape as Diagnosis.config_patch_target.",
     )
 
 
@@ -203,7 +211,7 @@ class Diagnosis(BaseModel):
         default_factory=list,
         description="Exact names of missing secrets/env vars that must be added to fix this failure (e.g. STRIPE_KEY, DATABASE_URL). Only populated when category='environment'.",
     )
-    recommended_action: Literal["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply"] | None = Field(
+    recommended_action: Literal["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply"] | None = Field(
         default=None,
         description=(
             "Only populated when category='runtime'. The infrastructure action that "
@@ -213,6 +221,25 @@ class Diagnosis(BaseModel):
             "recommendation for the dispatcher, not an instruction to execute — it still "
             "goes through the normal permission/approval pipeline (PRASH_V2.md §5). "
             "Leave unset (null) when `options` is populated instead — see below."
+        ),
+    )
+    config_patch: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Only populated when recommended_action='edit_configmap'. Maps "
+            "key -> corrected_value for the ConfigMap merge-patch, e.g. "
+            "{'DATABASE_HOST': 'postgres'}. Every key must be one you can name "
+            "with high confidence from the pod's own logs (e.g. the app logs the "
+            "wrong host/port it tried and the correct key name) — never guess a "
+            "value that isn't evidenced in logs/events."
+        ),
+    )
+    config_patch_target: str | None = Field(
+        default=None,
+        description=(
+            "Only populated when recommended_action='edit_configmap'. The "
+            "ConfigMap's own name (not the pod's), e.g. 'checkout-api-config'. "
+            "Namespace is inherited from the pod's own namespace."
         ),
     )
     options: list[DiagnosisOption] | None = Field(
