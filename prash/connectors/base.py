@@ -8,19 +8,10 @@ hold no credentials of their own: they receive them per-call from the local
 CredentialStore.
 """
 import abc
+import datetime
 import enum
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, Mapping, Optional
-
-
-@dataclass
-class ConnectorEvent:
-    timestamp: datetime
-    connector: str
-    event_type: str
-    summary: str
-    raw: Dict[str, Any]
+from typing import Any, Dict, Mapping, Optional, TypedDict
 
 
 class ConnectorState(enum.Enum):
@@ -32,6 +23,38 @@ class ConnectorState(enum.Enum):
     DEPLOYING = "deploying"
     STABLE = "stable"
     NOT_FOUND = "not-found"
+
+
+class ConnectorEvent(TypedDict):
+    """Normalized event shape across all providers."""
+    timestamp: datetime.datetime   # UTC
+    connector: str
+    event_type: str
+    summary: str
+    raw: dict
+
+
+class WatchHandle(abc.ABC):
+    """Handle returned by a connector's watch() method to manage the active watch."""
+
+    @property
+    @abc.abstractmethod
+    def is_active(self) -> bool:
+        """Return True if the watch is currently active."""
+
+    @property
+    @abc.abstractmethod
+    def connector(self) -> str:
+        """Name of the connector (e.g., 'aws')."""
+
+    @property
+    @abc.abstractmethod
+    def target(self) -> str:
+        """The target being watched."""
+
+    @abc.abstractmethod
+    def stop(self) -> None:
+        """Stop the active watch."""
 
 
 @dataclass
@@ -66,4 +89,12 @@ class Connector(abc.ABC):
 
     def poll_state(self, resource: str, **kwargs: Any) -> ResourceState:
         """Return the current state of a resource."""
+        raise NotImplementedError
+
+    def watch(self, target: str) -> WatchHandle:
+        """Begin monitoring `target`; the handle feeds the shared watcher loop."""
+        raise NotImplementedError
+
+    def get_stats(self, target: str, since: datetime.datetime | None = None) -> list[ConnectorEvent]:
+        """Return a time series of normalized events for `target`, optionally since a time."""
         raise NotImplementedError

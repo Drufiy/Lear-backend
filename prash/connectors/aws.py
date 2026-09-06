@@ -7,6 +7,7 @@ Does not fall back to `~/.aws/credentials` implicitly unless the user added it t
 from __future__ import annotations
 
 import base64
+import datetime
 import os
 import subprocess
 import time
@@ -19,16 +20,38 @@ try:
 except ImportError:
     _HAS_BOTO3 = False
 
-from .base import Connector, ConnectorState, ResourceState
+from .base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
 
 class SSMFailedNeedsSSH(Exception):
     """Raised when SSM execution fails and requires an SSH PEM file to proceed."""
     pass
 
 
+class AWSWatchHandle(WatchHandle):
+    def __init__(self, connector: "AWSConnector", target: str):
+        self._connector = connector
+        self._target = target
+        self._active = True
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @property
+    def connector(self) -> str:
+        return "aws"
+
+    @property
+    def target(self) -> str:
+        return self._target
+
+    def stop(self) -> None:
+        self._active = False
+
+
 class AWSConnector(Connector):
     name = "aws"
-    read_capabilities = ("instance_status", "logs")
+    read_capabilities = ("instance_status", "logs", "watch", "stats")
     write_capabilities = ("execute",)
 
     def __init__(self, credentials: Mapping[str, Any]):
@@ -331,3 +354,294 @@ class AWSConnector(Connector):
                     "stderr": err.stderr,
                     "exit_code": err.returncode
                 }
+
+    def watch(self, target: str) -> WatchHandle:
+        """Begin monitoring `target`; the handle feeds the shared watcher loop."""
+        if not self.authenticate():
+            raise RuntimeError("unauthenticated")
+        return AWSWatchHandle(self, target)
+
+    def get_stats(self, target: str, since: datetime.datetime | None = None) -> list[ConnectorEvent]:
+        """Return a time series of normalized events for `target`, optionally since a time."""
+        if not self.authenticate():
+            return []
+
+        instance_info = self.locate(target)
+        if not instance_info:
+            return []
+
+        instance_id = instance_info["instance_id"]
+        session = self._get_boto_session()
+        
+        events: list[ConnectorEvent] = []
+        if since is None:
+            since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+            
+        try:
+            cloudtrail = session.client("cloudtrail")
+            ct_resp = cloudtrail.lookup_events(
+                LookupAttributes=[{"AttributeKey": "ResourceName", "AttributeValue": instance_id}],
+                StartTime=since,
+            )
+            return ResourceState(resource, state, detail)
+            
+        except botocore.exceptions.ClientError as e:
+            return ResourceState(resource, ConnectorState.UNKNOWN, {"error": str(e)})
+
+    def _marker_present(self, instance_id: str, pem_path: str | None = None) -> bool:
+        """Return True if the prash test fixture's break marker exists on the
+        instance. Uses SSM first; falls back to SSH when pem_path is given
+        (the exact fallback execute-aws exercises). Never raises.
+        """
+        session = self._get_boto_session()
+        ssm = session.client("ssm")
+        cmd = "test -f /tmp/prash-test-fixture-break && echo PRESENT || echo ABSENT"
+        try:
+            resp = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [cmd]},
+                TimeoutSeconds=30,
+            )
+            command_id = resp["Command"]["CommandId"]
+            # Poll until the invocation finishes -- a single immediate read can
+            # catch it still Pending/InProgress and wrongly report ABSENT.
+            for _ in range(15):
+                time.sleep(2)
+                inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+                if inv.get("Status") not in ("Pending", "InProgress"):
+                    return "PRESENT" in inv.get("StandardOutputContent", "")
+            return False
+        except Exception:  # noqa: BLE001 — SSM unavailable; fall through to SSH if we have a pem
+            pass
+
+        if not pem_path or not os.path.exists(pem_path):
+            return False
+
+        try:
+            ec2 = session.client("ec2")
+            inst = ec2.describe_instances(InstanceIds=[instance_id])
+            public_ip = inst["Reservations"][0]["Instances"][0]["PublicIpAddress"]
+        except (KeyError, IndexError):
+            return False
+
+        try:
+            result = subprocess.run(
+                ["ssh", "-i", pem_path,
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "ConnectTimeout=10",
+                 f"ubuntu@{public_ip}", cmd],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            return "PRESENT" in result.stdout
+        except Exception:  # noqa: BLE001 — same honesty rule as the SSM path
+            return False
+
+    def fetch_logs(self, resource: str, **kwargs: Any) -> list[str]:
+        """Fetch EC2 console output."""
+        if not self.authenticate():
+            return []
+
+        instance_info = self.locate(resource)
+        if not instance_info:
+            return []
+            
+        session = self._get_boto_session()
+        ec2 = session.client("ec2")
+
+        try:
+            resp = ec2.get_console_output(InstanceId=instance_info["instance_id"])
+            output = resp.get("Output")
+            if not output:
+                return []
+                
+            try:
+                import binascii
+                # Some boto3 versions/mocks automatically decode the base64 string
+                decoded = base64.b64decode(output).decode("utf-8", errors="replace")
+            except (binascii.Error, ValueError):
+                decoded = output
+            return decoded.splitlines()
+        except botocore.exceptions.ClientError:
+            return []
+
+    def execute_command(self, resource: str, command: str, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Execute a command on an EC2 instance.
+        Attempts AWS Systems Manager (SSM) first.
+        If SSM fails, it attempts native SSH if 'pem_path' is provided in kwargs.
+        If SSM fails and 'pem_path' is absent, raises SSMFailedNeedsSSH.
+        """
+        if not self.authenticate():
+            return {"error": "unauthenticated"}
+
+        instance_info = self.locate(resource)
+        if not instance_info:
+            return {"error": f"Instance {resource} not found"}
+
+        instance_id = instance_info["instance_id"]
+        session = self._get_boto_session()
+        ssm = session.client("ssm")
+
+        try:
+            ssm_resp = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={'commands': [command]},
+                TimeoutSeconds=30
+            )
+            command_id = ssm_resp['Command']['CommandId']
+            # Wait a few seconds for command to start outputting
+            time.sleep(2)
+            out_resp = ssm.get_command_invocation(
+                CommandId=command_id,
+                InstanceId=instance_id,
+            )
+            return {
+                "source": "ssm",
+                "status": out_resp.get("Status"),
+                "stdout": out_resp.get("StandardOutputContent", ""),
+                "stderr": out_resp.get("StandardErrorContent", "")
+            }
+        except Exception as e:
+            # SSM failed. Check if we should fallback to SSH
+            pem_path = kwargs.get("pem_path")
+            if not pem_path:
+                raise SSMFailedNeedsSSH(f"SSM execution failed: {e}. A PEM file is required for SSH fallback.")
+
+            if not os.path.exists(pem_path):
+                return {"error": f"PEM file not found at {pem_path}"}
+
+            ec2 = session.client("ec2")
+            inst_info = ec2.describe_instances(InstanceIds=[instance_id])
+            try:
+                public_ip = inst_info["Reservations"][0]["Instances"][0]["PublicIpAddress"]
+            except KeyError:
+                return {"error": "Instance does not have a Public IP address assigned for SSH."}
+
+            # Attempt native SSH
+            ssh_cmd = [
+                "ssh",
+                "-i", pem_path,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                f"ubuntu@{public_ip}",
+                command
+            ]
+            
+            try:
+                result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
+                return {
+                    "source": "ssh",
+                    "status": "Success",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr
+                }
+            except subprocess.CalledProcessError as err:
+                return {
+                    "source": "ssh",
+                    "status": "Failed",
+                    "stdout": err.stdout,
+                    "stderr": err.stderr,
+                    "exit_code": err.returncode
+                }
+
+    def watch(self, target: str) -> WatchHandle:
+        """Begin monitoring `target`; the handle feeds the shared watcher loop."""
+        if not self.authenticate():
+            raise RuntimeError("unauthenticated")
+        return AWSWatchHandle(self, target)
+
+    def get_stats(self, target: str, since: datetime.datetime | None = None) -> list[ConnectorEvent]:
+        """Return a time series of normalized events for `target`, optionally since a time."""
+        if not self.authenticate():
+            return []
+
+        instance_info = self.locate(target)
+        if not instance_info:
+            return []
+
+        instance_id = instance_info["instance_id"]
+        session = self._get_boto_session()
+        
+        events: list[ConnectorEvent] = []
+        if since is None:
+            since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+            
+        try:
+            cloudtrail = session.client("cloudtrail")
+            ct_resp = cloudtrail.lookup_events(
+                LookupAttributes=[{"AttributeKey": "ResourceName", "AttributeValue": instance_id}],
+                StartTime=since,
+            )
+            for event in ct_resp.get("Events", []):
+                events.append(ConnectorEvent(
+                    timestamp=event.get("EventTime"),
+                    connector="aws",
+                    event_type="cloudtrail_event",
+                    summary=f"CloudTrail: {event.get('EventName')}",
+                    raw=event,
+                ))
+        except botocore.exceptions.ClientError:
+            pass
+
+        try:
+            cw = session.client("cloudwatch")
+            end_time = datetime.datetime.now(datetime.timezone.utc)
+            
+            # Fetch various EC2 metrics
+            metrics_to_fetch = [
+                ("CPUUtilization", "Average", 90, "cpu_spike", "CPU Spike"),
+                ("DiskReadOps", "Sum", 5000, "high_disk_read", "High Disk Read"),
+                ("DiskWriteOps", "Sum", 5000, "high_disk_write", "High Disk Write"),
+                ("NetworkIn", "Sum", 1000000000, "high_network_in", "High Network In"), # 1GB
+                ("NetworkOut", "Sum", 1000000000, "high_network_out", "High Network Out"), # 1GB
+                ("StatusCheckFailed", "Maximum", 0.5, "status_check_failed", "Status Check Failed"),
+            ]
+            
+            for metric, stat, threshold, event_type, summary_prefix in metrics_to_fetch:
+                cw_resp = cw.get_metric_statistics(
+                    Namespace="AWS/EC2",
+                    MetricName=metric,
+                    Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                    StartTime=since,
+                    EndTime=end_time,
+                    Period=300,
+                    Statistics=[stat],
+                )
+                for dp in cw_resp.get("Datapoints", []):
+                    val = dp.get(stat, 0)
+                    if val >= threshold:
+                        events.append(ConnectorEvent(
+                            timestamp=dp.get("Timestamp"),
+                            connector="aws",
+                            event_type=event_type,
+                            summary=f"{summary_prefix}: {val:.2f}",
+                            raw=dp,
+                        ))
+                        
+            # Fetch Alarms for this instance
+            alarms_resp = cw.describe_alarms_for_metric(
+                MetricName="CPUUtilization", # Need to fetch alarms associated with the dimension, but describe_alarms is better
+                Namespace="AWS/EC2",
+                Dimensions=[{"Name": "InstanceId", "Value": instance_id}]
+            )
+            for alarm in alarms_resp.get("MetricAlarms", []):
+                if alarm.get("StateValue") == "ALARM":
+                    state_updated = alarm.get("StateUpdatedTimestamp")
+                    if state_updated and state_updated >= since:
+                        events.append(ConnectorEvent(
+                            timestamp=state_updated,
+                            connector="aws",
+                            event_type="cloudwatch_alarm",
+                            summary=f"Alarm ALARM: {alarm.get('AlarmName')}",
+                            raw=alarm,
+                        ))
+        except botocore.exceptions.ClientError:
+            pass
+            
+        events.sort(key=lambda e: e["timestamp"])
+        return events

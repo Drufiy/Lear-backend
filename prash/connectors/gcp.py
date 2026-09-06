@@ -5,9 +5,11 @@ Reads credentials from the injected CredentialStore per Lear philosophy.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import subprocess
+import time
 from typing import Any, Dict, Mapping
 
 try:
@@ -19,7 +21,7 @@ try:
 except ImportError:
     _HAS_GCP = False
 
-from .base import Connector, ConnectorState, ResourceState
+from .base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
 
 class GCPRunCommandFailedNeedsSSH(Exception):
     """Raised when GCP execution fails and requires an SSH PEM file to proceed."""
@@ -28,7 +30,7 @@ class GCPRunCommandFailedNeedsSSH(Exception):
 
 class GCPConnector(Connector):
     name = "gcp"
-    read_capabilities = ("instance_status", "logs")
+    read_capabilities = ("instance_status", "logs", "stats", "watch")
     write_capabilities = ("execute",)
 
     def __init__(self, credentials: Mapping[str, Any]):
@@ -249,3 +251,95 @@ class GCPConnector(Connector):
                     "stderr": ssh_err.stderr,
                     "exit_code": ssh_err.returncode
                 }
+
+    def watch(self, resource: str, **kwargs: Any) -> WatchHandle:
+        if not self.authenticate():
+            raise RuntimeError("GCP Connector failed to authenticate")
+        zone = self._get_zone(resource)
+        if not zone:
+            raise ValueError(f"Instance {resource} not found in project")
+        return GCPWatchHandle(self, resource)
+
+    def get_stats(self, resource: str, since: datetime.datetime | None = None, **kwargs: Any) -> list[ConnectorEvent]:
+        if not self.authenticate():
+            return []
+        zone = self._get_zone(resource)
+        if not zone:
+            return []
+
+        events: list[ConnectorEvent] = []
+        now = datetime.datetime.utcnow()
+        if not since:
+            since = now - datetime.timedelta(minutes=15)
+
+        # 1. Cloud Monitoring
+        if _HAS_GCP and self._creds:
+            try:
+                monitoring = discovery.build('monitoring', 'v3', credentials=self._creds, cache_discovery=False)
+                ts = monitoring.projects().timeSeries().list(
+                    name=f"projects/{self.project_id}",
+                    filter=f'metric.type="compute.googleapis.com/instance/cpu/utilization" AND metric.labels.instance_name="{resource}"',
+                    interval_startTime=since.isoformat("T") + "Z",
+                    interval_endTime=now.isoformat("T") + "Z",
+                    view="FULL"
+                ).execute()
+                
+                for series in ts.get('timeSeries', []):
+                    for point in series.get('points', []):
+                        val = point.get('value', {}).get('doubleValue', 0.0)
+                        if val > 0.8: # Threshold alert
+                            pt_time = datetime.datetime.fromisoformat(point['interval']['endTime'].replace('Z', '+00:00')).replace(tzinfo=None)
+                            events.append({
+                                "timestamp": pt_time,
+                                "connector": "gcp",
+                                "event_type": "HighCPUUtilization",
+                                "summary": f"High CPU utilization detected on {resource}: {val*100:.1f}%",
+                                "raw": {"value": val}
+                            })
+                            
+                # Also Audit Logs
+                logging_svc = discovery.build('logging', 'v2', credentials=self._creds, cache_discovery=False)
+                logs = logging_svc.entries().list(body={
+                    "resourceNames": [f"projects/{self.project_id}"],
+                    "filter": f'resource.type="gce_instance" AND resource.labels.instance_id="{resource}" AND protoPayload.methodName="v1.compute.instances.stop"',
+                    "pageSize": 50
+                }).execute()
+                
+                for entry in logs.get('entries', []):
+                    entry_time_str = entry.get('timestamp', '')
+                    if entry_time_str:
+                        entry_time = datetime.datetime.fromisoformat(entry_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                        if entry_time >= since:
+                            events.append({
+                                "timestamp": entry_time,
+                                "connector": "gcp",
+                                "event_type": "InstanceStopped",
+                                "summary": f"Instance {resource} was stopped",
+                                "raw": entry
+                            })
+            except Exception:
+                pass
+        
+        events.sort(key=lambda x: x["timestamp"])
+        return events
+
+class GCPWatchHandle(WatchHandle):
+    def __init__(self, connector: GCPConnector, target: str):
+        self._connector = connector
+        self._target = target
+        self._active = True
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @property
+    def connector(self) -> str:
+        return "gcp"
+
+    @property
+    def target(self) -> str:
+        return self._target
+
+    def stop(self) -> None:
+        self._active = False

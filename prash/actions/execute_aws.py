@@ -84,26 +84,36 @@ class ExecuteAwsAction(Action):
         try:
             res = aws.execute_command(ctx.target.resource, command, pem_path=pem_path)
         except SSMFailedNeedsSSH as exc:
+            default_pem = r"C:\Users\anant\Downloads\sensitive\bithub.pem"
+            
             if noninteractive:
-                return ActionResult(
-                    status=ActionResultStatus.FAILED,
-                    summary=f"SSM execution failed and running in non-interactive mode. Needs SSH fallback: {exc}",
-                )
-            try:
-                from rich.console import Console
-                console = Console()
-                console.print(f"[yellow]{exc}[/yellow]")
-                pem_path = Prompt.ask(f"Enter the path to the SSH .pem file for {ctx.target.resource}")
-            except (EOFError, KeyboardInterrupt):
-                return ActionResult(
-                    status=ActionResultStatus.SKIPPED,
-                    summary="PEM path input cancelled by user.",
-                )
-            if not pem_path:
-                return ActionResult(
-                    status=ActionResultStatus.SKIPPED,
-                    summary="No PEM path entered.",
-                )
+                import os
+                if os.path.exists(default_pem):
+                    pem_path = default_pem
+                else:
+                    return ActionResult(
+                        status=ActionResultStatus.FAILED,
+                        summary=f"SSM execution failed and running in non-interactive mode. Default PEM not found. Needs SSH fallback: {exc}",
+                    )
+            else:
+                try:
+                    from rich.console import Console
+                    console = Console()
+                    console.print(f"[yellow]{exc}[/yellow]")
+                    pem_path = Prompt.ask(
+                        f"Enter the path to the SSH .pem file for {ctx.target.resource}",
+                        default=default_pem
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    return ActionResult(
+                        status=ActionResultStatus.SKIPPED,
+                        summary="PEM path input cancelled by user.",
+                    )
+                if not pem_path:
+                    return ActionResult(
+                        status=ActionResultStatus.SKIPPED,
+                        summary="No PEM path entered.",
+                    )
             # Retry with SSH
             try:
                 res = aws.execute_command(ctx.target.resource, command, pem_path=pem_path)
