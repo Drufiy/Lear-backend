@@ -207,6 +207,49 @@ def resolve_datadog_monitors(spec: str | None, creds: dict | None = None) -> lis
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+# ── Shared loop for the WatchHandle.poll() model (Datadog, PagerDuty) ──
+# Distinct from run_connector_watch_loop below: here dedup lives INSIDE the
+# connector's WatchHandle (poll() returns only new events since last call --
+# e.g. PagerDuty's "same incident, same state -> silence" contract), not in
+# the loop. Datadog's and PagerDuty's watch loops were two ~90-line, ~90%
+# identical copies of the same build-handles/poll/notify/sleep shape; this is
+# that pattern's one home, same principle as run_connector_watch_loop unifying
+# the poll_state()+get_stats() family. Each connector keeps its own handle-
+# building (target resolution needs provider-specific errors) and its own
+# notify_fn (each renders a different message) -- only the loop body is shared.
+
+def run_watchhandle_loop(
+    handles: list,
+    notify_fn,
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+) -> None:
+    """Poll a list of WatchHandles each cycle; `notify_fn(event, console, creds)`
+    is the provider-specific notification path. A poll error (rate limit
+    exhausted, network down) warns and skips that handle for the cycle -- the
+    loop never dies on a bad API day. max_iterations is None for the real
+    `prash watch` command (runs until Ctrl+C); set to a small int in tests."""
+    interval = interval or _interval_from_env()
+    iterations = 0
+    while max_iterations is None or iterations < max_iterations:
+        for handle in handles:
+            try:
+                events = handle.poll()
+            except Exception as exc:  # noqa: BLE001 — a bad API day can't kill the loop
+                logger.warning(f"poll failed for {handle.target!r}: {exc}")
+                continue
+            for event in events:
+                notify_fn(event, console, creds)
+            if console is not None and not events:
+                console.print(f"[dim]{handle.target}: poll OK, no state changes[/dim]")
+
+        iterations += 1
+        if max_iterations is None or iterations < max_iterations:
+            time.sleep(interval)
+
+
 def run_datadog_watch_loop(
     monitors: list[str],
     interval: int | None = None,
@@ -215,12 +258,9 @@ def run_datadog_watch_loop(
     creds: dict | None = None,
 ) -> None:
     """Poll Datadog monitors via each connector.watch() handle
-    (CONNECTOR_REWRITE_SPEC §4a/§4d). Every state transition a handle
-    reports (Alert/Warn entry, recovery) fires the same desktop+team
-    notification path as the kubernetes loop. A poll error (rate limit
-    exhausted, network down) warns and skips the cycle -- the loop never
-    dies on a bad API day. max_iterations is None for the real
-    `prash watch` command (runs until Ctrl+C); set to a small int in tests."""
+    (CONNECTOR_REWRITE_SPEC §4a/§4d) -- a thin wrapper over the shared
+    WatchHandle loop. Every state transition a handle reports (Alert/Warn
+    entry, recovery) fires the same desktop+team notification path."""
     interval = interval or _interval_from_env()
     connector = DatadogConnector(creds or {})
     if not connector.authenticate():
@@ -239,22 +279,8 @@ def run_datadog_watch_loop(
             console.print("[yellow]no Datadog monitors to watch[/yellow]")
         return
 
-    iterations = 0
-    while max_iterations is None or iterations < max_iterations:
-        for handle in handles:
-            try:
-                events = handle.poll()
-            except DatadogError as exc:
-                logger.warning(f"poll failed for monitor {handle.target!r}: {exc}")
-                continue
-            for event in events:
-                _notify_datadog(event, console, creds)
-            if console is not None and not events:
-                console.print(f"[dim]datadog: {handle.monitor_name} poll OK, no state changes[/dim]")
-
-        iterations += 1
-        if max_iterations is None or iterations < max_iterations:
-            time.sleep(interval)
+    run_watchhandle_loop(handles, _notify_datadog, interval=interval, console=console,
+                          max_iterations=max_iterations, creds=creds)
 
 
 def _notify_pagerduty(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
@@ -307,12 +333,10 @@ def run_pagerduty_watch_loop(
     creds: dict | None = None,
 ) -> None:
     """Poll PagerDuty services via each connector.watch() handle
-    (CONNECTOR_REWRITE_SPEC §4a/§4d). Every incident transition a handle
-    reports (new trigger, acknowledgment, resolution, escalation) fires the
-    same desktop+team notification path as the other loops. A poll error
-    (rate limit exhausted, network down) warns and skips the cycle -- the
-    loop never dies on a bad API day. max_iterations is None for the real
-    `prash watch` command (runs until Ctrl+C); set to a small int in tests."""
+    (CONNECTOR_REWRITE_SPEC §4a/§4d) -- a thin wrapper over the shared
+    WatchHandle loop. Every incident transition a handle reports (new
+    trigger, acknowledgment, resolution, escalation) fires the same
+    desktop+team notification path."""
     interval = interval or _interval_from_env()
     connector = PagerDutyConnector(creds or {})
     if not connector.authenticate():
@@ -331,22 +355,8 @@ def run_pagerduty_watch_loop(
             console.print("[yellow]no PagerDuty services to watch[/yellow]")
         return
 
-    iterations = 0
-    while max_iterations is None or iterations < max_iterations:
-        for handle in handles:
-            try:
-                events = handle.poll()
-            except PagerDutyError as exc:
-                logger.warning(f"poll failed for service {handle.target!r}: {exc}")
-                continue
-            for event in events:
-                _notify_pagerduty(event, console, creds)
-            if console is not None and not events:
-                console.print(f"[dim]pagerduty: {handle.service_name} poll OK, no incident changes[/dim]")
-
-        iterations += 1
-        if max_iterations is None or iterations < max_iterations:
-            time.sleep(interval)
+    run_watchhandle_loop(handles, _notify_pagerduty, interval=interval, console=console,
+                          max_iterations=max_iterations, creds=creds)
 
 
 def _notify_terraform(resource: str, state_val: str, info: str, console=None, creds: dict | None = None) -> None:
