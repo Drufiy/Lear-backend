@@ -25,7 +25,9 @@ from concurrent.futures import ThreadPoolExecutor
 from prash.connectors.kubernetes import PodStatus, get_pod_status
 from prash.connectors.terraform import TerraformConnector
 from prash.connectors.aws import AWSConnector
-from prash.connectors.base import ConnectorState
+from prash.connectors.datadog import DatadogConnector, DatadogError
+from prash.connectors.pagerduty import PagerDutyConnector, PagerDutyError
+from prash.connectors.base import ConnectorEvent, ConnectorState
 from prash.notifications import send_team_notifications
 
 logger = logging.getLogger(__name__)
@@ -161,6 +163,190 @@ def run_watch_loop(
             time.sleep(interval)
 
     return state
+
+
+def _notify_datadog(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
+    """Same desktop+team+console path as _notify/_notify_terraform, for a
+    Datadog monitor state transition. Recoveries are notified too (unlike a
+    resolved pod problem) -- a monitor returning to OK is actionable signal."""
+    raw = event.get("raw") or {}
+    monitor = raw.get("monitor_name") or raw.get("monitor_id") or event["summary"]
+    title = f"Prash: {event['summary']}"
+    message = (
+        f"Datadog monitor {monitor}: {event['event_type']}. "
+        f"Run `prash investigate {monitor} --provider datadog` to diagnose."
+    )
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    if console is not None:
+        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def resolve_datadog_monitors(spec: str | None, creds: dict | None = None) -> list[str]:
+    """Turn a --resource spec (or the DATADOG_WATCH_MONITORS env value) into
+    watch targets. Comma-separated monitor ids/names, or the literal `all`
+    to watch every monitor on the site (capped at 100 -- polling a whole
+    account is always an explicit choice, never a default)."""
+    value = (spec or os.environ.get("DATADOG_WATCH_MONITORS") or "").strip()
+    if not value:
+        raise ValueError(
+            "no Datadog watch targets: pass --resource monitor1,monitor2 "
+            "or set DATADOG_WATCH_MONITORS (comma-separated names/ids, or `all`)"
+        )
+    if value.lower() == "all":
+        connector = DatadogConnector(creds or {})
+        monitors = connector.list_monitors(limit=100)
+        return [monitor["name"] or str(monitor["monitor_id"]) for monitor in monitors]
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def run_datadog_watch_loop(
+    monitors: list[str],
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+) -> None:
+    """Poll Datadog monitors via each connector.watch() handle
+    (CONNECTOR_REWRITE_SPEC §4a/§4d). Every state transition a handle
+    reports (Alert/Warn entry, recovery) fires the same desktop+team
+    notification path as the kubernetes loop. A poll error (rate limit
+    exhausted, network down) warns and skips the cycle -- the loop never
+    dies on a bad API day. max_iterations is None for the real
+    `prash watch` command (runs until Ctrl+C); set to a small int in tests."""
+    interval = interval or _interval_from_env()
+    connector = DatadogConnector(creds or {})
+    if not connector.authenticate():
+        logger.warning("Datadog credentials failed validation — watch will likely poll nothing")
+
+    handles = []
+    for monitor in monitors:
+        try:
+            handles.append(connector.watch(monitor, interval=interval))
+        except DatadogError as exc:
+            logger.warning(f"could not watch monitor {monitor!r}: {exc}")
+            if console is not None:
+                console.print(f"[yellow]skipping monitor {monitor}: {exc}[/yellow]")
+    if not handles:
+        if console is not None:
+            console.print("[yellow]no Datadog monitors to watch[/yellow]")
+        return
+
+    iterations = 0
+    while max_iterations is None or iterations < max_iterations:
+        for handle in handles:
+            try:
+                events = handle.poll()
+            except DatadogError as exc:
+                logger.warning(f"poll failed for monitor {handle.target!r}: {exc}")
+                continue
+            for event in events:
+                _notify_datadog(event, console, creds)
+            if console is not None and not events:
+                console.print(f"[dim]datadog: {handle.monitor_name} poll OK, no state changes[/dim]")
+
+        iterations += 1
+        if max_iterations is None or iterations < max_iterations:
+            time.sleep(interval)
+
+
+def _notify_pagerduty(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
+    """Same desktop+team+console path as _notify_datadog, for a PagerDuty
+    incident transition. Resolutions are notified too -- an incident closing
+    is the "stand down" signal the team is waiting for."""
+    raw = event.get("raw") or {}
+    service = raw.get("service_name") or event.get("summary", "")
+    title = f"Prash: {event['summary']}"
+    message = (
+        f"PagerDuty {service}: {event['event_type']}. "
+        f"Run `prash investigate {service} --provider pagerduty` to diagnose."
+    )
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    if console is not None:
+        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def resolve_pagerduty_services(spec: str | None, creds: dict | None = None) -> list[str]:
+    """Turn a --resource spec (or the PAGERDUTY_WATCH_SERVICES env value) into
+    watch targets. Comma-separated service names/ids, or the literal `all`
+    to watch every service (capped at 100 -- watching the whole account pages
+    on every trigger anywhere, which must always be explicit)."""
+    value = (spec or os.environ.get("PAGERDUTY_WATCH_SERVICES") or "").strip()
+    if not value:
+        raise ValueError(
+            "no PagerDuty watch targets: pass --resource service1,service2 "
+            "or set PAGERDUTY_WATCH_SERVICES (comma-separated names/ids, or `all`)"
+        )
+    if value.lower() == "all":
+        connector = PagerDutyConnector(creds or {})
+        services = connector.list_services(limit=100)
+        return [service["name"] or str(service["service_id"]) for service in services]
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def run_pagerduty_watch_loop(
+    services: list[str],
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+) -> None:
+    """Poll PagerDuty services via each connector.watch() handle
+    (CONNECTOR_REWRITE_SPEC §4a/§4d). Every incident transition a handle
+    reports (new trigger, acknowledgment, resolution, escalation) fires the
+    same desktop+team notification path as the other loops. A poll error
+    (rate limit exhausted, network down) warns and skips the cycle -- the
+    loop never dies on a bad API day. max_iterations is None for the real
+    `prash watch` command (runs until Ctrl+C); set to a small int in tests."""
+    interval = interval or _interval_from_env()
+    connector = PagerDutyConnector(creds or {})
+    if not connector.authenticate():
+        logger.warning("PagerDuty credentials failed validation — watch will likely poll nothing")
+
+    handles = []
+    for service in services:
+        try:
+            handles.append(connector.watch(service, interval=interval))
+        except PagerDutyError as exc:
+            logger.warning(f"could not watch service {service!r}: {exc}")
+            if console is not None:
+                console.print(f"[yellow]skipping service {service}: {exc}[/yellow]")
+    if not handles:
+        if console is not None:
+            console.print("[yellow]no PagerDuty services to watch[/yellow]")
+        return
+
+    iterations = 0
+    while max_iterations is None or iterations < max_iterations:
+        for handle in handles:
+            try:
+                events = handle.poll()
+            except PagerDutyError as exc:
+                logger.warning(f"poll failed for service {handle.target!r}: {exc}")
+                continue
+            for event in events:
+                _notify_pagerduty(event, console, creds)
+            if console is not None and not events:
+                console.print(f"[dim]pagerduty: {handle.service_name} poll OK, no incident changes[/dim]")
+
+        iterations += 1
+        if max_iterations is None or iterations < max_iterations:
+            time.sleep(interval)
 
 
 def _notify_terraform(resource: str, state_val: str, info: str, console=None, creds: dict | None = None) -> None:

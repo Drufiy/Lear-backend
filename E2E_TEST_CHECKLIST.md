@@ -85,6 +85,21 @@ done on his side.
 - [ ] `prash run datadog-mute-monitor <monitor> --provider datadog --minutes 10`
 - [ ] Confirm mute actually shows in Datadog UI, and unmutes after the window
 
+### 5b. Datadog autonomous loop (watch → diagnose → act → verify → notify, M4)
+
+- [ ] `python scripts/testing/break_datadog.py --heal` — confirm the fixture monitor `prash-test-synthetic-error-rate` is OK before starting
+- [ ] `prash watch --provider datadog --resource prash-test-synthetic-error-rate` — leave it running
+- [ ] First poll reports baseline with no notifications (no duplicate pings on unchanged state)
+- [ ] `python scripts/testing/break_datadog.py` (value 999 → Alert) — within one poll cycle the watcher detects the transition: desktop toast + console ⚠ + team channels if configured
+- [ ] The same Alert state does NOT re-notify on the next poll (dedup)
+- [ ] `python scripts/testing/break_datadog.py --heal` — recovery (Alert → OK) is notified too
+- [ ] `prash investigate prash-test-synthetic-error-rate --provider datadog` — timeline shows the alert events
+- [ ] Brain: `diagnose_datadog_monitor('prash-test-synthetic-error-rate')` (REPL/chat route) yields category `monitoring` with `mute_monitor` as a labeled stopgap, files_changed empty
+- [ ] `prash run datadog-alert <target> --text "Prash E2E test"` — shows the APPROVAL prompt ("This will create a visible alert in Datadog"), declines work
+- [ ] Re-run with the approval accepted — event is visible in Datadog's event stream, `✓` verify line confirms it, audit id printed
+- [ ] `prash watch --provider datadog` with no targets and no `DATADOG_WATCH_MONITORS` — clean error naming the env var, exit 2
+- [ ] `DATADOG_WATCH_MONITORS=prash-test-synthetic-error-rate` (no `--resource`) — same watch behavior as the flag
+
 ## 6. Grafana (read + silence-alert)
 
 - [ ] Trip a real alert rule into firing state (or use an existing one)
@@ -100,6 +115,21 @@ done on his side.
 - [ ] Confirm state flips to acknowledged in PagerDuty UI
 - [ ] `prash run pagerduty-resolve <service> --provider pagerduty` — confirm this one prompts (APPROVAL tier) even in auto-safe mode
 - [ ] Confirm resolved in UI
+
+### 7b. PagerDuty autonomous loop (watch → diagnose → act → verify → notify, Phase 3)
+
+- [ ] `python scripts/testing/break_pagerduty.py --heal` — confirm the fixture incident (dedup key `prash-test-fixture`) is closed before starting
+- [ ] `prash watch --provider pagerduty --resource prash-v2` — leave it running
+- [ ] `python scripts/testing/break_pagerduty.py` — within one poll cycle the watcher detects the new trigger: desktop toast + console ⚠ + team channels if configured
+- [ ] The same open incident does NOT re-notify on the next poll (dedup by incident id + status + assignments)
+- [ ] Acknowledge the incident in the PagerDuty UI — the acknowledgment transition is detected and notified
+- [ ] `python scripts/testing/break_pagerduty.py --heal` — the resolution transition is notified too (stand-down signal)
+- [ ] `prash investigate prash-v2 --provider pagerduty` — output now includes the `get_stats()` timeline (incident + change events), not just point-in-time state
+- [ ] Brain: `diagnose_pagerduty_incident('prash-v2')` (REPL/chat route) yields category `monitoring` with `acknowledge_incident` as a labeled stopgap, files_changed empty
+- [ ] `prash run pagerduty-page <service>` — shows the APPROVAL prompt ("This will wake up the on-call engineer"), declines cleanly
+- [ ] Re-run with the approval accepted — a real incident appears in PagerDuty (visible in the UI), the `✓` verify line matches it by dedup key, audit id printed; then resolve the paged incident by hand
+- [ ] `prash watch --provider pagerduty` with no targets and no `PAGERDUTY_WATCH_SERVICES` — clean error naming the env var, exit 2
+- [ ] `PAGERDUTY_WATCH_SERVICES=prash-v2` (no `--resource`) — same watch behavior as the flag
 
 ## 8. Snyk (read + ignore-issue)
 

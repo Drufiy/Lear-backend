@@ -30,6 +30,10 @@ _CATEGORY_ALIASES = {
     "flaky": "flaky_test", "test": "code",
     "k8s": "runtime", "kubernetes": "runtime", "infra": "runtime", "pod": "runtime",
     "terraform": "infra_as_code", "iac": "infra_as_code",
+    "datadog": "monitoring", "monitor": "monitoring", "monitoring": "monitoring",
+    "monitor_alert": "monitoring", "observability": "monitoring",
+    "pagerduty": "monitoring", "pd": "monitoring", "incident": "monitoring",
+    "incident_page": "monitoring",
 }
 
 
@@ -166,7 +170,7 @@ class DiagnosisOption(BaseModel):
     ranked choices with reasoning instead of either guessing or dead-ending
     on recommended_action=None."""
 
-    action: Literal["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply"] | None = Field(
+    action: Literal["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", "mute_monitor", "acknowledge_incident"] | None = Field(
         default=None,
         description=(
             "The action id for this option, or null for 'take no automated "
@@ -196,7 +200,7 @@ class Diagnosis(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
     is_flaky_test: bool = Field(default=False)
     files_changed: list[FileChange] = Field(default_factory=list)
-    category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "unknown"]
+    category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "monitoring", "unknown"]
 
     @field_validator("category", mode="before")
     @classmethod
@@ -211,12 +215,14 @@ class Diagnosis(BaseModel):
         default_factory=list,
         description="Exact names of missing secrets/env vars that must be added to fix this failure (e.g. STRIPE_KEY, DATABASE_URL). Only populated when category='environment'.",
     )
-    recommended_action: Literal["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply"] | None = Field(
+    recommended_action: Literal["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", "mute_monitor", "acknowledge_incident"] | None = Field(
         default=None,
         description=(
-            "Only populated when category='runtime'. The infrastructure action that "
-            "addresses this failure — restart_pod for CrashLoopBackOff/OOMKilled/stuck "
-            "pods, rollback for a bad deployment, scale for capacity problems. None if "
+            "Only populated when category='runtime' or 'monitoring'. The infrastructure action "
+            "that addresses this failure — restart_pod for CrashLoopBackOff/OOMKilled/stuck "
+            "pods, rollback for a bad deployment, scale for capacity problems, mute_monitor "
+            "for a firing Datadog monitor, acknowledge_incident for a PagerDuty incident "
+            "(both are paging stopgaps, never the fix for the underlying problem). None if "
             "no action can be determined from the available logs/events. This is a "
             "recommendation for the dispatcher, not an instruction to execute — it still "
             "goes through the normal permission/approval pipeline (PRASH_V2.md §5). "

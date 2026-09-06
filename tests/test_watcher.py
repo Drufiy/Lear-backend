@@ -16,6 +16,8 @@ from prash.watcher import (
     _applescript_escape,
     _send_desktop_notification,
     detect_changes,
+    run_datadog_watch_loop,
+    run_pagerduty_watch_loop,
     run_watch_loop,
 )
 
@@ -373,3 +375,310 @@ def test_connector_loop_skips_connectors_without_get_stats(monkeypatch):
     # NotImplementedError is swallowed; poll_state-based notify still fires
     run_connector_watch_loop([(conn, "x", "azure")], interval=0, max_iterations=1)
     assert ("azure", "x", "failed") in fired
+
+
+# ── datadog watch loop (connector rewrite M4) ────────────────────────────────
+
+def _dd_event(event_type="monitor_alert", summary="Monitor 'cpu-high' entered Alert state"):
+    from prash.connectors.base import ConnectorEvent
+    from datetime import datetime, timezone
+
+    return ConnectorEvent(
+        timestamp=datetime.now(timezone.utc),
+        connector="datadog",
+        event_type=event_type,
+        summary=summary,
+        raw={"monitor_id": 42, "monitor_name": "cpu-high", "previous_state": "OK", "current_state": "Alert"},
+    )
+
+
+class _FakeDdHandle:
+    """Mimics DatadogConnector.watch()'s WatchHandle: scripted poll() results."""
+
+    def __init__(self, script):
+        self.script = iter(script)
+        self.target = "cpu-high"
+        self.monitor_name = "cpu-high"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeDdConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, monitor, interval=30):
+        self.watched.append(monitor)
+        return self._handle
+
+
+def test_datadog_watch_loop_notifies_on_transition(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeDdHandle(script=[[_dd_event()], []])
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _FakeDdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_datadog", lambda event, console=None, creds=None: notified.append(event))
+
+    run_datadog_watch_loop(["cpu-high"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1  # the transition fires once; the next poll is silent
+    assert notified[0]["event_type"] == "monitor_alert"
+
+
+def test_datadog_watch_loop_survives_poll_errors(monkeypatch):
+    """A rate-limited or unreachable API must warn and skip the cycle — the
+    watch loop never dies on a bad API day."""
+    import prash.watcher as watcher_mod
+    from prash.connectors.datadog import DatadogError
+
+    handle = _FakeDdHandle(script=[DatadogError("Datadog API 429: rate limited"), [_dd_event()]])
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _FakeDdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_datadog", lambda event, console=None, creds=None: notified.append(event))
+
+    run_datadog_watch_loop(["cpu-high"], interval=0, max_iterations=2)
+    assert len(notified) == 1  # cycle 1 skipped, cycle 2 still delivered
+
+
+def test_datadog_watch_loop_skips_unwatchable_monitor(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.datadog import DatadogError
+
+    class _BrokenWatchConnector(_FakeDdConnector):
+        def watch(self, monitor, interval=30):
+            raise DatadogError(f"monitor not found: {monitor}")
+
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _BrokenWatchConnector(None))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_datadog_watch_loop(["ghost"], interval=0, max_iterations=1)  # must not raise
+
+
+def test_datadog_watch_loop_warns_on_failed_auth(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeDdHandle(script=[[]])
+    fake = _FakeDdConnector(handle, auth_ok=False)
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: fake)
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_datadog_watch_loop(["cpu-high"], interval=0, max_iterations=1)  # warns, still watches
+
+
+def test_resolve_datadog_monitors_splits_comma_list():
+    from prash.watcher import resolve_datadog_monitors
+
+    assert resolve_datadog_monitors("cpu-high, api-errors") == ["cpu-high", "api-errors"]
+
+
+def test_resolve_datadog_monitors_requires_targets(monkeypatch):
+    from prash.watcher import resolve_datadog_monitors
+
+    monkeypatch.delenv("DATADOG_WATCH_MONITORS", raising=False)
+    try:
+        resolve_datadog_monitors(None)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "DATADOG_WATCH_MONITORS" in str(exc)
+
+
+def test_resolve_datadog_monitors_env_fallback(monkeypatch):
+    from prash.watcher import resolve_datadog_monitors
+
+    monkeypatch.setenv("DATADOG_WATCH_MONITORS", "cpu-high")
+    assert resolve_datadog_monitors(None) == ["cpu-high"]
+
+
+def test_resolve_datadog_monitors_all_expands_via_connector(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    class _ListConnector:
+        def list_monitors(self, query=None, limit=100):
+            return [{"monitor_id": 1, "name": "api errors"}, {"monitor_id": 2, "name": ""}]
+
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _ListConnector())
+    assert watcher_mod.resolve_datadog_monitors("all") == ["api errors", "2"]
+
+
+def test_notify_datadog_pushes_team_notification_when_creds_given(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify_datadog(_dd_event(), creds=creds)
+
+    assert len(sent) == 1
+    assert "entered Alert state" in sent[0][0]
+    assert "prash investigate cpu-high --provider datadog" in sent[0][1]
+
+
+# ── pagerduty watch loop (connector rewrite, Phase 3 rollout) ────────────────
+
+def _pd_event(event_type="incident_triggered",
+              summary="Incident '500s spiking' on checkout triggered (critical severity, high urgency)"):
+    from datetime import datetime, timezone
+
+    return ConnectorEvent(
+        timestamp=datetime.now(timezone.utc),
+        connector="pagerduty",
+        event_type=event_type,
+        summary=summary,
+        raw={"incident_id": "PINC1", "service_name": "checkout", "severity": "critical",
+             "previous_status": None, "status": "triggered"},
+    )
+
+
+from prash.connectors.base import ConnectorEvent  # noqa: E402 — used by the _pd_event helper above
+
+
+class _FakePdHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.target = "checkout"
+        self.service_name = "checkout"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakePdConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, service, interval=30):
+        self.watched.append(service)
+        return self._handle
+
+
+def test_pagerduty_watch_loop_notifies_on_transition(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakePdHandle(script=[[_pd_event()], []])
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _FakePdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_pagerduty", lambda event, console=None, creds=None: notified.append(event))
+
+    run_pagerduty_watch_loop(["checkout"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1
+    assert notified[0]["event_type"] == "incident_triggered"
+
+
+def test_pagerduty_watch_loop_survives_poll_errors(monkeypatch):
+    """A rate-limited or unreachable PagerDuty API must warn and skip the
+    cycle -- the loop never dies on a bad API day."""
+    import prash.watcher as watcher_mod
+    from prash.connectors.pagerduty import PagerDutyError
+
+    handle = _FakePdHandle(script=[PagerDutyError("PagerDuty API 429: rate limited"), [_pd_event()]])
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _FakePdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_pagerduty", lambda event, console=None, creds=None: notified.append(event))
+
+    run_pagerduty_watch_loop(["checkout"], interval=0, max_iterations=2)
+    assert len(notified) == 1
+
+
+def test_pagerduty_watch_loop_skips_unwatchable_service(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.pagerduty import PagerDutyError
+
+    class _BrokenWatchConnector(_FakePdConnector):
+        def watch(self, service, interval=30):
+            raise PagerDutyError(f"service not found: {service}")
+
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _BrokenWatchConnector(None))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_pagerduty_watch_loop(["ghost"], interval=0, max_iterations=1)  # must not raise
+
+
+def test_pagerduty_watch_loop_warns_on_failed_auth(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakePdHandle(script=[[]])
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _FakePdConnector(handle, auth_ok=False))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_pagerduty_watch_loop(["checkout"], interval=0, max_iterations=1)  # warns, still watches
+
+
+def test_resolve_pagerduty_services_splits_comma_list():
+    from prash.watcher import resolve_pagerduty_services
+
+    assert resolve_pagerduty_services("checkout, api") == ["checkout", "api"]
+
+
+def test_resolve_pagerduty_services_requires_targets(monkeypatch):
+    from prash.watcher import resolve_pagerduty_services
+
+    monkeypatch.delenv("PAGERDUTY_WATCH_SERVICES", raising=False)
+    try:
+        resolve_pagerduty_services(None)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "PAGERDUTY_WATCH_SERVICES" in str(exc)
+
+
+def test_resolve_pagerduty_services_env_fallback(monkeypatch):
+    from prash.watcher import resolve_pagerduty_services
+
+    monkeypatch.setenv("PAGERDUTY_WATCH_SERVICES", "checkout")
+    assert resolve_pagerduty_services(None) == ["checkout"]
+
+
+def test_resolve_pagerduty_services_all_expands_via_connector(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    class _ListConnector:
+        def list_services(self, limit=100):
+            return [{"service_id": "PSVC1", "name": "checkout"}, {"service_id": "PSVC2", "name": ""}]
+
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _ListConnector())
+    assert watcher_mod.resolve_pagerduty_services("all") == ["checkout", "PSVC2"]
+
+
+def test_notify_pagerduty_pushes_team_notification_when_creds_given(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify_pagerduty(_pd_event(), creds=creds)
+
+    assert len(sent) == 1
+    assert "500s spiking" in sent[0][0]
+    assert "prash investigate checkout --provider pagerduty" in sent[0][1]

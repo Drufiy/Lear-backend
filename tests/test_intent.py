@@ -88,6 +88,66 @@ def test_open_pr_never_guesses_a_repo():
     assert "repository" in s.question
 
 
+# ---- datadog fast-path routing (connector rewrite M2/M4) -------------------
+
+def test_intent_watch_datadog_routes_to_datadog_provider():
+    """'watch this datadog monitor' must NOT fall into the generic watch verb
+    (which polls the kubernetes namespace watcher) — it names the provider."""
+    s = resolve("watch this datadog monitor cpu-high", ctx(namespace="prash-demo"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "datadog", "--resource", "cpu-high"]
+
+
+def test_intent_watch_datadog_without_target_uses_env_default():
+    s = resolve("watch my datadog monitors", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "datadog"]
+
+
+def test_intent_datadog_stats_with_target_routes_to_investigate():
+    s = resolve("what happened on datadog monitor cpu-high", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["investigate", "cpu-high", "--provider", "datadog"]
+
+
+def test_intent_datadog_stats_without_target_asks_which_monitor():
+    s = resolve("what happened on datadog", ctx())
+    assert isinstance(s, Clarify)
+    assert "datadog" in s.question
+
+
+def test_intent_non_datadog_watch_still_routes_to_kubernetes():
+    """The datadog fast path only fires when 'datadog' is explicit — every
+    pre-existing phrasing keeps its old routing."""
+    s = resolve("please watch the cluster", ctx(namespace="prash-demo"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch"]
+
+
+def test_intent_watch_pagerduty_routes_to_pagerduty_provider():
+    s = resolve("watch the pagerduty service checkout-api", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "pagerduty", "--resource", "checkout-api"]
+
+
+def test_intent_pagerduty_incidents_routes_to_investigate():
+    s = resolve("what happened on pagerduty service checkout-api", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["investigate", "checkout-api", "--provider", "pagerduty"]
+
+
+def test_intent_pagerduty_without_target_asks_which_service():
+    s = resolve("any pagerduty incidents?", ctx())
+    assert isinstance(s, Clarify)
+    assert "pagerduty" in s.question
+
+
+def test_intent_pagerduty_watch_without_target_uses_env_default():
+    s = resolve("watch pagerduty", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "pagerduty"]
+
+
 def test_open_pr_with_repo_uses_it():
     s = resolve("open a pr against acme/widget", ctx())
     assert isinstance(s, Suggestion)

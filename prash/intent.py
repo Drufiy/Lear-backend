@@ -180,9 +180,49 @@ def _known_options(ctx: _Context) -> list[str]:
     return opts
 
 
+def _provider_hit(text: str, provider: str) -> Suggestion | Clarify | None:
+    """Connector-aware fast path, checked before the generic verb table.
+
+    The generic table maps "watch"/"monitor" straight to the kubernetes
+    watcher no matter what's being watched, and has no route for "what
+    happened on datadog/pagerduty" — both wrong for observability targets.
+    Only fires when the provider name appears explicitly, so every other
+    phrase keeps its existing behavior; anything unrecognized falls through
+    to the LLM stage as usual. Ask-phrases are checked BEFORE watch/monitor:
+    in "what happened on datadog monitor cpu-high", "monitor" is a noun —
+    the thing being asked about — not a request to start watching."""
+    if provider not in _words(text):
+        return None
+    low = text.lower()
+    targets = [t for t in _targets_in(text) if t != provider]
+    target = targets[0] if targets else None
+    if any(phrase in low for phrase in ("what happened", "stats", "events", "incidents", "investigate", "history", "timeline", "alerts")):
+        if target:
+            return Suggestion(["investigate", target, "--provider", provider], f"pulling the {provider} timeline for {target}")
+        return Clarify(f"Which {provider} target should I investigate? (name or id)", [])
+    if "watch" in low or "monitor" in low:
+        argv = ["watch", "--provider", provider]
+        if target:
+            argv += ["--resource", target]
+        return Suggestion(argv, f"watching {provider} state for changes")
+    return None
+
+
+def _datadog_hit(text: str) -> Suggestion | Clarify | None:
+    return _provider_hit(text, "datadog")
+
+
+def _pagerduty_hit(text: str) -> Suggestion | Clarify | None:
+    return _provider_hit(text, "pagerduty")
+
+
 def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
     """Parse free text into a command suggestion, a clarifying question, or
     None (genuinely couldn't resolve it, fast or otherwise)."""
+    for provider_hit in (_datadog_hit, _pagerduty_hit):
+        hit = provider_hit(text)
+        if hit is not None:
+            return hit
     verb = _verb_hit(text)
     if verb is None:
         # Milestone 2 (2026-08-24): the fast path only recognizes ~12

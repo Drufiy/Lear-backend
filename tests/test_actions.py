@@ -12,6 +12,8 @@ from prash.actions.exec_command import ExecAction
 from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.datadog_mute import DatadogMuteMonitorAction
+from prash.actions.datadog_alert import DatadogAlertAction
+from prash.actions.pagerduty_page import PagerdutyPageAction
 from prash.actions.gitleaks_escalate import GitleaksEscalateAction
 from prash.actions.grafana_silence import GrafanaSilenceAlertAction
 from prash.actions.open_pr import OpenPrAction
@@ -1188,6 +1190,223 @@ def test_datadog_mute_fails_honestly_on_api_error(tmp_path):
 
 def test_datadog_mute_risk_tier_is_safe():
     assert DatadogMuteMonitorAction().spec.risk_tier.value == "safe"
+
+
+# ── datadog-alert (connector rewrite M4: APPROVAL-gated outbound event) ─────
+
+class _FakeAlertDatadog:
+    def __init__(self, fail=False, verify_ok=True):
+        self.fail = fail
+        self.verify_ok = verify_ok
+        self.posted = []
+        self.checked = []
+
+    def post_event(self, title, text, tags=None, priority="normal"):
+        if self.fail:
+            raise RuntimeError("datadog api error")
+        self.posted.append((title, text, tags, priority))
+        return {"data": {"id": "evt-1", "attributes": {"title": title}}}
+
+    def get_event(self, event_id):
+        self.checked.append(event_id)
+        if not self.verify_ok:
+            raise RuntimeError("404: event not found")
+        return {"data": {"id": event_id, "attributes": {}}}
+
+
+def _alert_ctx(tmp_path, dd=None, **extra):
+    return _ctx(tmp_path, resource="checkout-api",
+                extra={"connectors": {"datadog": dd if dd is not None else _FakeAlertDatadog()}, **extra})
+
+
+def test_datadog_alert_plan(tmp_path):
+    action = DatadogAlertAction()
+    plan = action.plan(_alert_ctx(tmp_path))
+    assert plan.action_id == "datadog-alert"
+    assert plan.reversible is False
+    assert plan.risk_tier.value == "approval"
+    assert "Post Datadog event 'Prash alert: checkout-api'" in plan.steps[0].description
+    assert "Visible to the whole team" in plan.steps[0].impact
+
+
+def test_datadog_alert_plan_with_params(tmp_path):
+    plan = DatadogAlertAction().plan(_alert_ctx(tmp_path, title="DB down", tags="team:db,env:prod", priority="low"))
+    assert "Post Datadog event 'DB down' (priority low) tagged team:db, env:prod" in plan.steps[0].description
+
+
+def test_datadog_alert_execute(tmp_path):
+    dd = _FakeAlertDatadog()
+    result = DatadogAlertAction().execute(_alert_ctx(tmp_path, dd=dd))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["event_id"] == "evt-1"
+    assert dd.posted == [("Prash alert: checkout-api", "checkout-api", None, "normal")]
+
+
+def test_datadog_alert_execute_with_params(tmp_path):
+    dd = _FakeAlertDatadog()
+    ctx = _alert_ctx(tmp_path, dd=dd, title="DB down", text="p0 outage", tags="team:db, env:prod", priority="low")
+    result = DatadogAlertAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert dd.posted == [("DB down", "p0 outage", ["team:db", "env:prod"], "low")]
+
+
+def test_datadog_alert_execute_fails_honestly(tmp_path):
+    ctx = _alert_ctx(tmp_path, dd=_FakeAlertDatadog(fail=True))
+    result = DatadogAlertAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "datadog api error" in result.summary
+
+
+def test_datadog_alert_execute_without_connector(tmp_path):
+    result = DatadogAlertAction().execute(_ctx(tmp_path, resource="x", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_datadog_alert_verify(tmp_path):
+    dd = _FakeAlertDatadog()
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert dd.checked == ["evt-1"]
+    assert "evt-1" in verification.detail
+
+
+def test_datadog_alert_verify_missing_event(tmp_path):
+    dd = _FakeAlertDatadog(verify_ok=False)
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is False
+
+
+def test_datadog_alert_risk_tier_is_approval():
+    spec = DatadogAlertAction().spec
+    assert spec.risk_tier.value == "approval"
+    assert spec.reversible is False
+    assert spec.always_asks is True  # prompts even in bypass mode
+    assert spec.approval_hint == "This will create a visible alert in Datadog"
+    assert spec.capabilities == ("alert",)
+
+
+# ── pagerduty-page (Phase 3 rollout: APPROVAL-gated on-call page) ───────────
+
+class _FakePagePagerDuty:
+    def __init__(self, fail=False, accepted=True, visible=True):
+        self.fail = fail
+        self.accepted = accepted
+        self.visible = visible
+        self.posted = []
+        self.checked = []
+
+    def page_oncall(self, summary, source, severity="critical", dedup_key=None, custom_details=None):
+        if self.fail:
+            raise RuntimeError("pagerduty api error")
+        self.posted.append((summary, source, severity, dedup_key, custom_details))
+        if not self.accepted:
+            return {"status": "error", "message": "event rejected"}
+        return {"status": "success", "dedup_key": dedup_key, "message": "Event processed"}
+
+    def find_incident_by_incident_key(self, key, since):
+        self.checked.append(key)
+        if not self.visible:
+            return None
+        return {"id": "PINC9", "status": "triggered", "incident_key": key}
+
+
+def _page_ctx(tmp_path, pd=None, **extra):
+    return _ctx(tmp_path, resource="checkout-service",
+                extra={"connectors": {"pagerduty": pd if pd is not None else _FakePagePagerDuty()}, **extra})
+
+
+def test_pagerduty_page_plan(tmp_path):
+    action = PagerdutyPageAction()
+    plan = action.plan(_page_ctx(tmp_path))
+    assert plan.action_id == "pagerduty-page"
+    assert plan.reversible is False
+    assert plan.risk_tier.value == "approval"
+    assert "Trigger PagerDuty incident 'Prash page: checkout-service'" in plan.steps[0].description
+    assert "cannot be un-triggered" in plan.steps[0].impact
+
+
+def test_pagerduty_page_plan_with_params(tmp_path):
+    plan = PagerdutyPageAction().plan(_page_ctx(tmp_path, summary="DB down", severity="warning"))
+    assert "Trigger PagerDuty incident 'DB down' (severity warning)" in plan.steps[0].description
+
+
+def test_pagerduty_page_execute(tmp_path):
+    pd = _FakePagePagerDuty()
+    result = PagerdutyPageAction().execute(_page_ctx(tmp_path, pd=pd))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["dedup_key"]
+    assert pd.posted == [("Prash page: checkout-service", "prash", "critical", result.detail["dedup_key"], None)]
+
+
+def test_pagerduty_page_execute_with_params(tmp_path):
+    pd = _FakePagePagerDuty()
+    ctx = _page_ctx(tmp_path, pd=pd, summary="DB down", severity="warning", dedup_key="dk-fixed",
+                    custom_details={"runbook": "r-1"})
+    result = PagerdutyPageAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["dedup_key"] == "dk-fixed"
+    assert pd.posted == [("DB down", "prash", "warning", "dk-fixed", {"runbook": "r-1"})]
+
+
+def test_pagerduty_page_execute_fails_honestly_on_api_error(tmp_path):
+    ctx = _page_ctx(tmp_path, pd=_FakePagePagerDuty(fail=True))
+    result = PagerdutyPageAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "pagerduty api error" in result.summary
+
+
+def test_pagerduty_page_execute_fails_when_not_accepted(tmp_path):
+    """The Events API answering non-success is a FAILED page, not a success
+    with a weird payload -- the action must not claim a human was paged."""
+    ctx = _page_ctx(tmp_path, pd=_FakePagePagerDuty(accepted=False))
+    result = PagerdutyPageAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "not accepted" in result.summary
+
+
+def test_pagerduty_page_execute_without_connector(tmp_path):
+    result = PagerdutyPageAction().execute(_ctx(tmp_path, resource="x", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_pagerduty_page_verify(tmp_path):
+    pd = _FakePagePagerDuty()
+    action = PagerdutyPageAction()
+    ctx = _page_ctx(tmp_path, pd=pd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert pd.checked == [result.detail["dedup_key"]]
+    assert "PINC9" in verification.detail
+
+
+def test_pagerduty_page_verify_not_yet_visible(tmp_path):
+    """The Events API accepted the trigger but the incident isn't in the REST
+    window yet -- verify reports honestly instead of claiming confirmation."""
+    pd = _FakePagePagerDuty(visible=False)
+    action = PagerdutyPageAction()
+    ctx = _page_ctx(tmp_path, pd=pd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is False
+    assert "propagating" in verification.detail
+
+
+def test_pagerduty_page_risk_tier_is_approval():
+    """Hardcoded by spec: paging a human is irreversible and disruptive --
+    always prompts, even in bypass mode."""
+    spec = PagerdutyPageAction().spec
+    assert spec.risk_tier.value == "approval"
+    assert spec.reversible is False
+    assert spec.always_asks is True
+    assert "wake up the on-call engineer" in spec.approval_hint
+    assert spec.capabilities == ("page_oncall",)
 
 
 class _FakeGrafana:

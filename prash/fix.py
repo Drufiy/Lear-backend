@@ -14,6 +14,7 @@ seam Aradhya's schema built for us (§6 cross-track, schemas.py docstring).
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from rich.panel import Panel
@@ -24,9 +25,11 @@ from .brain.diagnosis_agent import (
     deployment_name_from_pod,
     diagnose_failure,
     find_deployment_manifest,
+    format_datadog_context,
     format_k8s_context,
     format_aws_context,
     format_gcp_context,
+    format_pagerduty_context,
 )
 from .brain.gitlab_log_fetcher import fetch_pipeline_logs
 from .brain.log_fetcher import fetch_workflow_logs
@@ -36,6 +39,9 @@ from .connectors.github import GitHubConnector
 from .connectors.kubernetes import get_pod_events, get_pod_logs, get_pod_status
 from .connectors.aws import AWSConnector
 from .connectors.gcp import GCPConnector
+from .connectors.base import ConnectorState
+from .connectors.datadog import DatadogConnector
+from .connectors.pagerduty import PagerDutyConnector
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +53,12 @@ logger = logging.getLogger(__name__)
 # edit_configmap dispatches to edit-configmap when the brain names a specific
 # ConfigMap key/value fix with high-confidence log evidence (schemas.py
 # Diagnosis.config_patch / config_patch_target).
-_AUTO_ACTIONS = {"restart_pod": "restart-pod", "edit_configmap": "edit-configmap"}
+_AUTO_ACTIONS = {
+    "restart_pod": "restart-pod",
+    "edit_configmap": "edit-configmap",
+    "mute_monitor": "datadog-mute-monitor",
+    "acknowledge_incident": "pagerduty-acknowledge",
+}
 
 
 class FixTargetError(Exception):
@@ -149,6 +160,58 @@ async def diagnose_k8s_pod(
         # for a file (a fetch_file tool call where submit_diagnosis was
         # required), which then burned the whole diagnosis.
         investigation_max_steps=5 if investigation_context else 2,
+    )
+
+
+async def diagnose_datadog_monitor(monitor: str, creds: dict | None = None) -> Diagnosis:
+    """Gather the Datadog connector's poll_state + get_stats for a monitor, feed
+    them to Track D's brain, and return the Diagnosis (connector rewrite
+    milestone M4). Mirrors diagnose_k8s_pod's seam shape: connector reads ->
+    format_datadog_context -> diagnose_failure, with the brain's mute_monitor
+    recommendation mapping through _AUTO_ACTIONS to the datadog-mute-monitor
+    action at dispatch time.
+
+    get_stats() is swallow-to-[] by contract, so an empty event window is
+    still a valid diagnosis input (the MONITOR STATE block carries the
+    signal); an unresolvable monitor is not, so that raises FixTargetError.
+    """
+    connector = DatadogConnector(creds or {})
+    state = connector.poll_state(monitor)
+    if state.state is ConnectorState.NOT_FOUND:
+        raise FixTargetError(f"monitor {monitor!r} not found")
+    events = connector.get_stats(monitor, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    context = format_datadog_context(state, events)
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=f"datadog/{monitor}",
+        commit_message="(no commit — Datadog monitor diagnosis, not a CI run)",
+        workflow_name="datadog",
+    )
+
+
+async def diagnose_pagerduty_incident(service: str, creds: dict | None = None) -> Diagnosis:
+    """Gather the PagerDuty connector's poll_state + get_stats for a service,
+    feed them to Track D's brain, and return the Diagnosis (connector
+    rewrite, Phase 3 rollout — PagerDuty). Same seam shape as the datadog/k8s
+    formatters: connector reads -> format_pagerduty_context ->
+    diagnose_failure, with acknowledge_incident mapping through _AUTO_ACTIONS
+    to pagerduty-acknowledge at dispatch time.
+
+    get_stats() is swallow-to-[] by contract, so an empty event window is
+    still a valid diagnosis input (the INCIDENT STATE block carries the
+    signal); an unresolvable service is not, so that raises FixTargetError.
+    """
+    connector = PagerDutyConnector(creds or {})
+    state = connector.poll_state(service)
+    if state.state is ConnectorState.NOT_FOUND:
+        raise FixTargetError(f"service {service!r} not found")
+    events = connector.get_stats(service, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    context = format_pagerduty_context(state, events)
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=f"pagerduty/{service}",
+        commit_message="(no commit — PagerDuty incident diagnosis, not a CI run)",
+        workflow_name="pagerduty",
     )
 
 

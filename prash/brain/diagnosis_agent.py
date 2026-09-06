@@ -106,7 +106,7 @@ DIAGNOSIS_TOOL = {
             },
             "category": {
                 "type": "string",
-                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "unknown"],
+                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "monitoring", "unknown"],
                 "description": (
                     "code: app code bug. workflow_config: .github/workflows/*.yml wrong. "
                     "dependency: package.json/requirements.txt/go.mod issue. "
@@ -116,6 +116,9 @@ DIAGNOSIS_TOOL = {
                     "CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck) — not a CI failure, "
                     "nothing to diff. See the KUBERNETES / RUNTIME FAILURES section below. "
                     "infra_as_code: Terraform drift, missing modules, state lock errors, or provider auth failures. "
+                    "monitoring: an external observability signal fired (Datadog monitor "
+                    "entered Alert/Warn, metric spike, monitor recovery) — not a CI failure, "
+                    "nothing to diff. See the DATADOG / MONITOR ALERTS section below. "
                     "unknown: cannot determine."
                 ),
             },
@@ -137,9 +140,9 @@ DIAGNOSIS_TOOL = {
             },
             "recommended_action": {
                 "type": ["string", "null"],
-                "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", None],
+                "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", "mute_monitor", "acknowledge_incident", None],
                 "description": (
-                    "ONLY populate when category='runtime' or 'infra_as_code'. Which infrastructure action "
+                    "ONLY populate when category='runtime', 'infra_as_code', or 'monitoring'. Which infrastructure action "
                     "addresses this failure: restart_pod (clears a wedged/stuck container — "
                     "does NOT help if the image or command is genuinely broken, it will just "
                     "crash-loop again), rollback (the last deployment introduced the problem), "
@@ -148,7 +151,11 @@ DIAGNOSIS_TOOL = {
                     "config_patch/config_patch_target below and the KUBERNETES / RUNTIME "
                     "FAILURES section), terraform_init (resolves missing modules or uninitialized "
                     "backend), terraform_apply (resolves config drift or applies pending state "
-                    "changes). Leave null if no action can help, OR if you are instead populating "
+                    "changes), mute_monitor (silences a firing Datadog monitor's paging while the "
+                    "underlying metric is investigated — never a fix for the metric itself), "
+                    "acknowledge_incident (claims 'someone is looking' on a PagerDuty incident "
+                    "— stops escalation pressure, never a fix for the underlying problem). "
+                    "Leave null if no action can help, OR if you are instead populating "
                     "`options` below for a genuinely ambiguous case, OR — importantly — if you are "
                     "proposing a corrected Deployment manifest in files_changed (the manifest "
                     "change IS the fix; a restart on top of it is noise). Only leave "
@@ -194,7 +201,7 @@ DIAGNOSIS_TOOL = {
                     "properties": {
                         "action": {
                             "type": ["string", "null"],
-                            "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", None],
+                            "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", "mute_monitor", "acknowledge_incident", None],
                             "description": "This option's action id, or null for 'no automated action, escalate to a human' as one of the ranked choices.",
                         },
                         "rationale": {
@@ -953,7 +960,113 @@ scheduling failure, no other signal — same shape as EXAMPLE 21, just far more 
   a menu. Never use options as a way to avoid making the call you're actually equipped \
   to make.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATADOG / MONITOR ALERTS (category: monitoring — NOT a CI failure)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You will sometimes be asked to diagnose a Datadog monitor firing, not a CI run
+and not a Kubernetes pod. You'll recognize this from the input format:
+
+  === MONITOR STATE ===
+  monitor: high-cpu-on-web
+  monitor_id: 1234567
+  overall_state: Alert
+  connector_state: failed
+
+  === DATADOG EVENTS ===
+  - [2026-09-04T12:00:00+00:00] monitor_alert: Monitor 'high-cpu-on-web' entered Alert state
+      metric: query=avg:system.cpu.user{*} by {host} max=96.4 mean=88.1 peak_at=2026-09-04T11:59:00+00:00
+  - [2026-09-04T11:58:12+00:00] deploy_event: Production deploy of web-frontend v2.4.1
+
+category MUST be "monitoring". files_changed MUST be [] — an observability
+signal is not a code diff, and manufacturing one would be a fabrication. The
+fix lives in fix_description + recommended_action, exactly like the
+no-manifest-repo Kubernetes case above.
+
+THE EVENT TYPES:
+
+• monitor_alert — the monitor's condition crossed its threshold. mute_monitor
+  is the honest recommended_action ONLY as a stopgap: it silences the paging
+  while a human works the real cause, exactly like restart_pod for a wedged
+  pod. NEVER present it as a fix — fix_description must say what actually
+  needs investigating (the metric in the context block, the host/scope that
+  spiked, the threshold that tripped). When the raw metric context is missing
+  or unclear, recommended_action: null is the honest answer — do not mute a
+  monitor you cannot characterize.
+• metric_spike — underlying metric context, usually attached to an alert.
+  Use it: name the magnitude (max vs mean), when it peaked, and what service
+  that metric belongs to. A spike with no alert attached → recommended_action:
+  null, describe what to check (correlated services, recent deploys).
+• deploy_event — a deployment happened near the incident window. This is
+  correlation gold: a monitor_alert right after a deploy_event is most likely
+  caused by that deploy. Say so in root_cause with both timestamps.
+• monitor_recovered — the monitor returned to OK on its own. No action; a
+  one-line problem_summary that it self-recovered is enough.
+
+EXAMPLE 26 — Monitor alert with clear metric context (manual_required, mute as stopgap)
+Log: "=== MONITOR STATE ===" ... overall_state: Alert ... "=== DATADOG EVENTS ==="
+     monitor_alert with metric context: max=96.4 mean=88.1 (CPU on web hosts)
+  fix_type: "manual_required", confidence: 0.75, category: "monitoring"
+  files_changed: []
+  recommended_action: "mute_monitor"
+  fix_description: names the actual investigation (which host crossed 90% CPU,
+  since when) and is explicit that muting only stops the paging.
+
+EXAMPLE 27 — Monitor alert immediately after a deploy (genuinely ambiguous → options)
+Log: "=== DATADOG EVENTS ===" deploy_event at 11:58:12, monitor_alert at 12:00:00
+     with metric context showing the spike starting at 11:58
+  fix_type: "manual_required", confidence: 0.70, category: "monitoring", files_changed: []
+  options: [{action: "mute_monitor", rationale: "stops the paging while the new
+  release is investigated — the spike started within seconds of the deploy",
+  is_default: true},
+            {action: "rollback", rationale: "if the CPU regression is confirmed in
+  the new release, reverting it removes the cause instead of the paging"}]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PAGERDUTY / INCIDENT PAGES (category: monitoring — same rules as Datadog above)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A PagerDuty incident is the same kind of input as a Datadog monitor alert:
+an external observability signal, not a CI run and not a code diff. All the
+DATADOG / MONITOR ALERTS rules above apply unchanged — category MUST be
+"monitoring", files_changed MUST be [], fix lives in fix_description +
+recommended_action. You'll recognize the input format:
+
+  === INCIDENT STATE ===
+  service: checkout
+  service_id: PSVC1
+  overall_state: failed
+  open_incidents: 1 (worst: triggered)
+
+  === PAGERDUTY EVENTS ===
+  - [2026-09-04T12:00:00+00:00] incident_triggered: Incident '500s spiking' on checkout triggered (critical severity, high urgency)
+  - [2026-09-04T11:58:00+00:00] change_event: Production deploy of web-frontend v2.4.1
+
+EVENT TYPES:
+
+• incident_triggered — someone is being PAGED right now. acknowledge_incident
+  is the honest recommended_action ONLY as a stopgap: it claims "someone is
+  looking," which stops escalation pressure while the real cause is worked —
+  the exact role mute_monitor plays for Datadog. It is NOT a fix and must
+  never be presented as one. If the severity is critical but the summary
+  gives you nothing actionable, recommended_action: null is the honest answer.
+• incident_acknowledged / incident_escalated — a human claimed it, or it
+  re-paged to the next rotation (a signal nobody is actually on it).
+• incident_resolved — over; no action, one-line acknowledgment.
+• change_event — a deploy/config change PagerDuty recorded near the
+  incident window. Correlation gold, same as a GitHub deploy_event: an
+  incident_triggered right after a change_event is most likely caused by it.
+
+EXAMPLE 28 — PagerDuty incident right after a change event (monitoring)
+Log: "=== INCIDENT STATE ===" ... worst: triggered ... "=== PAGERDUTY EVENTS ==="
+     change_event at 11:58, incident_triggered at 12:00 (critical severity, high urgency)
+  fix_type: "manual_required", confidence: 0.75, category: "monitoring"
+  files_changed: []
+  recommended_action: "acknowledge_incident"
+  fix_description: names the correlation (incident began within two minutes of
+  the v2.4.1 deploy) and is explicit that acknowledging only stops escalation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MATRIX BUILD FAILURES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1224,6 +1337,100 @@ def format_aws_context(target: str, state, events: list[dict]) -> str:
     return "\n".join(parts)
 
 
+# ── Datadog context detection (connector rewrite, milestones M2/M4) ─────────
+# format_datadog_context() below always emits this exact marker. Used to
+# recognize Datadog monitor input so the CI-shaped _ERROR_RE guard doesn't
+# reject it — same role _K8S_CONTEXT_MARKER plays for pod diagnoses.
+_DATADOG_CONTEXT_MARKER = "=== MONITOR STATE ==="
+
+
+def _is_datadog_context(logs: str) -> bool:
+    return _DATADOG_CONTEXT_MARKER in (logs or "")
+
+
+def format_datadog_context(monitor_state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a Datadog
+    monitor diagnosis, matching the exact format documented in SYSTEM_PROMPT's
+    "DATADOG / MONITOR ALERTS" section. `monitor_state` is Track B's
+    ResourceState (prash.connectors.base) -- duck-typed here (attribute
+    access only) rather than imported, so this module doesn't gain a hard
+    dependency on the connectors package, same as format_k8s_context.
+
+    `events` matches DatadogConnector.get_stats()' return shape: a list of
+    ConnectorEvent dicts (timestamp/connector/event_type/summary/raw),
+    already sorted oldest-first.
+    """
+    detail = getattr(monitor_state, "detail", {}) or {}
+    parts = [
+        "=== MONITOR STATE ===",
+        f"monitor: {getattr(monitor_state, 'resource', 'unknown')}",
+        f"monitor_id: {detail.get('monitor_id', 'unknown')}",
+        f"overall_state: {detail.get('overall_state', 'unknown')}",
+        f"connector_state: {getattr(getattr(monitor_state, 'state', None), 'value', 'unknown')}",
+        "",
+        "=== DATADOG EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- [{e.get('timestamp').isoformat() if e.get('timestamp') else 'unknown-time'}] "
+                         f"{e.get('event_type', 'event')}: {e.get('summary', '')}")
+            metric = (e.get("raw") or {}).get("metric")
+            if metric:
+                parts.append(
+                    f"    metric: query={metric.get('query')} max={metric.get('max')} "
+                    f"mean={metric.get('mean')} peak_at={metric.get('peak_at')}"
+                )
+    else:
+        parts.append("(no events in the lookback window)")
+    return "\n".join(parts)
+
+
+# ── PagerDuty context detection (connector rewrite, Phase 3 rollout) ────────
+# format_pagerduty_context() below always emits this exact marker. Same role
+# the k8s/datadog markers play: recognizes non-CI input so the CI-shaped
+# _ERROR_RE guard doesn't reject it.
+_PAGERDUTY_CONTEXT_MARKER = "=== INCIDENT STATE ==="
+
+
+def _is_pagerduty_context(logs: str) -> bool:
+    return _PAGERDUTY_CONTEXT_MARKER in (logs or "")
+
+
+def format_pagerduty_context(incident_state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a PagerDuty
+    incident diagnosis, matching the format documented in SYSTEM_PROMPT's
+    "PAGERDUTY / INCIDENT PAGES" section. `incident_state` is Track B's
+    ResourceState (prash.connectors.base) -- duck-typed (attribute access
+    only) so this module gains no hard connector dependency, same as the
+    k8s/datadog formatters.
+
+    `events` matches PagerDutyConnector.get_stats()' return shape: a list of
+    ConnectorEvent dicts, already sorted oldest-first.
+    """
+    detail = getattr(incident_state, "detail", {}) or {}
+    open_incidents = detail.get("open_incidents") or []
+    worst = ""
+    if open_incidents:
+        worst = sorted((str(i.get("status")) for i in open_incidents), key=lambda s: s != "triggered")[0]
+        worst = f" (worst: {worst})"
+    parts = [
+        "=== INCIDENT STATE ===",
+        f"service: {getattr(incident_state, 'resource', 'unknown')}",
+        f"service_id: {detail.get('service_id', 'unknown')}",
+        f"overall_state: {getattr(getattr(incident_state, 'state', None), 'value', 'unknown')}",
+        f"open_incidents: {len(open_incidents)}{worst}",
+        "",
+        "=== PAGERDUTY EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- [{e.get('timestamp').isoformat() if e.get('timestamp') else 'unknown-time'}] "
+                         f"{e.get('event_type', 'event')}: {e.get('summary', '')}")
+    else:
+        parts.append("(no events in the lookback window)")
+    return "\n".join(parts)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def diagnose_failure(
@@ -1268,7 +1475,13 @@ async def diagnose_failure(
     # kubernetes.py's get_pod_logs docstring), but the POD STATUS block
     # format_k8s_context() emits always carries real signal via the `problem`
     # field even when there's nothing in POD LOGS for _ERROR_RE to match.
-    if not _is_k8s_context(logs) and not _ERROR_RE.search(preprocessed):
+    # Same reasoning for Datadog monitor input: the MONITOR STATE block
+    # format_datadog_context() emits carries the overall_state field even
+    # when the event window is empty. And for PagerDuty incident input: the
+    # INCIDENT STATE block format_pagerduty_context() emits carries the
+    # service's open-incident state even when the event window is empty.
+    if (not _is_k8s_context(logs) and not _is_datadog_context(logs)
+            and not _is_pagerduty_context(logs) and not _ERROR_RE.search(preprocessed)):
         logger.warning(f"Preprocessed logs contain no error signal for run {run_id} — likely incomplete logs")
         raise DiagnosisValidationError(
             "CI logs contain no error output (likely fetched before step logs were archived). "

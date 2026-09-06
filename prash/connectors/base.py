@@ -25,44 +25,51 @@ class ConnectorState(enum.Enum):
     NOT_FOUND = "not-found"
 
 
-class ConnectorEvent(TypedDict):
-    """Normalized event shape across all providers."""
-    timestamp: datetime.datetime   # UTC
-    connector: str
-    event_type: str
-    summary: str
-    raw: dict
-
-
-class WatchHandle(abc.ABC):
-    """Handle returned by a connector's watch() method to manage the active watch."""
-
-    @property
-    @abc.abstractmethod
-    def is_active(self) -> bool:
-        """Return True if the watch is currently active."""
-
-    @property
-    @abc.abstractmethod
-    def connector(self) -> str:
-        """Name of the connector (e.g., 'aws')."""
-
-    @property
-    @abc.abstractmethod
-    def target(self) -> str:
-        """The target being watched."""
-
-    @abc.abstractmethod
-    def stop(self) -> None:
-        """Stop the active watch."""
-
-
 @dataclass
 class ResourceState:
     resource: str
     state: ConnectorState
     detail: Dict[str, Any]
     ts: Optional[str] = None
+
+
+class ConnectorEvent(TypedDict):
+    """Normalized timeline entry — the thing cross-connector correlation joins on."""
+
+    timestamp: datetime.datetime  # UTC, required
+    connector: str  # e.g. "datadog", "kubernetes", "github"
+    event_type: str  # e.g. "monitor_alert", "metric_spike", "deploy_event"
+    summary: str  # one human-readable line — what the diagnosis brain reads first
+    raw: dict  # untouched provider-specific payload, for drill-down
+
+
+class WatchHandle(abc.ABC):
+    """Handle returned by a connector's watch() method; the shared watcher
+    loop polls it each cycle.
+
+    poll() returns only the events produced since the previous poll (state
+    transitions, new timeline entries) — an unchanged cycle returns []. Not
+    every provider models watching as a pollable handle (some expose
+    lifecycle state instead), so a subclass implements the methods it
+    actually supports; the unimplemented ones raise NotImplementedError.
+    """
+
+    connector: str  # connector name, e.g. "datadog"
+    target: str  # resolved target this handle watches
+    interval: int  # suggested seconds between polls
+
+    def poll(self) -> list["ConnectorEvent"]:
+        """Run one watch cycle and return any new events since the last poll."""
+        raise NotImplementedError
+
+    @property
+    def is_active(self) -> bool:
+        """True while the watch is running (lifecycle-style handles)."""
+        raise NotImplementedError
+
+    def stop(self) -> None:
+        """Stop the watch (lifecycle-style handles)."""
+        raise NotImplementedError
 
 
 class Connector(abc.ABC):
@@ -96,5 +103,9 @@ class Connector(abc.ABC):
         raise NotImplementedError
 
     def get_stats(self, target: str, since: datetime.datetime | None = None) -> list[ConnectorEvent]:
-        """Return a time series of normalized events for `target`, optionally since a time."""
+        """Return a time series of normalized events for `target`, optionally since a time.
+
+        The time-series complement of poll_state(): it may call poll_state() or
+        fetch_logs() internally but does not replace them.
+        """
         raise NotImplementedError
