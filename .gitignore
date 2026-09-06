@@ -31,3 +31,11 @@ Thumbs.db
 
 # Local Prash state (audit logs, local run artifacts)
 .prash/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*.auto.tfvars
