@@ -102,6 +102,18 @@ def _targets_in(text: str) -> list[str]:
     return qualified + bare
 
 
+# "what happened" style timeline questions -> get_stats (the `stats` verb).
+# Kept separate from the word loop so they can be gated: a line that also
+# carries an explicit action verb ("diagnose what happened") is a fix, not a
+# read — stats must never hijack an execute intent.
+_STATS_PHRASES = (
+    "what's been happening", "whats been happening", "what has been happening",
+    "what happened", "been happening", "recent events", "event history",
+    "show me the events", "show me the history", "show me the timeline",
+)
+_ACTION_WORDS = ("fix", "diagnose", "restart", "reboot", "rollback", "revert")
+
+
 def _verb_hit(text: str) -> str | None:
     """Return the intent verb, or None if the text doesn't read as intent."""
     low = text.lower()
@@ -112,12 +124,20 @@ def _verb_hit(text: str) -> str | None:
         return "apply-ci-fix"
     if "what can you do" in low or "what do you do" in low or "list actions" in low:
         return "actions"
+    # "keep an eye on X" is the canonical proactive-monitor phrasing (spec §4a)
+    # and carries no verb keyword of its own -> map it to watch on the fast path.
+    if "keep an eye on" in low or "keeping an eye on" in low or "eye on" in low:
+        return "watch"
+    # time-series read ("what's been happening with X") -> stats, but never
+    # when the line also asks for a write/diagnosis action.
+    if any(p in low for p in _STATS_PHRASES) and not any(w in low for w in _ACTION_WORDS):
+        return "stats"
     for word, verb in (
         ("restart", "restart"), ("reboot", "restart"), ("fix", "fix"),
         ("diagnose", "fix"), ("watch", "watch"), ("monitor", "watch"),
         ("rollback", "rollback"), ("revert", "rollback"),
         ("audit", "audit"), ("actions", "actions"), ("config", "config"),
-        ("circuit", "circuit"),
+        ("circuit", "circuit"), ("stats", "stats"), ("timeline", "stats"),
     ):
         if word in low:
             return verb
@@ -130,6 +150,7 @@ def _needs_target(verb: str) -> str | None:
         "fix": "pod",
         "restart": "pod",
         "rollback": "pod",
+        "stats": "pod",
         "open-pr": "repo",
         "apply-ci-fix": "repo",
     }.get(verb)
@@ -176,6 +197,12 @@ def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
         return _resolve_via_llm(text, ctx)
 
     if verb == "watch":
+        # "keep an eye on prash-demo/api" -> watch that pod's namespace;
+        # a bare "watch" with no target falls back to the remembered one.
+        wtgt = _resolve_target("pod", _targets_in(text), ctx)
+        if wtgt and "/" in wtgt:
+            ns = wtgt.split("/", 1)[0]
+            return Suggestion(["watch", "--namespace", ns], f"watching namespace {ns}")
         return Suggestion(["watch"], "watching the remembered namespace")
     if verb == "actions":
         return Suggestion(["actions"], "listing registered actions")
@@ -209,6 +236,8 @@ def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
         return Suggestion(["run", "restart-pod", target], f"restarting {target}")
     if verb == "rollback":
         return Suggestion(["run", "rollback", target], f"rolling back {target}")
+    if verb == "stats":
+        return Suggestion(["stats", target], f"showing recent events for {target}")
     if verb == "open-pr":
         return Suggestion(["run", "open-pr", target], f"opening a PR against {target}")
     if verb == "apply-ci-fix":
@@ -233,6 +262,8 @@ def complete(verb: str, choice: str, ctx: _Context) -> Suggestion | None:
         return Suggestion(["run", "restart-pod", target], f"restarting {target}")
     if verb == "rollback":
         return Suggestion(["run", "rollback", target], f"rolling back {target}")
+    if verb == "stats":
+        return Suggestion(["stats", target], f"showing recent events for {target}")
     if verb == "open-pr":
         return Suggestion(["run", "open-pr", target], f"opening a PR against {target}")
     return None
@@ -281,12 +312,19 @@ def _build_intent_tool_schema() -> dict:
             "properties": {
                 "command": {
                     "type": "string",
-                    "enum": ["investigate", "fix", "run", "watch", "audit", "actions", "config", "circuit", "clarify"],
+                    "enum": ["investigate", "stats", "fix", "run", "watch", "audit", "actions", "config", "circuit", "clarify"],
                     "description": (
-                        "investigate = read-only state check on any provider. "
+                        "investigate = read-only point-in-time state check on any provider "
+                        "('is it healthy right now'). "
+                        "stats = read-only event timeline for a resource ('what's been "
+                        "happening', 'show me recent events/history') -- a connector's "
+                        "get_stats. "
+                        "watch = start proactively monitoring a resource/namespace for new "
+                        "problems ('keep an eye on', 'notify me when'). "
                         "fix = diagnose+propose a fix for a k8s pod (provider=kubernetes) "
                         "or a CI run (provider=github/gitlab). "
-                        "run = execute one of the registered write actions below. "
+                        "run = execute one of the registered write actions below -- this is "
+                        "also how you page/alert an on-call responder (use an *-alert action id). "
                         "clarify = you cannot confidently resolve this -- ask instead."
                     ),
                 },
@@ -343,7 +381,12 @@ _INTENT_SYSTEM_PROMPT = (
     "because it's the first/most common provider. A resource's naming "
     "style is not a reliable signal for which connector it belongs to. "
     "Never invent a provider, action id, or resource that wasn't given "
-    "to you."
+    "to you. "
+    "Pick the read verb that matches the question: 'is it healthy / what's "
+    "its state' -> investigate; 'what happened / what's been going on / show "
+    "recent events' -> stats; 'keep an eye on it / tell me when it breaks' -> "
+    "watch. To page or alert an on-call responder, use command=run with the "
+    "matching *-alert action id."
 )
 
 
@@ -362,13 +405,26 @@ def _args_to_suggestion_or_clarify(args: dict) -> Suggestion | Clarify | None:
         question = args.get("clarify_question", "").strip() or "Which resource should I target?"
         return Clarify(question)
 
-    if command in ("watch", "audit", "actions", "config", "circuit"):
-        argv = {"watch": ["watch"], "audit": ["audit", "--tail", "20"],
-                "actions": ["actions"], "config": ["config"],
-                "circuit": ["circuit", "status"]}[command]
+    if command in ("audit", "actions", "config", "circuit"):
+        argv = {"audit": ["audit", "--tail", "20"], "actions": ["actions"],
+                "config": ["config"], "circuit": ["circuit", "status"]}[command]
         return Suggestion(argv, explanation)
 
     resource = (args.get("resource") or "").strip()
+
+    if command == "watch":
+        # Proactive monitoring. k8s watches a namespace (--namespace); the
+        # other providers watch a named resource (--provider/--resource).
+        provider = args.get("provider")
+        if provider and provider != "kubernetes":
+            argv = ["watch", "--provider", provider]
+            if resource:
+                argv += ["--resource", resource]
+            return Suggestion(argv, explanation)
+        if resource:
+            ns = resource.split("/", 1)[0] if "/" in resource else resource
+            return Suggestion(["watch", "--namespace", ns], explanation)
+        return Suggestion(["watch"], explanation)
 
     if command == "investigate":
         if not resource:
@@ -377,6 +433,12 @@ def _args_to_suggestion_or_clarify(args: dict) -> Suggestion | Clarify | None:
         if provider == "kubernetes":
             return None  # investigate has no kubernetes provider today (a real, separate gap)
         return Suggestion(["investigate", resource, "--provider", provider], explanation)
+
+    if command == "stats":
+        if not resource:
+            return Clarify("Which resource's events should I show?")
+        provider = args.get("provider") or "kubernetes"
+        return Suggestion(["stats", resource, "--provider", provider], explanation)
 
     if command == "fix":
         if not resource:

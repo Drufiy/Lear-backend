@@ -732,6 +732,59 @@ def cmd_investigate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _connector_for(provider: str, creds: dict[str, Any]) -> Connector | None:
+    """Build one connector by name. kubernetes isn't in PROVIDERS (it's the
+    module-function connector) so it's constructed directly — same special-
+    case the intent tool schema already makes for it."""
+    if provider == "kubernetes":
+        from .connectors.kubernetes import KubernetesConnector
+        return KubernetesConnector(creds)
+    return _make_connectors(creds).get(provider)
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Read-only event timeline for a resource — the user-facing surface for a
+    connector's get_stats() (§4a). Point-in-time health is `investigate`
+    (poll_state); this is 'what happened, on a shared clock' (ConnectorEvents).
+    """
+    import datetime
+
+    store = CredentialStore.from_env()
+    creds = store.load()
+    _export_cluster_env(creds)
+
+    connector = _connector_for(args.provider, creds)
+    if connector is None:
+        console.print(f"[red]unknown provider: {args.provider}[/red]")
+        return 2
+    if not connector.authenticate():
+        console.print(f"[yellow]{connector.name}: auth not configured[/yellow]")
+        return 1
+
+    # k8s get_stats requires a `since`; the API connectors default it to None.
+    # A sensible default window keeps the one command uniform across providers.
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=args.since_minutes)
+    try:
+        events = connector.get_stats(args.resource, since=since)
+    except NotImplementedError:
+        console.print(f"[yellow]{connector.name} has no get_stats() yet — nothing to show[/yellow]")
+        return 1
+    except Exception as exc:  # noqa: BLE001 — a read must fail clean, not traceback
+        console.print(f"[red]stats failed: {exc}[/red]")
+        return 2
+
+    if not events:
+        console.print(f"[bold]{args.resource}[/bold] -> no events in the last {args.since_minutes}m")
+        return 0
+
+    console.print(f"[bold]{args.resource}[/bold] -> {len(events)} event(s) in the last {args.since_minutes}m:")
+    for e in events:
+        ts = e["timestamp"]
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        console.print(f"[dim]{ts_str}[/dim] [cyan]{e['event_type']}[/cyan] {e['summary']}")
+    return 0
+
+
 def cmd_actions(_args: argparse.Namespace) -> int:
     dispatcher = _build_dispatcher(PermissionMode.ASK)
     table = ui.make_table("registered actions", caption="run one with: prash run <action> <resource> [--mode ...] [--dry-run]")
@@ -1027,6 +1080,12 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--provider", choices=list(PROVIDERS), default="github")
     inv.add_argument("--dependabot", action="store_true", help="github only: list open Dependabot alerts instead of CI run status (Sprint 2 Tier 3)")
     inv.set_defaults(func=cmd_investigate)
+
+    stats = sub.add_parser("stats", help="show a resource's recent event timeline (a connector's get_stats — 'what happened', not just current state)", formatter_class=formatter_class)
+    stats.add_argument("resource", help="<namespace>/<pod> (kubernetes) or an instance/resource id for other providers")
+    stats.add_argument("--provider", choices=list(PROVIDERS) + ["kubernetes"], default="kubernetes")
+    stats.add_argument("--since-minutes", type=int, default=60, help="how far back to pull events (default 60)")
+    stats.set_defaults(func=cmd_stats)
 
     logs = sub.add_parser("logs", help="read a pod's logs, optionally following live (sprint-2 Kubernetes Depth)", formatter_class=formatter_class)
     logs.add_argument("target", help="<namespace>/<pod>")
