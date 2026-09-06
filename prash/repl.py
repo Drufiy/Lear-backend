@@ -21,6 +21,8 @@ parser's usage.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import shlex
 from collections.abc import Iterable
 
@@ -229,12 +231,21 @@ def process_line(line: str, session: ReplSession, parser, console, pending):
         return None
 
     try:
-        parser.parse_args(argv)
+        # This is a validity PROBE, not the real run (run_argv re-parses the
+        # argv cleanly below once we know it's good). argparse writes its
+        # "usage: prash... invalid choice" banner straight to sys.stderr and
+        # only THEN raises SystemExit -- so on a free-text line we're about to
+        # hand to stage 2 and successfully run, that scary banner still flashed
+        # on the real terminal first (cosmetic bug found live: "<free text>"
+        # ran fine via stage 2 but printed the usage dump anyway; harmless in
+        # the Textual chat surface, which doesn't capture stderr, but ugly in
+        # `prash repl`). Silence stderr for the probe only; real execution in
+        # run_argv keeps its stderr. See PRASH_V2.md §10.
+        with contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(argv)
     except SystemExit:
-        # argparse printed usage for a bad line (to stderr -- invisible in
-        # the Textual chat surface, which only captures stdout). Before
-        # giving up on it, try stage 2: it might be free text ("restart the
-        # broken api pod").
+        # A bad exact-command parse. Before giving up on it, try stage 2: it
+        # might be free text ("restart the broken api pod").
         suggestion = resolve(line, ctx)
         if isinstance(suggestion, Suggestion):
             console.print(f"[dim]→ {suggestion.explain}[/dim]")

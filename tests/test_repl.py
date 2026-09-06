@@ -120,3 +120,31 @@ def test_run_repl_survives_contraction_without_crashing(monkeypatch):
     assert rc == 0
     output = console.export_text()
     assert "No closing quotation" not in output
+
+
+def test_free_text_does_not_leak_argparse_usage_banner_to_stderr():
+    """Regression (A6): a line that isn't an exact command ("restart" with no
+    target) is rejected by argparse's probe parse, which writes a
+    'usage: prash... invalid choice' banner straight to sys.stderr BEFORE
+    raising SystemExit. The REPL recovers via stage 2, but that scary banner
+    used to flash on the real terminal anyway. The probe must swallow its own
+    stderr; real command execution keeps its stderr.
+    """
+    import contextlib
+    import io
+
+    from rich.console import Console
+
+    captured = io.StringIO()
+    console = Console(record=True)
+    with contextlib.redirect_stderr(captured):
+        # "restart" -> argparse invalid choice -> stage 2 fast-path Clarify
+        # (asks which pod; no execution, no network, no cluster needed).
+        rc = repl.run_repl(console, lines=["restart", "exit"])
+
+    assert rc == 0
+    err = captured.getvalue()
+    assert "invalid choice" not in err, f"argparse banner leaked to stderr: {err!r}"
+    assert "usage:" not in err.lower(), f"argparse usage leaked to stderr: {err!r}"
+    # and stage 2 still handled it — the clarify question was shown
+    assert "Which pod" in console.export_text()
