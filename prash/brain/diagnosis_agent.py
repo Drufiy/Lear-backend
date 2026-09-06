@@ -1134,6 +1134,27 @@ def format_k8s_context(pod_status, logs: str, events: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def format_aws_context(target: str, state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for an AWS diagnosis.
+    `state` is a ConnectorState (e.g., HEALTHY, FAILED).
+    `events` is a list of ConnectorEvent dicts (CloudWatch/CloudTrail events).
+    """
+    parts = [
+        "=== AWS INSTANCE STATUS ===",
+        f"target: {target}",
+        f"state: {state.state.value if hasattr(state, 'state') else state}",
+        "",
+        "=== AWS EVENTS (METRICS & ALARMS) ===",
+    ]
+    if events:
+        for e in events:
+            # e is a dict: timestamp, event_type, summary, raw
+            parts.append(f"- {e.get('timestamp')}: [{e.get('event_type')}] {e.get('summary')}")
+    else:
+        parts.append("(no events)")
+    return "\n".join(parts)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def diagnose_failure(
@@ -2047,4 +2068,20 @@ def _build_user_prompt(
             "Your fix will be pushed to the same branch for CI verification."
         )
 
+    return "\n".join(parts)
+
+
+def format_gcp_context(target: str, state, events: list[dict]) -> str:
+    parts = [
+        "=== GCP INSTANCE STATUS ===",
+        f"target: {target}",
+        f"state: {state.state.value if hasattr(state, 'state') else state}",
+        "",
+        "=== GCP EVENTS (METRICS & LOGS) ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- {e.get('timestamp')}: [{e.get('event_type')}] {e.get('summary')}")
+    else:
+        parts.append("(no events)")
     return "\n".join(parts)

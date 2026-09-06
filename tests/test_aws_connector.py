@@ -280,3 +280,197 @@ def test_fetch_logs(mock_credentials):
         
         logs = connector.fetch_logs("i-123")
         assert logs == ["Booting linux...", "Kernel panic!"]
+
+
+def test_watch_returns_handle(mock_credentials):
+    connector = AWSConnector(mock_credentials)
+    session = boto3.Session(region_name="us-east-1")
+    sts_client = session.client("sts")
+    
+    with Stubber(sts_client) as sts_stubber:
+        sts_stubber.add_response("get_caller_identity", {})
+        
+        def mock_client(svc):
+            if svc == "sts": return sts_client
+            
+        connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
+        
+        handle = connector.watch("i-123")
+        assert handle.is_active is True
+        assert handle.connector == "aws"
+        assert handle.target == "i-123"
+        handle.stop()
+        assert handle.is_active is False
+
+
+def test_get_stats(mock_credentials):
+    connector = AWSConnector(mock_credentials)
+    session = boto3.Session(region_name="us-east-1")
+    ec2_client = session.client("ec2")
+    sts_client = session.client("sts")
+    ct_client = session.client("cloudtrail")
+    cw_client = session.client("cloudwatch")
+    
+    with Stubber(ec2_client) as ec2_stubber, Stubber(sts_client) as sts_stubber, Stubber(ct_client) as ct_stubber, Stubber(cw_client) as cw_stubber:
+        sts_stubber.add_response("get_caller_identity", {})
+        sts_stubber.add_response("get_caller_identity", {})
+        
+        ec2_stubber.add_response("describe_instances", {
+            "Reservations": [{"Instances": [{"InstanceId": "i-123", "InstanceType": "t2", "State": {"Name": "running"}}]}]
+        })
+        
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        ct_stubber.add_response("lookup_events", {
+            "Events": [
+                {"EventTime": now - datetime.timedelta(minutes=10), "EventName": "StopInstances"},
+            ]
+        })
+        
+        cw_stubber.add_response("get_metric_statistics", {
+            "Datapoints": [
+                {"Timestamp": now - datetime.timedelta(minutes=5), "Average": 95.0},
+                {"Timestamp": now - datetime.timedelta(minutes=2), "Average": 40.0}
+            ]
+        })
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []}) # DiskReadOps
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []}) # DiskWriteOps
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []}) # NetworkIn
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []}) # NetworkOut
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []}) # StatusCheckFailed
+        cw_stubber.add_response("describe_alarms_for_metric", {"MetricAlarms": []}) # describe_alarms
+        
+        def mock_client(svc):
+            if svc == "ec2": return ec2_client
+            if svc == "sts": return sts_client
+            if svc == "cloudtrail": return ct_client
+            if svc == "cloudwatch": return cw_client
+            
+        connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
+        
+        stats = connector.get_stats("i-123")
+        assert len(stats) == 2
+        assert stats[0]["event_type"] == "cloudtrail_event"
+        assert stats[1]["event_type"] == "cpu_spike"
+        assert stats[1]["summary"] == "CPU Spike: 95.00"
+
+
+def test_aws_alert_action(mock_credentials):
+    from prash.actions.aws_alert import AWSAlertAction
+    from prash.actions.contract import ActionContext, Target
+    
+    # Needs AWS_SNS_TOPIC_ARN
+    mock_credentials["AWS_SNS_TOPIC_ARN"] = "arn:aws:sns:us-east-1:123456789012:MyTopic"
+    connector = AWSConnector(mock_credentials)
+    
+    session = boto3.Session(region_name="us-east-1")
+    sns_client = session.client("sns")
+    
+    with Stubber(sns_client) as sns_stubber:
+        sns_stubber.add_response("publish", {"MessageId": "msg-1234"})
+        
+        connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: sns_client})()
+        
+        action = AWSAlertAction()
+        ctx = ActionContext(
+            target=Target("i-123", environment="staging"),
+            credentials=mock_credentials,
+            dry_run=False,
+            extra={"connectors": {"aws": connector}, "message": "Test Alert!"}
+        )
+        
+        res = action.execute(ctx)
+        assert res.status.value == "succeeded"
+        assert res.detail["MessageId"] == "msg-1234"
+        
+        ver = action.verify(ctx, res)
+        assert ver.ok is True
+
+
+def test_aws_alert_action_missing_arn(mock_credentials):
+    from prash.actions.aws_alert import AWSAlertAction
+    from prash.actions.contract import ActionContext, Target
+    
+    connector = AWSConnector(mock_credentials)
+    
+    action = AWSAlertAction()
+    ctx = ActionContext(
+        target=Target("i-123", environment="staging"),
+        credentials=mock_credentials,
+        dry_run=False,
+        extra={"connectors": {"aws": connector}, "message": "Test Alert!"}
+    )
+    
+    res = action.execute(ctx)
+    assert res.status.value == "failed"
+    assert "credential is required" in res.summary
+
+def test_get_stats_enhanced(mock_credentials):
+    import datetime
+    connector = AWSConnector(mock_credentials)
+    
+    session = boto3.Session(region_name="us-east-1")
+    ec2_client = session.client("ec2")
+    sts_client = session.client("sts")
+    cloudtrail_client = session.client("cloudtrail")
+    cw_client = session.client("cloudwatch")
+    
+    with Stubber(ec2_client) as ec2_stubber, Stubber(sts_client) as sts_stubber, Stubber(cloudtrail_client) as ct_stubber, Stubber(cw_client) as cw_stubber:
+        sts_stubber.add_response("get_caller_identity", {})
+        
+        # locate
+        ec2_stubber.add_response("describe_instances", {
+            "Reservations": [{"Instances": [{"InstanceId": "i-123", "InstanceType": "t2", "State": {"Name": "running"}}]}]
+        }, expected_params={"InstanceIds": ["i-123"]})
+        
+        # cloudtrail
+        ct_stubber.add_response("lookup_events", {"Events": []})
+        
+        # cloudwatch metrics
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        # CPU
+        cw_stubber.add_response("get_metric_statistics", {
+            "Datapoints": [{"Timestamp": now, "Average": 95.0}]
+        })
+        # DiskReadOps
+        cw_stubber.add_response("get_metric_statistics", {
+            "Datapoints": [{"Timestamp": now, "Sum": 6000.0}]
+        })
+        # DiskWriteOps
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []})
+        # NetworkIn
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []})
+        # NetworkOut
+        cw_stubber.add_response("get_metric_statistics", {"Datapoints": []})
+        # StatusCheckFailed
+        cw_stubber.add_response("get_metric_statistics", {
+            "Datapoints": [{"Timestamp": now, "Maximum": 1.0}]
+        })
+        
+        # Alarms
+        cw_stubber.add_response("describe_alarms_for_metric", {
+            "MetricAlarms": [{
+                "AlarmName": "HighCPU",
+                "StateValue": "ALARM",
+                "StateUpdatedTimestamp": now
+            }]
+        })
+        
+        def mock_client(svc):
+            if svc == "ec2": return ec2_client
+            if svc == "sts": return sts_client
+            if svc == "cloudtrail": return cloudtrail_client
+            if svc == "cloudwatch": return cw_client
+            
+        connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
+        
+        stats = connector.get_stats("i-123")
+        assert len(stats) == 4
+        
+        types = [s["event_type"] for s in stats]
+        assert "cpu_spike" in types
+        assert "high_disk_read" in types
+        assert "status_check_failed" in types
+        assert "cloudwatch_alarm" in types

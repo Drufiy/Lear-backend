@@ -10,4 +10,18 @@ state" (Cloud Run, Vercel, k8s Deployments) should expose a
 get_previous_revision()-shaped read call. Track C's rollback action
 calls that directly -- there is deliberately no separate release-
 history store. See PRASH_V2.md §6, cross-track dependency #2.
+
+The interface also includes time-series events (`get_stats`) and 
+proactive monitoring (`watch`) to support faster diagnosis and 
+multi-connector correlation.
 """
+
+from .base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
+
+__all__ = [
+    "Connector",
+    "ConnectorEvent",
+    "ConnectorState",
+    "ResourceState",
+    "WatchHandle",
+]

@@ -25,6 +25,8 @@ from .brain.diagnosis_agent import (
     diagnose_failure,
     find_deployment_manifest,
     format_k8s_context,
+    format_aws_context,
+    format_gcp_context,
 )
 from .brain.gitlab_log_fetcher import fetch_pipeline_logs
 from .brain.log_fetcher import fetch_workflow_logs
@@ -32,6 +34,8 @@ from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
 from .brain.schemas import Diagnosis
 from .connectors.github import GitHubConnector
 from .connectors.kubernetes import get_pod_events, get_pod_logs, get_pod_status
+from .connectors.aws import AWSConnector
+from .connectors.gcp import GCPConnector
 
 logger = logging.getLogger(__name__)
 
@@ -404,3 +408,66 @@ def render_multi_failure(result: MultiFailureResult, console) -> None:
     for job, diagnosis in zip(result.job_names, result.diagnoses, strict=False):
         verdict = "[red]no fix proposed[/red]" if not diagnosis.files_changed else "[green]fix proposed[/green]"
         console.print(f"  {verdict}  [bold]{job}[/bold] — {diagnosis.problem_summary}")
+
+async def diagnose_aws_instance(
+    target: str,
+    creds: dict,
+) -> Diagnosis:
+    """Gather AWS connector metrics, state, and logs for an instance, feed them to
+    Track D's brain, and return the Diagnosis.
+    """
+    import datetime
+    
+    aws = AWSConnector(creds)
+    info = aws.locate(target)
+    if not info:
+        raise FixTargetError(f"AWS instance {target} not found")
+        
+    state = aws.poll_state(target)
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    stats = aws.get_stats(target, since=since)
+    
+    context = format_aws_context(target, state, stats)
+    
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=target,
+        commit_message="(no commit — AWS instance diagnosis)",
+        workflow_name="aws",
+        investigation_context=None,
+        multi_file=False,
+        category_hint="aws infrastructure, resource limits, instance state",
+        include_manifest_tools=False,
+    )
+
+
+async def diagnose_gcp_instance(
+    target: str,
+    creds: dict,
+) -> Diagnosis:
+    """Gather GCP connector metrics, state, and logs for an instance, feed them to
+    Track D's brain, and return the Diagnosis.
+    """
+    import datetime
+    
+    gcp = GCPConnector(creds)
+    info = gcp.locate(target)
+    if not info:
+        raise FixTargetError(f"GCP instance {target} not found")
+        
+    state = gcp.poll_state(target)
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    stats = gcp.get_stats(target, since=since)
+    
+    context = format_gcp_context(target, state, stats)
+    
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=target,
+        commit_message="(no commit — GCP instance diagnosis)",
+        workflow_name="gcp",
+        investigation_context=None,
+        multi_file=False,
+        category_hint="gcp infrastructure, resource limits, instance state",
+        include_manifest_tools=False,
+    )
