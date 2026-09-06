@@ -612,3 +612,54 @@ def test_exec_in_pod_always_closes_even_when_run_forever_raises(monkeypatch):
         k8s.exec_in_pod("prash-demo", "api", ["sleep", "999"])
 
     assert fake_resp.closed is True
+
+
+# -- KubernetesConnector.get_stats: the new class surface (Spec M1b). These
+# -- were shipped with zero coverage (PR #32); this pins the ConnectorEvent
+# -- (TypedDict) contract so the "sort by x['timestamp']" path can't regress
+# -- back to attribute access again.
+
+def _fake_event(reason, message, ts):
+    ev = MagicMock()
+    ev.last_timestamp = ts
+    ev.event_time = None
+    ev.reason = reason
+    ev.message = message
+    ev.to_dict.return_value = {"reason": reason, "message": message}
+    return ev
+
+
+def test_get_stats_returns_connectorevent_dicts_sorted_by_timestamp():
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()  # bypass authenticate()
+
+    newer = datetime(2026, 9, 6, 12, 5, tzinfo=timezone.utc)
+    older = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    # returned out of order on purpose: the sort is where the bug was
+    conn.core_v1.list_namespaced_event.return_value = SimpleNamespace(
+        items=[_fake_event("BackOff", "restarting failed container", newer),
+               _fake_event("Failed", "container could not start", older)]
+    )
+
+    since = datetime(2026, 9, 6, 11, 0, tzinfo=timezone.utc)
+    events = conn.get_stats("prash-demo/broken-app", since=since)
+
+    assert len(events) == 2
+    # ConnectorEvent is a TypedDict -> plain dict access, never attributes
+    assert set(events[0].keys()) == {"timestamp", "connector", "event_type", "summary", "raw"}
+    assert all(e["connector"] == "kubernetes" for e in events)
+    assert events[0]["timestamp"] == older and events[1]["timestamp"] == newer  # sorted ascending
+    assert events[0]["event_type"] == "Failed"
+
+
+def test_get_stats_filters_events_before_since():
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    before = datetime(2026, 9, 6, 10, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
+    conn.core_v1.list_namespaced_event.return_value = SimpleNamespace(
+        items=[_fake_event("Old", "ancient", before), _fake_event("New", "recent", after)]
+    )
+    since = datetime(2026, 9, 6, 11, 0, tzinfo=timezone.utc)
+    events = conn.get_stats("prash-demo/broken-app", since=since)
+    assert len(events) == 1 and events[0]["event_type"] == "New"

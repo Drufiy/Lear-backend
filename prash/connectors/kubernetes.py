@@ -248,7 +248,7 @@ class KubernetesConnector(Connector):
                         raw=e.to_dict()
                     )
                 )
-        return sorted(normalized, key=lambda x: x.timestamp)
+        return sorted(normalized, key=lambda x: x["timestamp"])
 
 
 # --- BACKWARD COMPATIBILITY WRAPPERS ---

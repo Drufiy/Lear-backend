@@ -43,9 +43,9 @@ We commit to numbers so "better tech" is provable, not asserted. **Baselines are
 
 | Metric | How it's measured | Baseline (fill at M0) | Target (prove at M6) |
 |---|---|---|---|
-| Cold-start diagnosis wall-time | Time from `prash fix` to first proposed hypothesis on the standard fixture, median of 5 runs | _TBD_ | Meaningfully lower with `watch()` warm vs cold (set exact % at M0 once baseline is known) |
-| Single-source false-positive rate | On a fixture set with a known root cause, % of runs whose top hypothesis is wrong when diagnosing off one connector only | _TBD_ | Lower with 2-source correlation than single-source, on the same set |
-| Parallel vs sequential read latency | Wall-time to gather state from N connectors in one pass | _TBD_ (sequential) | Approaches slowest-single-connector time, not the sum |
+| Cold-start diagnosis wall-time | Time from `prash fix` to first proposed hypothesis on the standard fixture, median of 5 runs | **8.09 s** (median; min 7.18, max 11.29; n=5) — measured 2026-09-06, `kind-prash-dev` / `prash-demo`, standard fixture `broken-app` (CrashLoopBackOff, config-file-missing), `fix --dry-run --mode read-only` | Meaningfully lower with `watch()` warm vs cold (set exact % at M0 once baseline is known) |
+| Single-source false-positive rate | On a fixture set with a known root cause, % of runs whose top hypothesis is wrong when diagnosing off one connector only | **0/3 (0%)** — measured 2026-09-06 on the 3 known k8s fixtures (config-missing, OOMKilled, missing-ConfigMap), all top hypotheses correct. Caveat: these are unambiguous single-signal cases where k8s events name the cause directly; the correlation gain is expected on *ambiguous multi-signal* incidents, which the M6 combined fixture (§7) provides — that harder set is the real comparison basis | Lower with 2-source correlation than single-source, on the same set |
+| Parallel vs sequential read latency | Wall-time to gather state from N connectors in one pass | **Per-connector k8s read: `poll_state` ~4 ms, `get_stats` ~3 ms** (median, n=5, 2026-09-06). Full N-connector sequential baseline is **not measurable on this machine** — only Kubernetes is live (AWS/GCP/Datadog need creds not present); the true sequential-vs-parallel comparison lands at M6 with the combined k8s+Datadog fixture. Logged as a §8 finding, not guessed | Approaches slowest-single-connector time, not the sum |
 
 If a target turns out to be unmeasurable or the baseline shows the gain is marginal, that's a finding to log in §8 — not a number to massage.
 
@@ -159,7 +159,10 @@ Priority order, worst-covered surfaces first: **Grafana → PagerDuty → Kubern
 
 | Date | Who | Item | Note |
 |---|---|---|---|
-| | | | |
+| 2026-09-06 | Aradhya (agent-assisted) | **M0 baselines measured** (§3) | All three §3 baselines measured live on `kind-prash-dev`/`prash-demo`, before any Aradhya rewrite code (M3+): cold-start diagnosis **8.09 s median** (n=5); single-source false-positive **0/3** on the known k8s fixtures (unambiguous cases — the correlation gain is tested on the harder M6 fixture); per-connector k8s read `poll_state`~4 ms / `get_stats`~3 ms. **Finding:** the full N-connector sequential-vs-parallel latency baseline is unmeasurable on this machine (only k8s is live), so that comparison is deferred to M6 with the combined fixture — logged here per §3 rather than guessed. |
+| 2026-09-06 | Aradhya (agent-assisted) | **M1a hardening** — main was shipped red by PR #33 | PR #33 merged with the suite unable to collect: `base.py` `from datetime import datetime` shadowed the module (crashed the `ConnectorEvent` TypedDict annotation) + a stray duplicate `@dataclass ConnectorEvent`; `watcher.py` `run_terraform_watch_loop` had an empty `if` (IndentationError). Both hotfixed (`b605c47`), suite green (462→now 464 with new tests). The `ConnectorEvent` shape is settled as the **TypedDict** (§4c) — the dead dataclass is removed. |
+| 2026-09-06 | Aradhya (agent-assisted) | **M1b bug fix + first tests for the new k8s surface** | `KubernetesConnector.get_stats` sorted by `x.timestamp` (attribute) on a TypedDict → `AttributeError` at runtime; only survived because PR #32 shipped the class's `get_stats`/`watch` with **zero tests**. Fixed to `x["timestamp"]` and added the first two regression tests pinning the `ConnectorEvent`-dict contract + `since` filtering. |
+| 2026-09-06 | Aradhya | **M1b ownership (retroactive)** | k8s conversion was done by Agrim (PR #32, full convert not adapter) and merged 2026-09-04; recording the convert-vs-adapter decision here as the spec asks: **full convert**, backward-compat module wrappers retained. |
 
 ## 9. Open questions for Anant (resolve at M0)
 
