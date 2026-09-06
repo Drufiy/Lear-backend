@@ -851,6 +851,37 @@ def cmd_watch(args: argparse.Namespace) -> int:
     
     provider = getattr(args, "provider", "kubernetes") or "kubernetes"
 
+    # Multi-connector watch (M5, spec §4d): `--provider aws,gcp --resource i-1,vm-2`
+    # runs one loop over all of them, reading in parallel each cycle. Providers
+    # and resources are zipped positionally; a single --resource applies to all.
+    if "," in provider:
+        from .watcher import run_connector_watch_loop
+
+        providers = [p.strip() for p in provider.split(",") if p.strip()]
+        resources = [r.strip() for r in getattr(args, "resource", ".").split(",") if r.strip()]
+        if len(resources) == 1:
+            resources = resources * len(providers)
+        if len(resources) != len(providers):
+            console.print(f"[red]watch: {len(providers)} providers but {len(resources)} resources — give one --resource each (or a single shared one)[/red]")
+            return 2
+        watches = []
+        for p, r in zip(providers, resources):
+            conn = _connector_for(p, creds)
+            if conn is None:
+                console.print(f"[red]unknown provider: {p}[/red]")
+                return 2
+            watches.append((conn, r, p))
+        console.print(f"[bold]Watching {len(watches)} resources across {', '.join(providers)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_connector_watch_loop(watches, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
     if provider == "terraform":
         resource = getattr(args, "resource", ".")
         console.print(f"[bold]Watching Terraform state in '{resource}'...[/bold] (Ctrl+C to stop)")

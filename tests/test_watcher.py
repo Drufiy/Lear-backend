@@ -264,3 +264,112 @@ def test_watch_loop_passes_creds_through_to_notify(monkeypatch):
     creds = {"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/x"}
     run_watch_loop("production", interval=0, max_iterations=1, creds=creds)
     assert seen["creds"] == creds
+
+
+# ── M5: the unified interface-driven multi-connector loop ───────────────────
+
+import datetime as _dt
+
+from prash.connectors.base import ConnectorState, ResourceState
+from prash.watcher import run_connector_watch_loop
+
+
+class _FakeConn:
+    """Minimal Connector stand-in: canned poll_state + get_stats."""
+
+    def __init__(self, state="healthy", events=None, stats_error=None):
+        self._state = state
+        self._events = events or []
+        self._stats_error = stats_error
+        self.stats_calls = 0
+
+    def poll_state(self, target):
+        return ResourceState(target, ConnectorState(self._state), {})
+
+    def get_stats(self, target, since=None):
+        self.stats_calls += 1
+        if self._stats_error is not None:
+            raise self._stats_error
+        return list(self._events)
+
+
+def _event(event_type="cpu_spike", summary="CPU high", ts=None):
+    return {
+        "timestamp": ts or _dt.datetime(2026, 9, 6, 12, 0, tzinfo=_dt.timezone.utc),
+        "connector": "aws",
+        "event_type": event_type,
+        "summary": summary,
+        "raw": {},
+    }
+
+
+def _capture_notifications(monkeypatch):
+    fired = []
+    monkeypatch.setattr(
+        "prash.watcher._notify_event",
+        lambda provider, target, event_type, summary, console=None, creds=None: fired.append(
+            (provider, target, event_type)
+        ),
+    )
+    monkeypatch.setattr("prash.watcher.time", MagicMock())  # no real sleeping in tests
+    return fired
+
+
+def test_connector_loop_notifies_on_new_event(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    conn = _FakeConn(state="healthy", events=[_event("cpu_spike")])
+    run_connector_watch_loop([(conn, "i-1", "aws")], interval=0, max_iterations=1)
+    assert ("aws", "i-1", "cpu_spike") in fired
+
+
+def test_connector_loop_dedups_same_event_across_cycles(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    conn = _FakeConn(state="healthy", events=[_event("cpu_spike")])
+    run_connector_watch_loop([(conn, "i-1", "aws")], interval=0, max_iterations=3)
+    # same event_type+timestamp every cycle -> notified exactly once
+    assert fired.count(("aws", "i-1", "cpu_spike")) == 1
+    assert conn.stats_calls == 3  # but it did poll all three cycles
+
+
+def test_connector_loop_notifies_on_degraded_state(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    conn = _FakeConn(state="failed", events=[])
+    run_connector_watch_loop([(conn, "i-1", "aws")], interval=0, max_iterations=2)
+    # failed state notified once (deduped), no get_stats events
+    assert fired == [("aws", "i-1", "failed")]
+
+
+def test_connector_loop_reads_all_watches_in_one_cycle(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    aws = _FakeConn(state="healthy", events=[_event("cpu_spike", "aws cpu")])
+    gcp = _FakeConn(state="healthy", events=[_event("disk_full", "gcp disk")])
+    run_connector_watch_loop(
+        [(aws, "i-1", "aws"), (gcp, "vm-2", "gcp")], interval=0, max_iterations=1
+    )
+    assert ("aws", "i-1", "cpu_spike") in fired
+    assert ("gcp", "vm-2", "disk_full") in fired
+    assert aws.stats_calls == 1 and gcp.stats_calls == 1  # both read, parallel fan-out
+
+
+def test_connector_loop_survives_a_flaky_connector(monkeypatch):
+    _capture_notifications(monkeypatch)
+    boom = _FakeConn(state="healthy", stats_error=ValueError("api blew up"))
+    ok = _FakeConn(state="healthy", events=[_event("cpu_spike")])
+    # must not raise even though one connector's get_stats throws
+    seen = run_connector_watch_loop(
+        [(boom, "i-1", "aws"), (ok, "vm-2", "gcp")], interval=0, max_iterations=1
+    )
+    assert ("gcp", "vm-2") in seen  # healthy one still tracked
+
+
+def test_connector_loop_skips_connectors_without_get_stats(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+
+    class _NoStats(_FakeConn):
+        def get_stats(self, target, since=None):
+            raise NotImplementedError
+
+    conn = _NoStats(state="failed")
+    # NotImplementedError is swallowed; poll_state-based notify still fires
+    run_connector_watch_loop([(conn, "x", "azure")], interval=0, max_iterations=1)
+    assert ("azure", "x", "failed") in fired

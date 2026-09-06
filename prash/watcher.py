@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from prash.connectors.kubernetes import PodStatus, get_pod_status
 from prash.connectors.terraform import TerraformConnector
@@ -216,9 +217,22 @@ def run_terraform_watch_loop(
     return state
 
 
-def _notify_aws(target: str, summary: str, console=None, creds: dict | None = None) -> None:
-    title = f"Prash: AWS Issue — {target}"
-    message = f"{summary}. Run `prash fix {target} --provider aws` to diagnose."
+# ── M5 (spec §4d): one multi-connector watch loop over the Connector interface ──
+# Before this, AWS and GCP each had their own near-identical ~55-line loop, and a
+# third (terraform) and the k8s pod-problem loop lived separately. The AWS/GCP
+# pair was pure copy-paste over the same interface calls (poll_state + get_stats),
+# so they now share ONE loop that drives *any* connector — and reads every watch
+# in a cycle in PARALLEL, not one-after-another (the §3 "parallel vs sequential"
+# speed lever). k8s's richer pod-problem model (run_watch_loop / detect_changes)
+# and terraform's drift model stay specialized — they aren't get_stats time
+# series — so no connector loses a capability it had (§4e).
+
+def _notify_event(provider: str, target: str, event_type: str, summary: str,
+                  console=None, creds: dict | None = None) -> None:
+    """One notification path for every interface-driven connector watch."""
+    title = f"Prash: {provider} {event_type} — {target}"
+    fix_hint = f"prash fix {target}" + (f" --provider {provider}" if provider != "kubernetes" else "")
+    message = f"{summary}. Run `{fix_hint}` to diagnose."
     if not _send_desktop_notification(title, message):
         logger.warning("Desktop notification failed on every available path — console only")
     if creds:
@@ -232,128 +246,107 @@ def _notify_aws(target: str, summary: str, console=None, creds: dict | None = No
         console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
 
 
-def run_aws_watch_loop(
-    target: str,
+def _read_watch(connector, target: str, since):
+    """Read one connector's poll_state + get_stats for `target`. Never raises —
+    a single flaky connector must not take down a multi-connector cycle; it
+    returns (state_value_or_None, events, error_or_None)."""
+    state_value = None
+    events: list = []
+    err = None
+    try:
+        state_value = connector.poll_state(target).state.value
+    except Exception as exc:  # noqa: BLE001 — one bad read can't kill the loop
+        err = exc
+    try:
+        events = connector.get_stats(target, since=since)
+    except NotImplementedError:
+        pass  # connector doesn't expose a time series; poll_state alone is fine
+    except Exception as exc:  # noqa: BLE001
+        err = err or exc
+    return state_value, events, err
+
+
+def run_connector_watch_loop(
+    watches: list[tuple],
     interval: int | None = None,
     console=None,
     max_iterations: int | None = None,
     creds: dict | None = None,
-):
-    """Poll AWS state and metrics to detect anomalies or state changes."""
+) -> dict:
+    """The one interface-driven watch loop. `watches` is a list of
+    (connector, target, provider_label). Each cycle reads every watch in
+    PARALLEL, then notifies once per state change and once per new get_stats
+    event (the same dedup model the old AWS/GCP loops used). Returns the
+    per-watch dedup state keyed by (provider_label, target)."""
     import datetime
-    
+
     interval = interval or _interval_from_env()
-    state = {} # dict of event_type -> latest_timestamp to avoid repeating
+    seen: dict[tuple, dict] = {(p, t): {} for (_c, t, p) in watches}
     iterations = 0
-    connector = AWSConnector(creds or {})
     last_poll = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=interval)
-    
+
     while max_iterations is None or iterations < max_iterations:
-        try:
-            # Poll state
-            res_state = connector.poll_state(target)
-            if res_state.state in (ConnectorState.DEGRADED, ConnectorState.FAILED, ConnectorState.UNKNOWN):
-                problem = f"Instance is in state: {res_state.state.value}"
-                if state.get("instance_state") != res_state.state.value:
-                    _notify_aws(target, problem, console, creds)
-                    state["instance_state"] = res_state.state.value
-            elif res_state.state == ConnectorState.HEALTHY:
-                state["instance_state"] = "healthy"
-                
-            # Check metrics and alarms
-            events = connector.get_stats(target, since=last_poll)
+        # Parallel fan-out: N connector reads take ~max(one read), not the sum.
+        if len(watches) > 1:
+            with ThreadPoolExecutor(max_workers=len(watches)) as pool:
+                results = list(pool.map(lambda w: _read_watch(w[0], w[1], last_poll), watches))
+        else:
+            results = [_read_watch(watches[0][0], watches[0][1], last_poll)] if watches else []
+
+        for (_conn, target, provider), (state_value, events, err) in zip(watches, results):
+            st = seen[(provider, target)]
+            if err is not None and console is not None:
+                console.print(f"[yellow]Error polling {provider} {target}: {err}[/yellow]")
+
+            # State-change notification (degraded/failed/unknown -> notify once).
+            if state_value in ("degraded", "failed", "unknown"):
+                if st.get("instance_state") != state_value:
+                    _notify_event(provider, target, state_value,
+                                  f"Instance is in state: {state_value}", console, creds)
+                    st["instance_state"] = state_value
+            elif state_value == "healthy":
+                st["instance_state"] = "healthy"
+
+            # New-event notifications from get_stats.
             new_events = False
             for event in events:
-                event_type = event["event_type"]
-                event_time = event["timestamp"]
-                # Only notify if we haven't seen this specific event recently or it's a new occurrence
-                if event_type not in state or state[event_type] < event_time:
-                    _notify_aws(target, event["summary"], console, creds)
-                    state[event_type] = event_time
+                et = event["event_type"]
+                ts = event["timestamp"]
+                if hasattr(ts, "tzinfo") and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=datetime.timezone.utc)
+                if et not in st or st[et] < ts:
+                    _notify_event(provider, target, et, event["summary"], console, creds)
+                    st[et] = ts
                     new_events = True
-                    
-            if console is not None and state.get("instance_state") == "healthy" and not new_events:
+
+            if console is not None and st.get("instance_state") == "healthy" and not new_events:
                 console.print(f"[dim]{target}: Healthy, no new issues[/dim]")
-                
-        except Exception as e:
-            if console is not None:
-                console.print(f"[yellow]Error polling AWS: {e}[/yellow]")
-                
+
         last_poll = datetime.datetime.now(datetime.timezone.utc)
         iterations += 1
         if max_iterations is None or iterations < max_iterations:
             time.sleep(interval)
-            
-    return state
 
-def _notify_gcp(target: str, summary: str, console=None, creds: dict | None = None) -> None:
-    title = f"Prash: GCP Issue — {target}"
-    message = f"{summary}. Run `prash fix {target} --provider gcp` to diagnose."
-    if not _send_desktop_notification(title, message):
-        logger.warning("Desktop notification failed on every available path — console only")
-    if creds:
-        results = send_team_notifications(creds, title, message)
-        failed = [channel for channel, ok in results.items() if not ok]
-        if failed:
-            logger.warning(f"team notification failed: {', '.join(failed)}")
-        elif results:
-            logger.info(f"team notification sent: {', '.join(results)}")
-    if console is not None:
-        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+    return seen
 
 
-def run_gcp_watch_loop(
-    target: str,
-    interval: int | None = None,
-    console=None,
-    max_iterations: int | None = None,
-    creds: dict | None = None,
-):
-    """Poll GCP state and metrics to detect anomalies or state changes."""
-    import datetime
+def run_aws_watch_loop(target, interval=None, console=None, max_iterations=None, creds=None):
+    """AWS EC2 watch — now a thin wrapper over the shared interface loop."""
+    conn = AWSConnector(creds or {})
+    seen = run_connector_watch_loop(
+        [(conn, target, "aws")], interval=interval, console=console,
+        max_iterations=max_iterations, creds=creds,
+    )
+    return seen.get(("aws", target), {})
+
+
+def run_gcp_watch_loop(target, interval=None, console=None, max_iterations=None, creds=None):
+    """GCP Compute watch — now a thin wrapper over the shared interface loop."""
     from .connectors.gcp import GCPConnector
-    from .connectors.base import ConnectorState
-    
-    interval = interval or _interval_from_env()
-    state = {} # dict of event_type -> latest_timestamp to avoid repeating
-    iterations = 0
-    connector = GCPConnector(creds or {})
-    last_poll = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=interval)
-    
-    while max_iterations is None or iterations < max_iterations:
-        try:
-            # Poll state
-            res_state = connector.poll_state(target)
-            if res_state.state in (ConnectorState.DEGRADED, ConnectorState.FAILED, ConnectorState.UNKNOWN):
-                problem = f"Instance is in state: {res_state.state.value}"
-                if state.get("instance_state") != res_state.state.value:
-                    _notify_gcp(target, problem, console, creds)
-                    state["instance_state"] = res_state.state.value
-            elif res_state.state == ConnectorState.HEALTHY:
-                state["instance_state"] = "healthy"
-                
-            # Check metrics and alarms
-            events = connector.get_stats(target, since=last_poll)
-            new_events = False
-            for event in events:
-                event_type = event["event_type"]
-                event_time = event["timestamp"].replace(tzinfo=datetime.timezone.utc)
-                # Only notify if we haven't seen this specific event recently or it's a new occurrence
-                if event_type not in state or state[event_type] < event_time:
-                    _notify_gcp(target, event["summary"], console, creds)
-                    state[event_type] = event_time
-                    new_events = True
-                    
-            if console is not None and state.get("instance_state") == "healthy" and not new_events:
-                console.print(f"[dim]{target}: Healthy, no new issues[/dim]")
-                
-        except Exception as e:
-            if console is not None:
-                console.print(f"[yellow]Error polling GCP: {e}[/yellow]")
-                
-        last_poll = datetime.datetime.now(datetime.timezone.utc)
-        iterations += 1
-        if max_iterations is None or iterations < max_iterations:
-            time.sleep(interval)
-            
-    return state
+
+    conn = GCPConnector(creds or {})
+    seen = run_connector_watch_loop(
+        [(conn, target, "gcp")], interval=interval, console=console,
+        max_iterations=max_iterations, creds=creds,
+    )
+    return seen.get(("gcp", target), {})
