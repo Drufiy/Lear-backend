@@ -30,7 +30,7 @@ done on his side.
 | Vercel | `VERCEL_TOKEN` | ✓ set, live-verified |
 | AWS | `AWS_ACCESS_KEY_ID/SECRET/REGION` | blank — skip unless needed tonight |
 | Kubernetes | `KUBECONFIG`/`KUBE_CONTEXT`/`KUBE_NAMESPACE` | ✓ set (kind-prash-dev) |
-| Datadog | `DATADOG_API_KEY` + `DATADOG_APP_KEY` | APP_KEY missing — get before testing monitors/mute |
+| Datadog | `DATADOG_API_KEY` + `DATADOG_APP_KEY` | ✓ set + live-verified 2026-09-07 (note: this org's API key is denied Events v2 intake — connector falls back to v1, see §5b) |
 | Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` | ✓ set |
 | PagerDuty | `PAGERDUTY_API_KEY` + `FROM_EMAIL` + `ROUTING_KEY` | ✓ set |
 | Snyk | `SNYK_API_TOKEN` + `SNYK_ORG_ID` | ✓ set |
@@ -77,28 +77,28 @@ done on his side.
 - [ ] Separately test `vercel-rollback` — confirm it refuses without `--deployment-id`, then succeeds with one
 - [ ] Confirm site is actually reachable/correct after either action, not just "readyState: READY"
 
-## 5. Datadog (needs `DATADOG_APP_KEY` first)
+## 5. Datadog (live-verified 2026-09-07)
 
-- [ ] Get `DATADOG_APP_KEY` from org settings → Application Keys
-- [ ] Create or use a real monitor, trip it into ALERT (or pick one already alerting)
-- [ ] `prash investigate <monitor> --provider datadog` — confirm FAILED/DEGRADED mapped correctly
-- [ ] `prash run datadog-mute-monitor <monitor> --provider datadog --minutes 10`
-- [ ] Confirm mute actually shows in Datadog UI, and unmutes after the window
+- [x] Get `DATADOG_APP_KEY` from org settings → Application Keys — set in local `.env`, both keys validated live
+- [x] Create or use a real monitor, trip it into ALERT — `scripts/testing/break_datadog.py` trips `prash-test-synthetic-error-rate` (id 319727487)
+- [x] `prash investigate <monitor> --provider datadog` — Alert → `failed`, OK → `healthy`, and the get_stats timeline renders below the state
+- [x] `prash run datadog-mute-monitor <monitor> --minutes 10 --mode auto-safe` — muted + verified (`overall_state=OK`, auto-expires). Correction to this row as originally written: `prash run` takes NO `--provider` flag (connectors are always built from .env), and SAFE tier still prompts in ask mode — `--grant` only pre-approves APPROVAL-tier actions; use `--mode auto-safe` (or answer the prompt) for SAFE ones.
+- [x] Confirm mute actually shows — confirmed via the API verify line + audit id; the 10-minute window auto-expires
 
 ### 5b. Datadog autonomous loop (watch → diagnose → act → verify → notify, M4)
 
-- [ ] `python scripts/testing/break_datadog.py --heal` — confirm the fixture monitor `prash-test-synthetic-error-rate` is OK before starting
-- [ ] `prash watch --provider datadog --resource prash-test-synthetic-error-rate` — leave it running
-- [ ] First poll reports baseline with no notifications (no duplicate pings on unchanged state)
-- [ ] `python scripts/testing/break_datadog.py` (value 999 → Alert) — within one poll cycle the watcher detects the transition: desktop toast + console ⚠ + team channels if configured
-- [ ] The same Alert state does NOT re-notify on the next poll (dedup)
-- [ ] `python scripts/testing/break_datadog.py --heal` — recovery (Alert → OK) is notified too
-- [ ] `prash investigate prash-test-synthetic-error-rate --provider datadog` — timeline shows the alert events
-- [ ] Brain: `diagnose_datadog_monitor('prash-test-synthetic-error-rate')` (REPL/chat route) yields category `monitoring` with `mute_monitor` as a labeled stopgap, files_changed empty
-- [ ] `prash run datadog-alert <target> --text "Prash E2E test"` — shows the APPROVAL prompt ("This will create a visible alert in Datadog"), declines work
-- [ ] Re-run with the approval accepted — event is visible in Datadog's event stream, `✓` verify line confirms it, audit id printed
-- [ ] `prash watch --provider datadog` with no targets and no `DATADOG_WATCH_MONITORS` — clean error naming the env var, exit 2
-- [ ] `DATADOG_WATCH_MONITORS=prash-test-synthetic-error-rate` (no `--resource`) — same watch behavior as the flag
+- [x] `python scripts/testing/break_datadog.py --heal` — fixture monitor settled OK (note: with sparse single points Datadog's evaluation is sticky — if the state doesn't settle, re-run `--heal` to put a fresh point in the 5m window)
+- [x] `prash watch --provider datadog --resource prash-test-synthetic-error-rate` — ran bounded (max_iterations), polls clean
+- [x] First poll reports baseline with no notifications (no duplicate pings on unchanged state)
+- [x] `python scripts/testing/break_datadog.py` — watch caught OK→Alert within one poll cycle: "⚠ Monitor 'prash-test-synthetic-error-rate' entered Alert state"
+- [x] The same Alert state does NOT re-notify on the next poll (dedup) — 8 consecutive Alert polls, one notification
+- [x] `python scripts/testing/break_datadog.py --heal` — recovery (Alert → OK) is notified too: "⚠ Monitor ... recovered to OK"
+- [x] `prash investigate prash-test-synthetic-error-rate --provider datadog` — timeline shows the alert events ([Triggered]/[Recovered] monitor_alert entries + metric_spike context). Found live + fixed 2026-09-07: monitor-alert events need the `@monitor_id:` facet (bare `monitor_id:` matched ZERO events) and nest title/transition under attributes.attributes — `_monitor_events` now parses the real shape.
+- [ ] Brain: `diagnose_datadog_monitor('prash-test-synthetic-error-rate')` (REPL/chat route) yields category `monitoring` with `mute_monitor` as a labeled stopgap, files_changed empty — **BLOCKED 2026-09-07: no valid LLM key on this machine** (test.env's DEEPSEEK_API_KEY is an invalid placeholder, KIMI_API_KEY empty). Needs one real DEEPSEEK_API_KEY or KIMI_API_KEY in local .env; the code path itself is unit- + eval-covered.
+- [x] `prash run datadog-alert <target> --text "Prash E2E test"` — shows the APPROVAL prompt ("This will create a visible alert in Datadog"), declines work (no stdin → clean decline, audit recorded)
+- [x] Re-run with the approval accepted (`--grant`) — event posted (via v1 fallback; this org's API key is denied v2 intake), `✓` verify line confirms it after the intake→searchability propagation retry, audit id printed
+- [x] `prash watch --provider datadog` with no targets and no `DATADOG_WATCH_MONITORS` — clean error naming the env var, exit 2
+- [x] `DATADOG_WATCH_MONITORS=prash-test-synthetic-error-rate` (no `--resource`) — same watch behavior as the flag
 
 ## 6. Grafana (read + silence-alert)
 

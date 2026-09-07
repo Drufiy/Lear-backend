@@ -533,7 +533,7 @@ def test_get_stats_returns_connector_events(monkeypatch):
     assert timestamps == sorted(timestamps)  # ascending, oldest first
 
     payload = json.loads(calls[1].data)
-    assert payload["filter"]["query"] == "monitor_id:42"
+    assert payload["filter"]["query"] == "@monitor_id:42"
     assert payload["filter"]["from"] == _SINCE.isoformat()
     assert payload["sort"] == "timestamp"
 
@@ -575,6 +575,36 @@ def test_get_stats_returns_empty_when_monitor_missing(monkeypatch):
     assert dd.get_stats("no such monitor", since=_SINCE) == []
 
 
+def test_get_stats_parses_datadog_monitor_alert_event_shape(monkeypatch):
+    """Real bug found live (2026-09-07): monitor-alert events carry their
+    title, source tags, and state transition inside a NESTED
+    attributes.attributes dict (the flat top-level fields are absent), and
+    timestamps arrive as epoch milliseconds. get_stats must normalize that
+    shape into a monitor_alert ConnectorEvent with the transition surfaced,
+    not drop or mislabel it."""
+    events_body = _events_body({
+        "timestamp": 1788805347000,  # epoch ms, as Datadog sends them
+        "attributes": {
+            "monitor_id": 42,
+            "sourcecategory": "monitor_alert",
+            "source_type_name_tag": "monitor_alert",
+            "title": "[Triggered] synthetic error rate",
+            "transition": {"source_state": "OK", "destination_state": "Alert", "transition_type": "alert"},
+        },
+    })
+    _sequenced_urlopen(monkeypatch, [_monitor_body("Alert"), events_body])
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
+
+    events = dd.get_stats("42", since=_SINCE, include_metrics=False)
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "monitor_alert"
+    assert event["summary"] == "[Triggered] synthetic error rate"
+    assert event["timestamp"] == datetime.datetime(2026, 9, 7, 18, 22, 27, tzinfo=datetime.timezone.utc)
+    assert event["raw"]["transition"]["destination_state"] == "Alert"
+
+
 # ── M4: events-post primitives behind the datadog-alert action ──────────────
 
 
@@ -589,6 +619,65 @@ def test_post_event_sends_v2_payload(monkeypatch):
     assert payload == {"data": {"type": "event", "attributes": {
         "title": "t", "text": "x", "priority": "low", "tags": ["team:db"],
     }}}
+
+
+def test_post_event_falls_back_to_v1_when_v2_intake_denied(monkeypatch):
+    """Found live (2026-09-07): this org's API key is denied Events v2 intake
+    (403 both keys / 401 api-only) while v1 intake accepts the same key. The
+    permission-shaped failure must fall back to v1 -- same event stream --
+    and the returned payload must carry the v1 event id plus a via marker
+    naming the intake that actually landed. Other errors (404, 5xx after
+    retries) still propagate; the fallback is not a catch-all."""
+    responses = [
+        _http_error(403, body=b''),
+        b'{"status": "ok", "event": {"id": 8800392108675975624, "title": "t"}}',
+    ]
+    calls = []
+
+    def fake_urlopen(req, timeout=30):
+        calls.append(req)
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _FakeResponse(item)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
+
+    resp = dd.post_event("t", "x", tags=["team:db"])
+
+    assert calls[0].full_url == "https://api.datadoghq.com/api/v2/events"
+    assert calls[1].full_url == "https://api.datadoghq.com/api/v1/events"
+    v1_payload = json.loads(calls[1].data)
+    assert v1_payload == {"title": "t", "text": "x", "priority": "normal", "tags": ["team:db"]}
+    assert resp == {"data": {"id": "8800392108675975624", "via": "v1"}}
+
+
+def test_get_event_falls_back_to_v1_on_404(monkeypatch):
+    """A v1-posted event must still be verifiable: v2 GET 404s on it, and the
+    v1 GET result is normalized to the same data.id shape so callers compare
+    ids identically regardless of which intake landed the event."""
+    responses = [
+        _http_error(404, body=b'{"errors": ["not found"]}'),
+        b'{"event": {"id": 8800392108675975624, "title": "t"}}',
+    ]
+    calls = []
+
+    def fake_urlopen(req, timeout=30):
+        calls.append(req)
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _FakeResponse(item)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
+
+    resp = dd.get_event("8800392108675975624")
+
+    assert calls[0].full_url == "https://api.datadoghq.com/api/v2/events/8800392108675975624"
+    assert calls[1].full_url == "https://api.datadoghq.com/api/v1/events/8800392108675975624"
+    assert resp["data"]["id"] == "8800392108675975624"
 
 
 def test_get_event_hits_v2_endpoint(monkeypatch):

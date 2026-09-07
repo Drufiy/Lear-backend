@@ -10,6 +10,13 @@ Safe to re-run any number of times.
     python3 scripts/testing/break_datadog.py          # force Alert (critical)
     python3 scripts/testing/break_datadog.py --warn   # force Warn (degraded)
     python3 scripts/testing/break_datadog.py --heal   # back to OK
+
+Found live 2026-09-07: this script submits ONE point per run, and Datadog's
+monitor evaluation is sticky over sparse data -- a state change only lands
+once a fresh point sits inside the monitor's 5m evaluation window (and, for
+a recovery, once the earlier high value has aged out of it). If `investigate`
+still shows the old state a couple of minutes after a run, just run the same
+command again so a second fresh point lands, and give it ~1-5 minutes.
 """
 from __future__ import annotations
 
