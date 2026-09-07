@@ -49,6 +49,7 @@ from .actions.missing_secret import RequestSecretAction
 from .actions.datadog_mute import DatadogMuteMonitorAction
 from .actions.datadog_alert import DatadogAlertAction
 from .actions.github_alert import GitHubOpenIssueAction
+from .actions.gitlab_alert import GitLabOpenIssueAction
 from .actions.gitleaks_escalate import GitleaksEscalateAction
 from .actions.grafana_silence import GrafanaSilenceAlertAction
 from .actions.open_pr import OpenPrAction
@@ -325,6 +326,7 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             DatadogMuteMonitorAction(),
             DatadogAlertAction(),
             GitHubOpenIssueAction(),
+            GitLabOpenIssueAction(),
             GrafanaSilenceAlertAction(),
             SnykIgnoreIssueAction(),
             GitleaksEscalateAction(),
@@ -888,6 +890,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         resolve_pagerduty_services,
         run_github_watch_loop,
         resolve_github_repos,
+        run_gitlab_watch_loop,
+        resolve_gitlab_projects,
     )
 
     store = CredentialStore.from_env()
@@ -1020,6 +1024,30 @@ def cmd_watch(args: argparse.Namespace) -> int:
             console.print(f"[dim]CI-failure pings will also be sent to: {', '.join(team_channels)}[/dim]")
         try:
             run_github_watch_loop(repos, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "gitlab":
+        # Watch targets: --resource (comma-separated namespace/project),
+        # falling back to GITLAB_WATCH_PROJECTS from .env/env. No `all`.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            projects = resolve_gitlab_projects(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve GitLab projects: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching GitLab project(s): {', '.join(projects)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]CI-failure pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_gitlab_watch_loop(projects, interval=args.interval, console=console, creds=creds)
         except Exception as exc:
             console.print(f"[red]watch stopped: {exc}[/red]")
             return 2

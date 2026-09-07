@@ -28,6 +28,7 @@ from prash.connectors.aws import AWSConnector
 from prash.connectors.datadog import DatadogConnector, DatadogError
 from prash.connectors.pagerduty import PagerDutyConnector, PagerDutyError
 from prash.connectors.github import GitHubConnector, GitHubError
+from prash.connectors.gitlab import GitLabConnector, GitLabError
 from prash.connectors.base import ConnectorEvent, ConnectorState
 from prash.notifications import send_team_notifications
 
@@ -427,6 +428,76 @@ def run_github_watch_loop(
         return
 
     run_watchhandle_loop(handles, _notify_github, interval=interval, console=console,
+                          max_iterations=max_iterations, creds=creds)
+
+
+def _notify_gitlab(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
+    """Same desktop+team+console path as _notify_github, for a GitLab pipeline
+    transition. A pipeline newly failing (or a retry flipping status) is the
+    actionable signal; `prash fix <project> --ci --provider gitlab` diagnoses."""
+    raw = event.get("raw") or {}
+    project = raw.get("project") or event.get("summary", "")
+    title = f"Prash: {event['summary']}"
+    message = (
+        f"GitLab CI {project}: {event['event_type']}. "
+        f"Run `prash fix {project} --ci --provider gitlab` to diagnose."
+    )
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    if console is not None:
+        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def resolve_gitlab_projects(spec: str | None, creds: dict | None = None) -> list[str]:
+    """Turn a --resource spec (or the GITLAB_WATCH_PROJECTS env value) into
+    watch targets: comma-separated `namespace/project` entries (subgroups
+    allowed). No `all` -- watched projects are always explicit."""
+    value = (spec or os.environ.get("GITLAB_WATCH_PROJECTS") or "").strip()
+    if not value:
+        raise ValueError(
+            "no GitLab watch targets: pass --resource namespace/project1,namespace/project2 "
+            "or set GITLAB_WATCH_PROJECTS (comma-separated namespace/project)"
+        )
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def run_gitlab_watch_loop(
+    projects: list[str],
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+) -> None:
+    """Watch GitLab projects' pipelines via each connector.watch() handle
+    (§4a) -- a thin wrapper over the shared WatchHandle loop. A pipeline newly
+    failing (or a retry flipping status) fires the same desktop+team
+    notification path as the other connectors."""
+    interval = interval or _interval_from_env()
+    connector = GitLabConnector(creds or {})
+    if not connector.authenticate():
+        logger.warning("GitLab credentials failed validation — watch will likely poll nothing")
+
+    handles = []
+    for project in projects:
+        try:
+            handles.append(connector.watch(project, interval=interval))
+        except GitLabError as exc:
+            logger.warning(f"could not watch project {project!r}: {exc}")
+            if console is not None:
+                console.print(f"[yellow]skipping project {project}: {exc}[/yellow]")
+    if not handles:
+        if console is not None:
+            console.print("[yellow]no GitLab projects to watch[/yellow]")
+        return
+
+    run_watchhandle_loop(handles, _notify_gitlab, interval=interval, console=console,
                           max_iterations=max_iterations, creds=creds)
 
 

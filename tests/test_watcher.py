@@ -773,3 +773,92 @@ def test_resolve_github_repos_reads_env(monkeypatch):
 
     monkeypatch.setattr(watcher_mod.os, "environ", {"GITHUB_WATCH_REPOS": "acme/api"})
     assert resolve_github_repos(None) == ["acme/api"]
+
+
+# ── G3: GitLab CI watch loop + project resolution ──
+
+def _gl_event(event_type="ci_failure", project="acme/api"):
+    import datetime as _dt
+    return {
+        "timestamp": _dt.datetime(2026, 9, 7, 12, 0, tzinfo=_dt.timezone.utc),
+        "connector": "gitlab", "event_type": event_type,
+        "summary": f"pipeline #7 {event_type} on main (abcd1234)",
+        "raw": {"pipeline_id": 7, "project": project},
+    }
+
+
+class _FakeGlHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.connector = "gitlab"
+        self.target = "acme/api"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeGlConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, project, interval=30):
+        self.watched.append(project)
+        return self._handle
+
+
+def test_gitlab_watch_loop_notifies_on_new_failure(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGlHandle(script=[[_gl_event()], []])
+    monkeypatch.setattr(watcher_mod, "GitLabConnector", lambda creds: _FakeGlConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_gitlab", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_gitlab_watch_loop(["acme/api"], interval=0, max_iterations=2)
+    assert len(notified) == 1 and notified[0]["event_type"] == "ci_failure"
+
+
+def test_gitlab_watch_loop_survives_poll_errors(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.gitlab import GitLabError
+
+    handle = _FakeGlHandle(script=[GitLabError("GitLab API 429: rate limited"), [_gl_event()]])
+    monkeypatch.setattr(watcher_mod, "GitLabConnector", lambda creds: _FakeGlConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_gitlab", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_gitlab_watch_loop(["acme/api"], interval=0, max_iterations=2)
+    assert len(notified) == 1
+
+
+def test_resolve_gitlab_projects_splits_comma_list():
+    from prash.watcher import resolve_gitlab_projects
+    assert resolve_gitlab_projects("acme/api, acme/web") == ["acme/api", "acme/web"]
+
+
+def test_resolve_gitlab_projects_requires_targets(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_gitlab_projects
+    import pytest
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {})
+    with pytest.raises(ValueError):
+        resolve_gitlab_projects(None)
+
+
+def test_resolve_gitlab_projects_reads_env(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_gitlab_projects
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {"GITLAB_WATCH_PROJECTS": "acme/api"})
+    assert resolve_gitlab_projects(None) == ["acme/api"]

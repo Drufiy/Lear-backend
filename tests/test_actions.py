@@ -1667,3 +1667,83 @@ def test_github_open_issue_verify_not_ok_when_closed(tmp_path):
     result = action.execute(ctx)
     verification = action.verify(ctx, result)
     assert verification.ok is False
+
+
+# ── G3: gitlab-open-issue alert action (GitLab mirror of github-open-issue) ──
+
+from prash.actions.gitlab_alert import GitLabOpenIssueAction  # noqa: E402
+
+
+class _FakeIssueGitLab:
+    def __init__(self, fail=False, verify_state="opened"):
+        self.fail = fail
+        self.verify_state = verify_state
+        self.created = []
+        self.checked = []
+
+    def create_issue(self, project, title, body=""):
+        if self.fail:
+            raise RuntimeError("gitlab api error")
+        self.created.append((project, title, body))
+        return {"iid": 7, "web_url": f"https://gitlab.com/{project}/-/issues/7", "title": title, "state": "opened"}
+
+    def get_issue(self, project, iid):
+        self.checked.append((project, iid))
+        return {"iid": iid, "state": self.verify_state}
+
+
+def _gl_issue_ctx(tmp_path, gl=None, **extra):
+    return _ctx(tmp_path, resource="acme/api",
+                extra={"connectors": {"gitlab": gl if gl is not None else _FakeIssueGitLab()}, **extra})
+
+
+def test_gitlab_open_issue_plan_is_approval_and_reversible(tmp_path):
+    plan = GitLabOpenIssueAction().plan(_gl_issue_ctx(tmp_path))
+    assert plan.action_id == "gitlab-open-issue"
+    assert plan.reversible is True and plan.risk_tier.value == "approval"
+    assert "acme/api" in plan.steps[0].description
+
+
+def test_gitlab_open_issue_execute_default_title(tmp_path):
+    gl = _FakeIssueGitLab()
+    result = GitLabOpenIssueAction().execute(_gl_issue_ctx(tmp_path, gl=gl))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["iid"] == 7
+    project, title, _ = gl.created[0]
+    assert project == "acme/api" and "CI failure on acme/api" in title
+
+
+def test_gitlab_open_issue_execute_with_title_and_body(tmp_path):
+    gl = _FakeIssueGitLab()
+    ctx = _gl_issue_ctx(tmp_path, gl=gl, title="pipeline broken", body="lint stage failed")
+    result = GitLabOpenIssueAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert gl.created == [("acme/api", "pipeline broken", "lint stage failed")]
+
+
+def test_gitlab_open_issue_execute_fails_honestly(tmp_path):
+    result = GitLabOpenIssueAction().execute(_gl_issue_ctx(tmp_path, gl=_FakeIssueGitLab(fail=True)))
+    assert result.status is ActionResultStatus.FAILED
+    assert "gitlab api error" in result.summary
+
+
+def test_gitlab_open_issue_execute_without_connector(tmp_path):
+    result = GitLabOpenIssueAction().execute(_ctx(tmp_path, resource="acme/api", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_gitlab_open_issue_verify_ok_when_opened(tmp_path):
+    gl = _FakeIssueGitLab()
+    action = GitLabOpenIssueAction()
+    ctx = _gl_issue_ctx(tmp_path, gl=gl)
+    result = action.execute(ctx)
+    assert action.verify(ctx, result).ok is True
+    assert gl.checked == [("acme/api", 7)]
+
+
+def test_gitlab_open_issue_verify_not_ok_when_closed(tmp_path):
+    gl = _FakeIssueGitLab(verify_state="closed")
+    action = GitLabOpenIssueAction()
+    ctx = _gl_issue_ctx(tmp_path, gl=gl)
+    result = action.execute(ctx)
+    assert action.verify(ctx, result).ok is False
