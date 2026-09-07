@@ -18,6 +18,7 @@ from .execute_aws import ExecuteAwsAction
 from .execute_azure import ExecuteAzureAction
 from .execute_gcp import ExecuteGCPAction
 from .datadog_alert import DatadogAlertAction
+from .github_alert import GitHubOpenIssueAction
 from .pagerduty_page import PagerdutyPageAction
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     "ExecuteAzureAction",
     "ExecuteGCPAction",
     "DatadogAlertAction",
+    "GitHubOpenIssueAction",
     "PagerdutyPageAction",
 ]

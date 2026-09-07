@@ -682,3 +682,94 @@ def test_notify_pagerduty_pushes_team_notification_when_creds_given(monkeypatch)
     assert len(sent) == 1
     assert "500s spiking" in sent[0][0]
     assert "prash investigate checkout --provider pagerduty" in sent[0][1]
+
+
+# ── G2: GitHub Actions watch loop + repo resolution ──
+
+def _gh_event(event_type="ci_failure", repo="acme/api"):
+    import datetime as _dt
+    return {
+        "timestamp": _dt.datetime(2026, 9, 7, 12, 0, tzinfo=_dt.timezone.utc),
+        "connector": "github", "event_type": event_type,
+        "summary": f"CI run #7 {event_type} on main (abc1234)",
+        "raw": {"run_id": 7, "repo": repo},
+    }
+
+
+class _FakeGhHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.connector = "github"
+        self.target = "acme/api"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeGhConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, repo, interval=30):
+        self.watched.append(repo)
+        return self._handle
+
+
+def test_github_watch_loop_notifies_on_new_failure(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGhHandle(script=[[_gh_event()], []])
+    monkeypatch.setattr(watcher_mod, "GitHubConnector", lambda creds: _FakeGhConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_github", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_github_watch_loop(["acme/api"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1  # failure fires once; next poll (unchanged) is silent
+    assert notified[0]["event_type"] == "ci_failure"
+
+
+def test_github_watch_loop_survives_poll_errors(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.github import GitHubError
+
+    handle = _FakeGhHandle(script=[GitHubError("GitHub API 429: rate limited"), [_gh_event()]])
+    monkeypatch.setattr(watcher_mod, "GitHubConnector", lambda creds: _FakeGhConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_github", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_github_watch_loop(["acme/api"], interval=0, max_iterations=2)
+    assert len(notified) == 1  # cycle 1 skipped, cycle 2 delivered
+
+
+def test_resolve_github_repos_splits_comma_list():
+    from prash.watcher import resolve_github_repos
+    assert resolve_github_repos("acme/api, acme/web") == ["acme/api", "acme/web"]
+
+
+def test_resolve_github_repos_requires_targets(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_github_repos
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {})
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_github_repos(None)
+
+
+def test_resolve_github_repos_reads_env(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_github_repos
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {"GITHUB_WATCH_REPOS": "acme/api"})
+    assert resolve_github_repos(None) == ["acme/api"]

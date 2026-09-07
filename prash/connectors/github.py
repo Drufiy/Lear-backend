@@ -189,6 +189,14 @@ class GitHubConnector(Connector):
     def get_pr(self, repo: str, number: int) -> Dict[str, Any]:
         return self._request("GET", f"/repos/{repo}/pulls/{number}")
 
+    def create_issue(self, repo: str, title: str, body: str = "") -> Dict[str, Any]:
+        """Open a GitHub issue (the github-open-issue alert action, §4b). Needs
+        `issues:write` (fine-grained) or `repo` (classic) on the token."""
+        return self._request("POST", f"/repos/{repo}/issues", {"title": title, "body": body})
+
+    def get_issue(self, repo: str, number: int) -> Dict[str, Any]:
+        return self._request("GET", f"/repos/{repo}/issues/{number}")
+
     def re_run_job(self, repo: str, run_id: int) -> Dict[str, Any]:
         return self._request("POST", f"/repos/{repo}/actions/runs/{run_id}/rerun")
 

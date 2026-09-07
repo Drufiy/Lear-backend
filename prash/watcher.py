@@ -27,6 +27,7 @@ from prash.connectors.terraform import TerraformConnector
 from prash.connectors.aws import AWSConnector
 from prash.connectors.datadog import DatadogConnector, DatadogError
 from prash.connectors.pagerduty import PagerDutyConnector, PagerDutyError
+from prash.connectors.github import GitHubConnector, GitHubError
 from prash.connectors.base import ConnectorEvent, ConnectorState
 from prash.notifications import send_team_notifications
 
@@ -356,6 +357,76 @@ def run_pagerduty_watch_loop(
         return
 
     run_watchhandle_loop(handles, _notify_pagerduty, interval=interval, console=console,
+                          max_iterations=max_iterations, creds=creds)
+
+
+def _notify_github(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
+    """Same desktop+team+console path as _notify_datadog, for a GitHub Actions
+    workflow-run transition. A run newly failing (or a rerun flipping outcome)
+    is the actionable signal; `prash fix <repo> --ci` is the diagnose entry."""
+    raw = event.get("raw") or {}
+    repo = raw.get("repo") or event.get("summary", "")
+    title = f"Prash: {event['summary']}"
+    message = (
+        f"GitHub Actions {repo}: {event['event_type']}. "
+        f"Run `prash fix {repo} --ci` to diagnose."
+    )
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    if console is not None:
+        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def resolve_github_repos(spec: str | None, creds: dict | None = None) -> list[str]:
+    """Turn a --resource spec (or the GITHUB_WATCH_REPOS env value) into watch
+    targets: comma-separated `owner/repo` entries. No `all` option -- a token
+    can reach thousands of repos, so watched repos are always explicit."""
+    value = (spec or os.environ.get("GITHUB_WATCH_REPOS") or "").strip()
+    if not value:
+        raise ValueError(
+            "no GitHub watch targets: pass --resource owner/repo1,owner/repo2 "
+            "or set GITHUB_WATCH_REPOS (comma-separated owner/repo)"
+        )
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def run_github_watch_loop(
+    repos: list[str],
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+) -> None:
+    """Watch GitHub repos' workflow runs via each connector.watch() handle
+    (§4a) -- a thin wrapper over the shared WatchHandle loop. A run newly
+    completing as failure (or a rerun flipping outcome) fires the same
+    desktop+team notification path as the other connectors."""
+    interval = interval or _interval_from_env()
+    connector = GitHubConnector(creds or {})
+    if not connector.authenticate():
+        logger.warning("GitHub credentials failed validation — watch will likely poll nothing")
+
+    handles = []
+    for repo in repos:
+        try:
+            handles.append(connector.watch(repo, interval=interval))
+        except GitHubError as exc:
+            logger.warning(f"could not watch repo {repo!r}: {exc}")
+            if console is not None:
+                console.print(f"[yellow]skipping repo {repo}: {exc}[/yellow]")
+    if not handles:
+        if console is not None:
+            console.print("[yellow]no GitHub repos to watch[/yellow]")
+        return
+
+    run_watchhandle_loop(handles, _notify_github, interval=interval, console=console,
                           max_iterations=max_iterations, creds=creds)
 
 
