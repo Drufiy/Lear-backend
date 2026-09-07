@@ -158,3 +158,27 @@ def test_backoff_waits_for_primary_ratelimit_reset(monkeypatch):
     exc = urllib.error.HTTPError(
         "u", 403, "forbidden", {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1010"}, None)
     assert GitHubConnector._backoff_seconds(0, exc) == 10.0
+
+
+# ── failed-job scoping for CI diagnosis (dogfooding fix) ──
+
+def test_failed_job_names_returns_only_failures(monkeypatch):
+    conn = _conn()
+    monkeypatch.setattr(conn, "run_jobs", lambda repo, run_id: [
+        {"name": "test (macos-latest)", "conclusion": "failure"},
+        {"name": "test (ubuntu-latest)", "conclusion": "success"},
+        {"name": "test (windows-latest)", "conclusion": "success"},
+        {"name": "lint", "conclusion": "cancelled"},        # not a diagnosable failure
+        {"name": "flaky", "conclusion": "timed_out"},        # counts as failure
+    ])
+    assert conn.failed_job_names("acme/api", 1) == {"test (macos-latest)", "flaky"}
+
+
+def test_failed_job_names_empty_on_api_error(monkeypatch):
+    conn = _conn()
+
+    def boom(*a, **k):
+        raise GitHubError("GitHub API 403")
+
+    monkeypatch.setattr(conn, "run_jobs", boom)
+    assert conn.failed_job_names("acme/api", 1) == set()

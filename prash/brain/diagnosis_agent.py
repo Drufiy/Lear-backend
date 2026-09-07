@@ -1595,6 +1595,17 @@ async def diagnose_failure(
             )
             explicitly_empty = fc.get("create_empty") is True
 
+            # A missing/blank per-file `explanation` (required on FileChange)
+            # must not sink the whole job's diagnosis. Found live 2026-09-07
+            # dogfooding (Lear on its own failed CI run): the model omitted
+            # `explanation` on one file, Pydantic rejected the whole Diagnosis,
+            # and diagnose_multi_failure dropped that entire job silently. Fill
+            # it from the top-level fix_description, else an honest placeholder,
+            # so a real fix survives one missing sub-field.
+            if not (fc.get("explanation") or "").strip():
+                fc["explanation"] = (raw_args.get("fix_description") or "").strip() or \
+                    "No per-file explanation was provided by the model."
+
             if has_new_content or has_edits:
                 valid_files.append(fc)
             elif is_known_empty_marker or explicitly_empty:

@@ -204,6 +204,26 @@ class GitHubConnector(Connector):
         qs = f"?per_page={limit}" + (f"&branch={branch}" if branch else "")
         return self._request("GET", f"/repos/{repo}/actions/runs{qs}")["workflow_runs"]
 
+    def run_jobs(self, repo: str, run_id: int) -> list[Dict[str, Any]]:
+        """Jobs (with per-job conclusion) for one workflow run. Used to scope
+        CI diagnosis to the jobs that actually failed, instead of every job in
+        the run's log ZIP (a passing job's log has no failure to diagnose, and
+        feeding it to the brain invites false positives — e.g. reporting a
+        non-blocking lint warning as the failure)."""
+        return self._request("GET", f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100").get("jobs", [])
+
+    def failed_job_names(self, repo: str, run_id: int) -> set[str]:
+        """Names of the jobs in a run whose conclusion is a genuine failure
+        (failure/timed_out/startup_failure) -- cancelled/skipped/success are
+        not diagnosable failures. Best-effort: [] set on any API error, so a
+        caller falls back to diagnosing the whole run rather than nothing."""
+        try:
+            jobs = self.run_jobs(repo, run_id)
+        except GitHubError:
+            return set()
+        failed = {"failure", "timed_out", "startup_failure"}
+        return {j["name"] for j in jobs if j.get("conclusion") in failed and j.get("name")}
+
     def get_dependabot_alerts(self, repo: str, state: str = "open") -> list[Dict[str, Any]]:
         """Dependabot alerts (Sprint 2 Tier 3, PRASH_V2.md §7b) -- not a new
         connector, since this is a GitHub API capability, not a separate

@@ -783,3 +783,59 @@ def test_cmd_fix_manifest_changes_without_repo_reports_instead_of_dropping(monke
     assert rc == 0
     assert dispatches == []
     assert "no manifest repo is configured" in capsys.readouterr().out
+
+
+def test_diagnose_ci_run_scopes_to_failed_jobs(monkeypatch):
+    """Dogfooding fix (2026-09-07): diagnose_ci_run must scope the multi-
+    failure diagnosis to the run's actually-failed jobs, so passing jobs'
+    logs (e.g. a non-blocking ruff warning) aren't diagnosed as failures."""
+    async def fake_fetch(run_id, repo, token):
+        return "=== test (macos-latest) ===\nFAILED test_x\n=== test (ubuntu-latest) ===\nok\n"
+
+    captured = {}
+
+    async def fake_multi(logs, repo_full_name, commit_message, workflow_name, **kwargs):
+        captured["failing_job_names"] = kwargs.get("failing_job_names")
+        return MultiFailureResult(diagnoses=[])
+
+    class _FakeGH:
+        def __init__(self, creds):
+            pass
+
+        def failed_job_names(self, repo, run_id):
+            return {"test (macos-latest)"}
+
+    monkeypatch.setattr(fix_mod, "fetch_workflow_logs", fake_fetch)
+    monkeypatch.setattr(fix_mod, "diagnose_multi_failure", fake_multi)
+    monkeypatch.setattr("prash.connectors.github.GitHubConnector", _FakeGH)
+
+    asyncio.run(fix_mod.diagnose_ci_run(123, "acme/api", "tok"))
+    assert captured["failing_job_names"] == {"test (macos-latest)"}
+
+
+def test_diagnose_ci_run_no_failed_jobs_leaves_filter_unset(monkeypatch):
+    """If the jobs API returns no failures (or errors), don't pass
+    failing_job_names — diagnose_multi_failure then diagnoses all sections,
+    the graceful fallback (never worse than the prior behavior)."""
+    async def fake_fetch(run_id, repo, token):
+        return "=== job ===\nerr\n"
+
+    captured = {}
+
+    async def fake_multi(logs, repo_full_name, commit_message, workflow_name, **kwargs):
+        captured["has_filter"] = "failing_job_names" in kwargs
+        return MultiFailureResult(diagnoses=[])
+
+    class _FakeGH:
+        def __init__(self, creds):
+            pass
+
+        def failed_job_names(self, repo, run_id):
+            return set()
+
+    monkeypatch.setattr(fix_mod, "fetch_workflow_logs", fake_fetch)
+    monkeypatch.setattr(fix_mod, "diagnose_multi_failure", fake_multi)
+    monkeypatch.setattr("prash.connectors.github.GitHubConnector", _FakeGH)
+
+    asyncio.run(fix_mod.diagnose_ci_run(123, "acme/api", "tok"))
+    assert captured["has_filter"] is False

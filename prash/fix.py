@@ -223,8 +223,20 @@ async def diagnose_ci_run(
     run_id + repo only) — the brain still gets run context via workflow_name.
     `diagnose_kwargs` (iteration / repeated_failure / previous_diagnosis) are
     threaded through to diagnose_multi_failure so the reconcile loop's
-    repeated-failure directive reaches the brain."""
+    repeated-failure directive reaches the brain.
+
+    Scopes diagnosis to the run's actually-failed jobs (found live 2026-09-07
+    dogfooding: diagnosing every job in the ZIP, passing ones included, made
+    the brain report a passing job's non-blocking `ruff` warnings as the build
+    failure). Best-effort + graceful: if the jobs API errors or no name
+    matches a log section, diagnose_multi_failure falls back to all sections,
+    i.e. the prior behavior. An explicitly-passed failing_job_names wins."""
     logs = await fetch_workflow_logs(run_id, repo_full_name, access_token)
+    if "failing_job_names" not in diagnose_kwargs:
+        from .connectors.github import GitHubConnector
+        failed = GitHubConnector({"GITHUB_TOKEN": access_token}).failed_job_names(repo_full_name, run_id)
+        if failed:
+            diagnose_kwargs["failing_job_names"] = failed
     return await _diagnose_ci_logs(
         logs, run_id, repo_full_name, workflow_name=f"github run {run_id}", **diagnose_kwargs
     )
