@@ -43,6 +43,8 @@ from .actions.contract import (
 from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
+from .actions.execute_gcp import ExecuteGCPAction
+from .actions.execute_azure import ExecuteAzureAction
 from .actions.aws_alert import AWSAlertAction
 from .actions.gcp_alert import GCPAlertAction
 from .actions.missing_secret import RequestSecretAction
@@ -317,6 +319,8 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ApplyManifestFixAction(),
             GCPAlertAction(),
             ExecuteAwsAction(),
+            ExecuteGCPAction(),
+            ExecuteAzureAction(),
             AWSAlertAction(),
             PagerdutyAcknowledgeAction(),
             PagerdutyResolveAction(),
