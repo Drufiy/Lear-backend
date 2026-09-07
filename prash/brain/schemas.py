@@ -63,6 +63,12 @@ class FileEdit(BaseModel):
     old_content: str = Field(..., description="Exact existing text to find — must appear exactly once in the current file")
     new_content: str = Field(..., description="Text to replace it with")
 
+    # Note: the match is exact first, but FileChange.apply() falls back to a
+    # whitespace-tolerant, still-unique line match when the exact one fails —
+    # see _apply_edit_tolerant(). old_content should still be copied verbatim;
+    # the fallback only rescues the common LLM slip of getting indentation or
+    # trailing whitespace slightly wrong on an otherwise-correct block.
+
     @field_validator("old_content")
     @classmethod
     def validate_old_content(cls, v):
@@ -76,6 +82,142 @@ class FileEdit(BaseModel):
         if len(v) > 200_000:
             raise ValueError("edit new_content exceeds 200KB — likely hallucinated")
         return v
+
+
+# ── Whitespace-tolerant edit application (2026-09-07) ────────────────────────
+# A live CI-fix apply failed purely on whitespace drift: the model's
+# old_content was the right block of prash/tui.py but its leading indentation
+# didn't match the real (deeply class-nested) file byte-for-byte, so the exact
+# substring match found nothing and the fix — and the PR — never happened. The
+# diagnosis was correct; only the mechanical apply lost.
+#
+# These helpers give FileChange.apply() a fallback that tolerates the two
+# whitespace slips models actually make on multi-line blocks — trailing
+# whitespace / CRLF, and a uniform indent shift — WITHOUT weakening the core
+# safety guarantee. Every tier still demands a single, unambiguous line-window
+# match and splices the ORIGINAL file's own bytes for the surround, so content
+# the model never mentioned still cannot be silently lost or rewritten. Partial
+# intra-line substring edits are left to the exact path; the fallback is
+# line-oriented on purpose.
+
+
+def _leading_ws(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
+
+
+def _match_line_window(orig_lines: list[str], old_lines: list[str], keyfn) -> int | None:
+    """Start index of the sole run of ``orig_lines`` whose ``keyfn``-mapped
+    values equal the ``keyfn``-mapped ``old_lines``. Returns None for zero
+    matches or more than one — an ambiguous match is refused, never guessed."""
+    m = len(old_lines)
+    if m == 0 or m > len(orig_lines):
+        return None
+    old_key = [keyfn(line) for line in old_lines]
+    found: int | None = None
+    for i in range(len(orig_lines) - m + 1):
+        if [keyfn(orig_lines[i + j]) for j in range(m)] == old_key:
+            if found is not None:
+                return None  # more than one candidate window — ambiguous
+            found = i
+    return found
+
+
+def _uniform_indent_delta(orig_block: list[str], old_lines: list[str]) -> tuple[str, str] | None:
+    """If ``orig_block`` is ``old_lines`` shifted by one uniform leading-indent
+    string, return ``(mode, delta)`` where mode is ``"add"`` (the file has an
+    extra ``delta`` prefix the model omitted) or ``"remove"`` (the model added
+    an extra ``delta`` prefix). Returns None if the shift isn't uniform across
+    every non-blank line, i.e. the indentation difference isn't a clean shift
+    we can safely reproduce on the replacement text."""
+    mode: str | None = None
+    delta: str | None = None
+    for orig, old in zip(orig_block, old_lines):
+        if not old.strip():  # blank lines may differ freely; carry no indent info
+            continue
+        io, idd = _leading_ws(orig), _leading_ws(old)
+        if io == idd:
+            pair_mode, pair_delta = "add", ""
+        elif len(io) > len(idd) and io.endswith(idd):
+            pair_mode, pair_delta = "add", io[: len(io) - len(idd)]
+        elif len(idd) > len(io) and idd.endswith(io):
+            pair_mode, pair_delta = "remove", idd[: len(idd) - len(io)]
+        else:
+            return None  # indentation chars differ in a way that isn't a shift
+        if delta is None:
+            mode, delta = pair_mode, pair_delta
+        elif (pair_mode, pair_delta) != (mode, delta) and pair_delta != "":
+            # A zero-delta line ("" either mode) is consistent with any shift;
+            # a non-zero one that disagrees means the shift isn't uniform.
+            return None
+    if delta is None:  # every line was blank — nothing to anchor a shift on
+        return None
+    return (mode or "add", delta)
+
+
+def _reindent(text: str, delta: tuple[str, str]) -> str:
+    mode, prefix = delta
+    if not prefix:
+        return text
+    out = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not stripped.rstrip("\r\n"):  # blank line — leave untouched
+            out.append(line)
+        elif mode == "add":
+            out.append(prefix + line)
+        else:  # remove
+            out.append(line[len(prefix):] if line.startswith(prefix) else line)
+    return "".join(out)
+
+
+def _splice(orig_lines: list[str], start: int, count: int, replacement: str) -> str:
+    """Replace ``orig_lines[start:start+count]`` with ``replacement``, keeping
+    every other original line (and its exact bytes) intact. The replacement
+    adopts the replaced block's own end-of-line style, so splicing into a CRLF
+    file doesn't leave a lone LF hunk behind."""
+    before = "".join(orig_lines[:start])
+    after = "".join(orig_lines[start + count:])
+    last = orig_lines[start + count - 1]
+    eol = "\r\n" if last.endswith("\r\n") else "\n" if last.endswith("\n") else ""
+    rep = replacement
+    if rep:  # normalize the replacement to the block's EOL and boundary
+        rep = rep.replace("\r\n", "\n")
+        had_trailing = rep.endswith("\n")
+        if eol != "\n":
+            rep = rep.replace("\n", eol)
+        if eol and not had_trailing:
+            rep += eol
+        elif not eol and had_trailing:
+            rep = rep.rstrip("\r\n")
+    # rep == "" is a deletion: the block's lines vanish; before + after joins.
+    return before + rep + after
+
+
+def _apply_edit_tolerant(content: str, edit: "FileEdit") -> str | None:
+    """Whitespace-tolerant fallback for a failed exact match. Returns the new
+    file content, or None if no safe, unique match exists (the caller then
+    raises the normal not-found error). Never guesses — see the module comment
+    above these helpers."""
+    orig_lines = content.splitlines(keepends=True)
+    old_lines = edit.old_content.splitlines()
+    if not old_lines:
+        return None
+
+    # Tier 1 fallback: tolerate trailing whitespace and CRLF/LF only. Leading
+    # indentation still has to match, so the replacement splices in verbatim.
+    i = _match_line_window(orig_lines, old_lines, lambda line: line.rstrip())
+    if i is not None:
+        return _splice(orig_lines, i, len(old_lines), edit.new_content)
+
+    # Tier 2 fallback: tolerate a single uniform indent shift of the whole
+    # block. Reindent the replacement by the same shift so it lands correctly
+    # nested where the real file expects it.
+    i = _match_line_window(orig_lines, old_lines, lambda line: line.strip())
+    if i is not None:
+        delta = _uniform_indent_delta(orig_lines[i : i + len(old_lines)], old_lines)
+        if delta is not None:
+            return _splice(orig_lines, i, len(old_lines), _reindent(edit.new_content, delta))
+    return None
 
 
 class FileChange(BaseModel):
@@ -152,6 +294,14 @@ class FileChange(BaseModel):
         for i, edit in enumerate(self.edits, start=1):
             count = content.count(edit.old_content)
             if count == 0:
+                # Exact match missed — try the whitespace-tolerant fallback
+                # before giving up. It still requires a single unambiguous
+                # line-window match, so this rescues indentation/EOL drift
+                # without ever guessing at an ambiguous target.
+                spliced = _apply_edit_tolerant(content, edit)
+                if spliced is not None:
+                    content = spliced
+                    continue
                 raise ValueError(
                     f"edit {i} for {self.path} did not apply: old_content not found in the current file content"
                 )

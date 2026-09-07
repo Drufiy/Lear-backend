@@ -227,6 +227,127 @@ def test_file_edit_rejects_empty_old_content():
         FileEdit(old_content="", new_content="x")
 
 
+# ── FileChange.apply(): whitespace-tolerant fallback (2026-09-07) ────────────
+# A live CI-fix apply failed because the model's old_content was the right
+# block of a deeply-indented file but its leading whitespace didn't match
+# byte-for-byte. These cover the fallback that rescues that WITHOUT letting an
+# ambiguous or unsafe match through.
+
+
+def test_fallback_tolerates_trailing_whitespace():
+    fc = FileChange(
+        path="x.py",
+        edits=[FileEdit(old_content="x = 1\ny = 2", new_content="x = 1\ny = 3")],
+        explanation="?",
+    )
+    # The real file has trailing whitespace the model didn't reproduce.
+    original = "x = 1   \ny = 2\t\nz = 4\n"
+    assert fc.apply(original) == "x = 1\ny = 3\nz = 4\n"
+
+
+def test_fallback_tolerates_crlf_and_preserves_surrounding_crlf():
+    fc = FileChange(
+        path="x.py",
+        edits=[FileEdit(old_content="a = 1\nb = 2", new_content="a = 1\nb = 9")],
+        explanation="?",
+    )
+    original = "a = 1\r\nb = 2\r\nc = 3\r\n"
+    # The replacement adopts the block's CRLF, so no lone-LF hunk is introduced.
+    assert fc.apply(original) == "a = 1\r\nb = 9\r\nc = 3\r\n"
+
+
+def test_fallback_tolerates_uniform_under_indentation_and_reindents():
+    # The model dedented the block by 4 spaces; the real file is nested deeper.
+    fc = FileChange(
+        path="prash/tui.py",
+        edits=[
+            FileEdit(
+                old_content='table = self.query_one("#connectors-table", DataTable)\ntable.clear()',
+                new_content=(
+                    'try:\n'
+                    '    table = self.query_one("#connectors-table", DataTable)\n'
+                    'except NoMatches:\n'
+                    '    return\n'
+                    'table.clear()'
+                ),
+            )
+        ],
+        explanation="guard the query",
+    )
+    original = (
+        "    def _on(self):\n"
+        '        table = self.query_one("#connectors-table", DataTable)\n'
+        "        table.clear()\n"
+        "        return\n"
+    )
+    result = fc.apply(original)
+    # The replacement is reindented by the same 8-space shift the block had.
+    assert result == (
+        "    def _on(self):\n"
+        "        try:\n"
+        '            table = self.query_one("#connectors-table", DataTable)\n'
+        "        except NoMatches:\n"
+        "            return\n"
+        "        table.clear()\n"
+        "        return\n"
+    )
+
+
+def test_fallback_tolerates_uniform_over_indentation():
+    # The model over-indented the block by 4 spaces; the file is shallower.
+    fc = FileChange(
+        path="x.py",
+        edits=[FileEdit(old_content="    a = 1\n    b = 2", new_content="    a = 1\n    b = 5")],
+        explanation="?",
+    )
+    original = "a = 1\nb = 2\n"
+    assert fc.apply(original) == "a = 1\nb = 5\n"
+
+
+def test_fallback_refuses_ambiguous_stripped_match():
+    # Tab-indented old_content misses the space-indented file on exact match,
+    # then matches two windows once whitespace is ignored — refuse, don't guess.
+    fc = FileChange(
+        path="x.py",
+        edits=[FileEdit(old_content="\tdo_it()", new_content="do_it(v2)")],
+        explanation="?",
+    )
+    original = "    do_it()\n        do_it()\n"
+    with pytest.raises(ValueError, match="did not apply.*not found"):
+        fc.apply(original)
+
+
+def test_fallback_refuses_non_uniform_indent_shift():
+    # Line 1 shifted by 4 spaces, line 2 by 8 — not a uniform shift, refuse.
+    fc = FileChange(
+        path="x.py",
+        edits=[FileEdit(old_content="a = 1\nb = 2", new_content="a = 1\nb = 9")],
+        explanation="?",
+    )
+    original = "    a = 1\n        b = 2\n"
+    with pytest.raises(ValueError, match="did not apply.*not found"):
+        fc.apply(original)
+
+
+def test_fallback_does_not_fire_when_exact_match_exists():
+    # Exact match present AND a fuzzy window exists elsewhere; exact wins and
+    # the fuzzy candidate is left untouched (no double-apply, no ambiguity).
+    fc = FileChange(
+        path="x.py",
+        edits=[FileEdit(old_content="        z = 0", new_content="        z = 1")],
+        explanation="?",
+    )
+    original = "z = 0\n        z = 0\n"
+    # Exact "        z = 0" appears once (the indented line); it alone changes.
+    assert fc.apply(original) == "z = 0\n        z = 1\n"
+
+
+def test_fallback_still_raises_when_truly_absent():
+    fc = FileChange(path="x.py", edits=[FileEdit(old_content="not_here_at_all", new_content="x")], explanation="?")
+    with pytest.raises(ValueError, match="did not apply.*not found"):
+        fc.apply("a = 1\nb = 2\n")
+
+
 def test_options_action_can_be_null_for_escalate_to_human():
     """One of the ranked choices being 'no automated action, a human should
     look at this' is a legitimate, honest option in the menu, not just a
