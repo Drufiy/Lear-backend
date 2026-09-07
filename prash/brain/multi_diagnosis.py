@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -36,6 +37,30 @@ from prash.brain.schemas import Diagnosis, FileChange
 logger = logging.getLogger(__name__)
 
 _SECTION_HEADER_RE = re.compile(r"(?m)^=== (.+) ===$")
+
+_DEFAULT_CONCURRENCY = 3
+
+
+def _default_concurrency() -> int:
+    """Max concurrent sub-diagnoses, from PRASH_MAX_DIAGNOSIS_CONCURRENCY
+    (default 3). Configurable because the right value is the LLM account's
+    org-concurrency limit, which differs per account -- found live 2026-09-07
+    dogfooding: an account capped at 1 gets 429-thrashed by the default of 3,
+    turning one CI diagnosis into 3+ minutes of retry churn. Clamped to >=1;
+    a bad/zero value falls back to the default rather than deadlocking on a
+    zero-permit semaphore."""
+    raw = os.environ.get("PRASH_MAX_DIAGNOSIS_CONCURRENCY")
+    if not raw:
+        return _DEFAULT_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"PRASH_MAX_DIAGNOSIS_CONCURRENCY={raw!r} is not an integer — using {_DEFAULT_CONCURRENCY}")
+        return _DEFAULT_CONCURRENCY
+    if value < 1:
+        logger.warning(f"PRASH_MAX_DIAGNOSIS_CONCURRENCY={value} is < 1 — clamping to 1")
+        return 1
+    return value
 
 
 def _split_by_job_sections(logs: str) -> dict[str, str]:
@@ -114,7 +139,7 @@ async def diagnose_multi_failure(
     workflow_name: str,
     failing_job_names: set[str] | None = None,
     model: str = "auto",
-    max_concurrency: int = 3,
+    max_concurrency: int | None = None,
     **diagnose_kwargs,
 ) -> MultiFailureResult:
     """Split `logs` by failing job and diagnose each independently.
@@ -125,12 +150,17 @@ async def diagnose_multi_failure(
     markers to split on at all (e.g. the non-ZIP push_handler.py path). This
     makes it a safe drop-in for every case, not just known-multi ones.
 
-    max_concurrency defaults to 3 -- found live (2026-08-09), not guessed:
-    firing every sub-diagnosis at once via bare asyncio.gather hit a real
-    Kimi account rate limit ("max organization concurrency: 3") the moment
-    a case had 4 independent failures. Matches evals/run_eval.py's own
-    default concurrency for the same reason.
+    max_concurrency: an explicit value wins; otherwise it comes from
+    PRASH_MAX_DIAGNOSIS_CONCURRENCY (default 3). Bounded, not guessed --
+    found live (2026-08-09) that firing every sub-diagnosis at once via bare
+    asyncio.gather hit a real Kimi account rate limit ("max organization
+    concurrency") the moment a case had several independent failures. The
+    right ceiling is the account's org-concurrency limit, which differs per
+    account (dogfooding 2026-09-07: an account capped at 1 thrashed on the
+    default of 3), so it's configurable rather than hard-coded.
     """
+    if max_concurrency is None:
+        max_concurrency = _default_concurrency()
     sections = _split_by_job_sections(logs)
 
     if failing_job_names:
