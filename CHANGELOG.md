@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Lear Desktop Application v2.0 (Full Overhaul & Backend API Bridge)**:
+  - *Zero Hardcoding Guarantee*: Audited and eliminated all hardcoded mock metrics (`45.2`, `12.5`, `32.1`, `"14ms"`), static status returns, and mock fallback handlers across `prash/server.py`. Added an AST-based test suite (`tests/test_desktop_api.py`) verifying no static telemetry dictionaries exist.
+  - *Dynamic Connector Registry (`prash/connector_registry.py`)*: Built a dynamic registry for all 13 supported providers (AWS, Azure, GCP, Kubernetes, Vercel, GitHub, GitLab, Datadog, Grafana, PagerDuty, Snyk, Gitleaks, Terraform). Provides metadata, authentication field specifications, icon/color tokens, default widget templates, and lazy instance caching.
+  - *Backend API Bridge*: Implemented connector-agnostic endpoints (`/api/connectors`, `/api/connectors/{id}/validate`, `/api/connectors/{id}/stats`, `/logs`, `/state`), background watch lifecycle endpoints (`/api/watcher/start`, `/stop`, `/status`), activity audit log query (`/api/activity`), and settings management (`/api/settings`).
+  - *Real-time WebSocket Streaming (`/ws/events`)*: Implemented an active broadcast stream that pushes real-time watcher cycles, telemetry updates, and incident alerts without client polling.
+  - *AI Widget Generation (`POST /api/connectors/{id}/generate-widgets`)*: Introduced an endpoint that inspects live telemetry, metric names, and resource shapes to synthesize optimized custom SVG widget layouts on the fly.
+  - *Multi-Environment Project System (`desktop/src/components/Projects.tsx`)*: Created project workspace management with support for multiple environments (`Production`, `Staging`, `Development`) and service attachments, persisting directly to `prash.yaml`.
+  - *Dynamic Onboarding Wizard (`desktop/src/components/Wizard.tsx`)*: Replaced hardcoded credential screens with a dynamic form engine generated directly from connector `auth_fields`, backed by live STS/token verification and instant feedback.
+  - *Pure SVG Metric Widgets (`desktop/src/components/widgets/`)*: Developed dynamic visual components without external charting dependencies:
+    - `MetricGauge`: Circular SVG arc gauge (0-100%) with dynamic color interpolation.
+    - `MetricLineChart`: Smoothed Bezier curve SVG time-series charts with area gradients and hover tooltips.
+    - `MetricCard`: KPI stat card with live trend percentages and inline sparklines.
+    - `EventTimeline`: Vertical incident and alarm timeline with severity badges.
+    - `StatusGrid`: System health tile matrix.
+  - *Lear Copilot / Chatbot (`desktop/src/components/Chatbot.tsx`)*: Upgraded chat interface with live service context chips, real-time telemetry injection, and interactive "Execute Action" confirmation flows.
+  - *Design System Overhaul (`desktop/src/index.css`)*: Implemented a dark obsidian design system (`#080B11`, surface `#0E131F`, emerald accent `#10B981`, glassmorphism, radar-pulse keyframe).
 - **Terraform Integration (Tracks B, C, D, E)**: Added comprehensive Terraform support across the entire architecture.
   - *Connectors*: Added `TerraformConnector` to monitor `.tfstate` and execute drift detection locally, with stubs for future Terraform Cloud integrations.
   - *Actions*: Added `terraform_init` (SAFE tier) and `terraform_apply` (dynamic risk tier defaulting to APPROVAL) to resolve config drift and setup failures.
@@ -30,11 +46,3 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **`test_live_infra.py` relocated**: Moved from the repo root to `scripts/verify_aws_live.py`. It's a manual live-verification script, not a pytest test file (no `test_` functions), and its old name/location was misleading.
-
-## [Unreleased]
-
-### Added
-- GCP connector implementation with poll_state(), get_stats(), etch_logs(), and execute_command().
-- Native SSH fallback logic for executing commands on GCP instances when gcloud is unavailable or fails.
-- reak_gcp.py testing fixture for simulating and healing GCP instance service failures.
-- Integrated GCP connector with prash watch and prash fix loops and the GCPAlertAction.

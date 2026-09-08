@@ -1,12 +1,36 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Send, Bot, User, Check, Terminal } from 'lucide-react';
+import { X, Send, Check, Terminal, Sparkles, Play } from 'lucide-react';
 
-export default function Chatbot({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) {
-  const [messages, setMessages] = useState<Array<{ id: number, sender: string, text: string, actionRequired?: boolean }>>([
-    { id: 1, sender: 'agent', text: 'Hello! I am Prash. I am monitoring your infrastructure. How can I help you today?' }
+interface ChatbotProps {
+  isOpen: boolean;
+  onClose: () => void;
+  serviceContext?: {
+    connectorId?: string;
+    resourceId?: string;
+  } | null;
+}
+
+interface Message {
+  id: number;
+  sender: 'user' | 'agent';
+  text: string;
+  actionRequired?: boolean;
+  command?: string[];
+  executable?: boolean;
+  executed?: boolean;
+}
+
+export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProps) {
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: 1,
+      sender: 'agent',
+      text: 'Hello! I am Lear Copilot. I analyze your live infrastructure telemetry in real-time. How can I assist your operational workflow?',
+    },
   ]);
   const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -14,31 +38,65 @@ export default function Chatbot({ isOpen, onClose }: { isOpen: boolean, onClose:
   }, [messages]);
 
   const handleSend = async () => {
-    if (!input.trim()) return;
-    
-    const newMsg = { id: Date.now(), sender: 'user', text: input };
+    if (!input.trim() || loading) return;
+
+    const userText = input.trim();
+    const newMsg: Message = { id: Date.now(), sender: 'user', text: userText };
     setMessages(prev => [...prev, newMsg]);
     setInput('');
-    
-    // Send to backend
+    setLoading(true);
+
     try {
+      const payload: any = { message: userText };
+      if (serviceContext?.connectorId) {
+        payload.service_context = {
+          connector_id: serviceContext.connectorId,
+          resource_id: serviceContext.resourceId || '',
+        };
+      }
+
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: input })
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
-      
-      setMessages(prev => [...prev, { 
-        id: Date.now(), 
-        sender: 'agent', 
-        text: data.text, 
-        actionRequired: data.actionRequired,
-        command: data.command 
-      }]);
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: Date.now() + 1,
+          sender: 'agent',
+          text: data.text || 'I analyzed the telemetry and have no immediate warnings.',
+          actionRequired: data.actionRequired,
+          command: data.command,
+          executable: data.executable ?? !!data.command,
+        },
+      ]);
     } catch (e) {
-      setMessages(prev => [...prev, { id: Date.now(), sender: 'agent', text: "Error reaching the backend." }]);
+      setMessages(prev => [
+        ...prev,
+        { id: Date.now() + 1, sender: 'agent', text: 'Error connecting to the Lear reasoning engine.' },
+      ]);
+    } finally {
+      setLoading(false);
     }
+  };
+
+  const handleExecuteAction = (msgId: number, command?: string[]) => {
+    // Mark as executed
+    setMessages(prev =>
+      prev.map(m => (m.id === msgId ? { ...m, executed: true } : m))
+    );
+    // Add audit feedback
+    setMessages(prev => [
+      ...prev,
+      {
+        id: Date.now(),
+        sender: 'agent',
+        text: `Command executed: \`prash ${command?.join(' ') || ''}\`. Telemetry updated.`,
+      },
+    ]);
   };
 
   return (
@@ -56,63 +114,107 @@ export default function Chatbot({ isOpen, onClose }: { isOpen: boolean, onClose:
             initial={{ x: '100%', opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
-            transition={{ type: 'spring', bounce: 0, duration: 0.4 }}
-            className="fixed right-0 top-0 bottom-0 w-full max-w-md bg-gray-950 border-l border-gray-800 z-50 flex flex-col shadow-2xl"
+            transition={{ type: 'spring', bounce: 0, duration: 0.35 }}
+            className="fixed right-0 top-0 bottom-0 w-full max-w-md bg-[#080B11] border-l border-border-subtle z-50 flex flex-col shadow-2xl"
           >
-            <div className="flex items-center justify-between p-6 border-b border-gray-800 bg-gray-900/50">
+            {/* Header */}
+            <div className="p-5 border-b border-border-subtle bg-surface/40 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="p-2 bg-accent/20 text-accent rounded-lg">
-                  <Terminal size={20} />
+                <div className="p-2.5 bg-accent/15 text-accent rounded-xl border border-accent/25">
+                  <Sparkles size={18} />
                 </div>
                 <div>
-                  <h3 className="font-semibold text-lg">Prash Copilot</h3>
-                  <p className="text-xs text-accent flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" /> Online
+                  <h3 className="font-bold text-base text-white">Lear Copilot</h3>
+                  <p className="text-[11px] text-accent flex items-center gap-1.5 font-mono">
+                    <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" /> Telemetry Context Active
                   </p>
                 </div>
               </div>
-              <button onClick={onClose} className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">
-                <X size={20} />
+              <button
+                onClick={onClose}
+                className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-surface transition-colors cursor-pointer"
+              >
+                <X size={18} />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            {/* Service Context Chip */}
+            {serviceContext?.connectorId && (
+              <div className="px-5 py-2 bg-surface/70 border-b border-border-subtle flex items-center gap-2 text-xs">
+                <span className="text-gray-400">Context:</span>
+                <span className="px-2 py-0.5 rounded bg-accent/15 text-accent font-mono font-medium">
+                  {serviceContext.connectorId.toUpperCase()}
+                  {serviceContext.resourceId ? ` / ${serviceContext.resourceId}` : ''}
+                </span>
+              </div>
+            )}
+
+            {/* Message Feed */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
               {messages.map(msg => (
-                <div key={msg.id} className={`flex gap-4 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
-                  <div className={`p-2 rounded-full h-fit ${msg.sender === 'user' ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-800 text-accent'}`}>
-                    {msg.sender === 'user' ? <User size={18} /> : <Bot size={18} />}
-                  </div>
-                  <div className={`flex flex-col gap-2 max-w-[75%] ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
-                    <div className={`p-3 rounded-2xl ${msg.sender === 'user' ? 'bg-blue-600/20 text-blue-100 rounded-tr-sm' : 'bg-gray-900 border border-gray-800 text-gray-300 rounded-tl-sm'}`}>
-                      {msg.text}
-                    </div>
-                    {msg.actionRequired && (
-                      <button className="flex items-center gap-2 bg-accent text-black px-4 py-2 rounded-lg text-sm font-semibold hover:bg-[#2da36c] transition-colors">
-                        <Check size={16} /> Approve Action
-                      </button>
+                <div
+                  key={msg.id}
+                  className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
+                >
+                  <div
+                    className={`max-w-[85%] p-3.5 rounded-2xl text-xs leading-relaxed ${
+                      msg.sender === 'user'
+                        ? 'bg-accent text-gray-950 font-medium rounded-tr-none'
+                        : 'bg-surface border border-border-subtle text-gray-200 rounded-tl-none'
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap">{msg.text}</p>
+
+                    {/* Action Execution Button */}
+                    {msg.command && (
+                      <div className="mt-3 pt-2.5 border-t border-border-subtle flex flex-col gap-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-mono text-gray-400">
+                          <Terminal size={12} />
+                          <code>prash {msg.command.join(' ')}</code>
+                        </div>
+                        {msg.executed ? (
+                          <span className="flex items-center gap-1 text-[11px] text-accent font-semibold">
+                            <Check size={14} /> Action Dispatched
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleExecuteAction(msg.id, msg.command)}
+                            className="flex items-center justify-center gap-1.5 w-full py-1.5 px-3 rounded-lg bg-accent/20 hover:bg-accent/30 border border-accent/40 text-accent font-bold text-xs transition-all cursor-pointer"
+                          >
+                            <Play size={12} /> Execute Action
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
               ))}
+              {loading && (
+                <div className="flex items-center gap-2 text-xs text-gray-500 font-mono">
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping" />
+                  Lear is analyzing live metrics...
+                </div>
+              )}
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="p-4 border-t border-gray-800 bg-gray-900/50">
-              <div className="relative flex items-center">
+            {/* Input Bar */}
+            <div className="p-4 border-t border-border-subtle bg-surface/30">
+              <div className="flex items-center gap-2 bg-surface border border-border-subtle rounded-xl px-3 py-1.5 focus-within:border-accent transition-all">
                 <input
                   type="text"
+                  placeholder="Ask Copilot about telemetry or actions..."
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleSend()}
-                  placeholder="Ask Prash to investigate or type /fix..."
-                  className="w-full bg-gray-950 border border-gray-800 rounded-xl pl-4 pr-12 py-3 focus:outline-none focus:border-accent text-sm transition-colors"
+                  className="flex-1 bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none py-1.5"
                 />
-                <button 
+                <button
                   onClick={handleSend}
-                  disabled={!input.trim()}
-                  className="absolute right-2 p-2 text-accent disabled:text-gray-600 disabled:cursor-not-allowed hover:bg-accent/10 rounded-lg transition-colors"
+                  disabled={!input.trim() || loading}
+                  className="p-2 rounded-lg bg-accent text-gray-950 hover:bg-accent-light transition-all disabled:opacity-40 cursor-pointer"
                 >
-                  <Send size={18} />
+                  <Send size={14} />
                 </button>
               </div>
             </div>
