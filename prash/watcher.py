@@ -109,11 +109,23 @@ def _send_desktop_notification(title: str, message: str) -> bool:
     script, not fixable by installing more packages. `osascript -e 'display
     notification'` is the standard, dependency-free mechanism CLI tools use
     on macOS instead; it doesn't need a bundle identity.
+
+    Found live, verifying the Datadog loop on Windows (2026-09-07): plyer's
+    win32 balloon backend packs the toast title/message into NOTIFYICONDATAW's
+    fixed-size struct fields (packed at 64 chars in this build). Longer text
+    raises "ValueError: string too long" inside plyer's own balloon_tip worker
+    thread -- AFTER notify() has returned True -- so the caller can neither
+    catch it nor know the toast never displayed. The only correct handling at
+    this layer is to keep the strings within the packed limit: _toast_clamp
+    below. The full text is unaffected everywhere else (console, team
+    channels); the OS toast is the only surface with the hard cap.
     """
     try:
         from plyer import notification
 
-        notification.notify(title=title, message=message, timeout=10)
+        notification.notify(
+            title=_toast_clamp(title), message=_toast_clamp(message), timeout=10
+        )
         return True
     except Exception as e:  # noqa: BLE001 — a failed OS notification must never kill the watch loop
         logger.info(f"plyer notification failed ({e}), trying platform fallback")
@@ -130,6 +142,14 @@ def _send_desktop_notification(title: str, message: str) -> bool:
             logger.warning(f"osascript notification fallback also failed: {e}")
 
     return False
+
+
+def _toast_clamp(text: str, limit: int = 64) -> str:
+    """Fit text into plyer's win32 balloon struct limit (see
+    _send_desktop_notification's 2026-09-07 note). The trailing ellipsis
+    marks truncation; the full text still reaches the console and every
+    team channel -- only the OS toast is capped."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _applescript_escape(s: str) -> str:

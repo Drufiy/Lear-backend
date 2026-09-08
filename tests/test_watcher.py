@@ -15,6 +15,7 @@ from prash.connectors.kubernetes import PodStatus
 from prash.watcher import (
     _applescript_escape,
     _send_desktop_notification,
+    _toast_clamp,
     detect_changes,
     run_datadog_watch_loop,
     run_pagerduty_watch_loop,
@@ -862,3 +863,35 @@ def test_resolve_gitlab_projects_reads_env(monkeypatch):
 
     monkeypatch.setattr(watcher_mod.os, "environ", {"GITLAB_WATCH_PROJECTS": "acme/api"})
     assert resolve_gitlab_projects(None) == ["acme/api"]
+
+
+# ── plyer win32 toast limit (real bug found live 2026-09-07) ────────────────
+
+def test_toast_clamp_bounds_plyer_struct_limit():
+    """plyer's win32 balloon backend packs title/message into NOTIFYICONDATAW
+    struct fields capped at 64 chars; anything longer crashes its worker
+    thread after notify() returned, so the toast silently never shows. The
+    clamp must guarantee the packed length, not just 'shorter'."""
+    long_text = "Datadog monitor 'prash-test-synthetic-error-rate' entered Alert state"
+    clamped = _toast_clamp(long_text)
+    assert len(clamped) <= 64
+    assert clamped.endswith("…") and long_text.startswith(clamped[:-1])
+    assert _toast_clamp("short") == "short"  # untouched when already within limit
+
+
+def test_send_desktop_notification_clamps_overlong_text_for_plyer(monkeypatch):
+    """The live failure: a 68-char notification title raised ValueError inside
+    plyer's balloon_tip thread. Whatever the caller passes, the strings handed
+    to plyer must already fit the packed limit."""
+    captured = {}
+
+    def fake_notify(*, title, message, timeout):
+        captured["title"], captured["message"] = title, message
+        if len(title) > 64 or len(message) > 64:
+            raise ValueError("string too long (69, maximum length 64)")
+
+    monkeypatch.setitem(sys.modules, "plyer", MagicMock(notification=MagicMock(notify=fake_notify)))
+
+    assert _send_desktop_notification("P" * 100, "M" * 200) is True
+    assert len(captured["title"]) <= 64
+    assert len(captured["message"]) <= 64

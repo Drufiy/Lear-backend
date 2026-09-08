@@ -68,7 +68,12 @@ _EVENT_TYPE_MAP = {"alert": "monitor_alert", "monitor": "monitor_alert", "deploy
 
 
 class DatadogError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: Optional[int] = None):
+        super().__init__(message)
+        # HTTP status the error came from, when it came from one -- callers
+        # like post_event/get_event branch on it (e.g. the live finding that
+        # this org's API key is denied Events v2 intake but allowed v1).
+        self.code = code
 
 
 def _utcnow() -> datetime:
@@ -242,12 +247,12 @@ class DatadogConnector(Connector):
                     rotated = True
                     if self._refresh_credentials():
                         continue
-                    raise DatadogError(message) from exc
+                    raise DatadogError(message, code=exc.code) from exc
                 if exc.code in _TRANSIENT_STATUS and attempt < _MAX_RETRIES:
                     time.sleep(self._backoff_seconds(attempt, exc))
                     attempt += 1
                     continue
-                raise DatadogError(message) from exc
+                raise DatadogError(message, code=exc.code) from exc
             except (socket.timeout, urllib.error.URLError) as exc:
                 if attempt < _MAX_RETRIES:
                     time.sleep(min(2 ** attempt, _BACKOFF_CAP))
@@ -428,9 +433,15 @@ class DatadogConnector(Connector):
         return events
 
     def _monitor_events(self, monitor_id: Any, monitor_name: str, since: datetime) -> List[ConnectorEvent]:
+        # Monitor-alert events live in Datadog's events pipeline, where facets
+        # need the log-style '@' prefix: a bare `monitor_id:<id>` query matches
+        # ZERO events. Found live 2026-09-07 against the synthetic fixture --
+        # the monitor had just triggered and recovered on camera, both events
+        # were in the stream, and `monitor_id:319727487` still returned 0 while
+        # `@monitor_id:319727487` returned them all.
         body = {
             "filter": {
-                "query": f"monitor_id:{monitor_id}",
+                "query": f"@monitor_id:{monitor_id}",
                 "from": since.isoformat(),
                 "to": _utcnow().isoformat(),
             },
@@ -444,17 +455,35 @@ class DatadogConnector(Connector):
         events: List[ConnectorEvent] = []
         for item in resp.get("data", []) if isinstance(resp, dict) else []:
             attrs = item.get("attributes", {}) if isinstance(item, dict) else {}
-            ts = _parse_ts(attrs.get("timestamp"))
+            # Monitor-alert events nest everything under attributes.attributes
+            # (title, monitor_id, transition, source tags -- the flat top-level
+            # fields are absent there), while plain user/posted events keep the
+            # flat shape. Read both; prefer the nested one when present.
+            nested = attrs.get("attributes") if isinstance(attrs.get("attributes"), dict) else {}
+            ts = _parse_ts(attrs.get("timestamp")) or _parse_ts(nested.get("timestamp"))
             if ts is None:
                 continue
-            source = str(attrs.get("source_type_name") or attrs.get("source") or "").lower()
-            title = attrs.get("title") or attrs.get("message") or "(untitled event)"
+            source = str(
+                nested.get("source_type_name_tag")
+                or nested.get("sourcecategory")
+                or attrs.get("source_type_name")
+                or attrs.get("source")
+                or ""
+            ).lower()
+            title = nested.get("title") or attrs.get("title") or attrs.get("message") or "(untitled event)"
             events.append(ConnectorEvent(
                 timestamp=ts,
                 connector=self.name,
-                event_type=_EVENT_TYPE_MAP.get(source, "event"),
+                # Unmapped sources keep their own identity ("workflow" ->
+                # "workflow", "Monitor Alert" -> "monitor_alert") instead of
+                # collapsing into a generic "event".
+                event_type=_EVENT_TYPE_MAP.get(source, source.replace(" ", "_") or "event"),
                 summary=str(title),
-                raw={"event_id": item.get("id"), "attributes": attrs, "monitor_name": monitor_name},
+                # transition (e.g. {"source_state": "Alert", "destination_state":
+                # "OK", "transition_type": "alert recovery"}) is the brain-ready
+                # part of a monitor-alert event -- surfaced at the top of raw.
+                raw={"event_id": item.get("id"), "attributes": attrs,
+                     "monitor_name": monitor_name, "transition": nested.get("transition") or {}},
             ))
         # Belt-and-braces: the events search API already filters on `from`,
         # but a provider-side slip must not leak pre-window events into the
@@ -556,17 +585,50 @@ class DatadogConnector(Connector):
         """Post an event to the Datadog event stream (Events API v2) -- the
         primitive behind the APPROVAL-gated datadog-alert action. The event
         is team-visible and can't be deleted through the API, which is why
-        the action that calls this is approval-tier rather than safe."""
+        the action that calls this is approval-tier rather than safe.
+
+        Found live 2026-09-07: this org's API key is denied Events v2 intake
+        (403 with both keys, 401 with the API key alone) while the legacy v1
+        intake accepts the same key. When the key is denied -- or the key is
+        entirely invalid, in which case v1 fails honestly too -- the post
+        falls back to v1, the same event stream. The returned payload is
+        uniform either way ("data"."id") plus a "via" marker naming the
+        intake that actually landed, so callers can verify honestly.
+        """
         attributes: Dict[str, Any] = {"title": title, "text": text, "priority": priority}
         if tags:
             attributes["tags"] = list(tags)
-        return self._request("POST", "/api/v2/events",
-                             body={"data": {"type": "event", "attributes": attributes}})
+        try:
+            resp = self._request("POST", "/api/v2/events",
+                                 body={"data": {"type": "event", "attributes": attributes}})
+            if isinstance(resp, dict) and isinstance(resp.get("data"), dict):
+                resp["data"].setdefault("via", "v2")
+            return resp
+        except DatadogError as exc:
+            if exc.code not in (401, 403):
+                raise
+            v1_body: Dict[str, Any] = {"title": title, "text": text, "priority": priority}
+            if tags:
+                v1_body["tags"] = list(tags)
+            resp = self._request("POST", "/api/v1/events", body=v1_body)
+            event = resp.get("event") if isinstance(resp, dict) else None
+            event_id = str((event or {}).get("id", ""))
+            return {"data": {"id": event_id, "via": "v1"}}
 
     def get_event(self, event_id: Any) -> Dict[str, Any]:
         """Fetch one event by id -- how the datadog-alert action verifies a
-        posted alert actually landed."""
-        return self._request("GET", f"/api/v2/events/{event_id}", timeout=SHORT_TIMEOUT)
+        posted alert actually landed. Tries v2 first; a 404 there (v1-posted
+        events surface their own id shape in v2) falls back to the legacy v1
+        endpoint, normalized to the same "data"."id" shape so callers compare
+        ids identically either way."""
+        try:
+            return self._request("GET", f"/api/v2/events/{event_id}", timeout=SHORT_TIMEOUT)
+        except DatadogError as exc:
+            if exc.code != 404:
+                raise
+            resp = self._request("GET", f"/api/v1/events/{event_id}", timeout=SHORT_TIMEOUT)
+            event = resp.get("event") if isinstance(resp, dict) else None
+            return {"data": {"id": str((event or {}).get("id", "")), "via": "v1"}}
 
     def list_monitors(self, query: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Resolve watch targets: a named search, or every monitor (capped).

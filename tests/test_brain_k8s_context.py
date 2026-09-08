@@ -109,3 +109,39 @@ def test_diagnose_failure_does_not_raise_on_empty_pod_logs(monkeypatch):
     ))
     assert diagnosis.category == "runtime"
     assert diagnosis.recommended_action == "restart_pod"
+
+
+def test_diagnose_failure_survives_files_changed_missing_explanation(monkeypatch):
+    """Regression (dogfooding 2026-09-07): the model returned a files_changed
+    entry with no `explanation` (a required FileChange field). Pydantic
+    rejected the whole Diagnosis and diagnose_multi_failure dropped that
+    entire CI job silently. The sanitizer must now fill a missing explanation
+    (from fix_description) so the real fix survives instead of being lost."""
+    async def fake_call_with_tool(**kwargs):
+        return {
+            "problem_summary": "Import sorting failure",
+            "root_cause": "imports out of order in app.py",
+            "fix_description": "sort imports in app.py",
+            "fix_type": "safe_auto_apply",
+            "confidence": 0.8,
+            "is_flaky_test": False,
+            # NOTE: no "explanation" key on this file change -> used to raise
+            "files_changed": [
+                {"path": "app.py", "edits": [{"old_content": "import b\nimport a", "new_content": "import a\nimport b"}]}
+            ],
+            "category": "workflow_config",
+            "logs_truncated_warning": False,
+            "recommended_action": None,
+        }
+
+    monkeypatch.setattr(da, "call_with_tool", fake_call_with_tool)
+    diagnosis = asyncio.run(diagnose_failure(
+        logs="=== job1 ===\nERROR: import order\n",
+        repo_full_name="acme/api",
+        commit_message="(no commit)",
+        workflow_name="CI",
+    ))
+    # The job's fix survived (not dropped) and the missing explanation was filled.
+    assert len(diagnosis.files_changed) == 1
+    assert diagnosis.files_changed[0].path == "app.py"
+    assert diagnosis.files_changed[0].explanation  # non-empty, filled from fix_description

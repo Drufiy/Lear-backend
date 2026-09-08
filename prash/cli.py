@@ -43,6 +43,8 @@ from .actions.contract import (
 from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
+from .actions.execute_gcp import ExecuteGCPAction
+from .actions.execute_azure import ExecuteAzureAction
 from .actions.aws_alert import AWSAlertAction
 from .actions.gcp_alert import GCPAlertAction
 from .actions.missing_secret import RequestSecretAction
@@ -284,6 +286,9 @@ def _make_context(
             "base": getattr(args, "base", None),
             "title": getattr(args, "title", None),
             "body": getattr(args, "body", None),
+            "text": getattr(args, "text", None),
+            "priority": getattr(args, "priority", None),
+            "tags": getattr(args, "tags", None),
             "command": getattr(args, "command", None),
             "pem_path": getattr(args, "pem_path", None),
             "replicas": getattr(args, "replicas", None),
@@ -317,6 +322,8 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ApplyManifestFixAction(),
             GCPAlertAction(),
             ExecuteAwsAction(),
+            ExecuteGCPAction(),
+            ExecuteAzureAction(),
             AWSAlertAction(),
             PagerdutyAcknowledgeAction(),
             PagerdutyResolveAction(),
@@ -1228,6 +1235,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--deployment-id", default=None, help="Vercel deployment id (vercel-redeploy/vercel-rollback)")
     run.add_argument("--minutes", type=int, default=60, help="mute/silence duration in minutes (datadog-mute-monitor/grafana-silence-alert)")
     run.add_argument("--reason", default=None, help="reason for the change (snyk-ignore-issue)")
+    run.add_argument("--text", help="event text (datadog-alert)")
+    run.add_argument("--priority", default=None, help="event priority: normal|low|high (datadog-alert)")
+    run.add_argument("--tags", help="comma-separated event tags (datadog-alert)")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)

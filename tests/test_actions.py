@@ -1273,13 +1273,65 @@ def test_datadog_alert_verify(tmp_path):
     assert "evt-1" in verification.detail
 
 
-def test_datadog_alert_verify_missing_event(tmp_path):
+def test_datadog_alert_verify_missing_event(tmp_path, monkeypatch):
     dd = _FakeAlertDatadog(verify_ok=False)
     action = DatadogAlertAction()
     ctx = _alert_ctx(tmp_path, dd=dd)
     result = action.execute(ctx)
+    sleeps: list = []
+    monkeypatch.setattr("prash.actions.datadog_alert.time.sleep", lambda s: sleeps.append(s))
     verification = action.verify(ctx, result)
     assert verification.ok is False
+    assert len(dd.checked) == 3  # bounded retry, not a single shot
+    assert sleeps == [2, 4]
+    assert "may still be propagating" in verification.detail or "not found" in verification.detail
+
+
+def test_datadog_alert_verify_retries_through_propagation(tmp_path, monkeypatch):
+    """Found live (2026-09-07): a just-posted event 404s for a few seconds
+    before it is queryable. Verification must retry within bounds and confirm
+    once reality catches up -- and still report honestly if it never does."""
+    import prash.actions.datadog_alert as alert_mod
+
+    class _PropagatingDatadog(_FakeAlertDatadog):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def get_event(self, event_id):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("404: event not found")
+            return {"data": {"id": event_id}}
+
+    monkeypatch.setattr(alert_mod.time, "sleep", lambda s: None)
+    dd = _PropagatingDatadog()
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert dd.calls == 2
+
+
+def test_datadog_alert_verify_accepts_v2_encoded_id_with_nested_evt_id(tmp_path, monkeypatch):
+    """v2 GET of a v1-posted event returns its own encoded data.id with the
+    original numeric id nested at attributes.attributes.evt.id -- that shape
+    must count as confirmed, not 'not found'."""
+    import prash.actions.datadog_alert as alert_mod
+
+    class _V2ShapeDatadog(_FakeAlertDatadog):
+        def get_event(self, event_id):
+            return {"data": {"id": "AwAAAaB9EncodedId", "attributes": {"attributes": {"evt": {"id": event_id}}}}}
+
+    monkeypatch.setattr(alert_mod.time, "sleep", lambda s: None)
+    dd = _V2ShapeDatadog()
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert "exists in the Datadog event stream" in verification.detail
 
 
 def test_datadog_alert_risk_tier_is_approval():

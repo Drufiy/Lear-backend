@@ -188,3 +188,50 @@ def test_multi_failure_result_properties_on_empty_diagnoses():
     assert result.total_count == 0
     assert result.fixed_count == 0
     assert result.combined_files_changed() == []
+
+
+# ── configurable concurrency (PRASH_MAX_DIAGNOSIS_CONCURRENCY) ──
+
+def test_default_concurrency_falls_back_to_3(monkeypatch):
+    monkeypatch.delenv("PRASH_MAX_DIAGNOSIS_CONCURRENCY", raising=False)
+    assert md_mod._default_concurrency() == 3
+
+
+def test_default_concurrency_reads_env(monkeypatch):
+    monkeypatch.setenv("PRASH_MAX_DIAGNOSIS_CONCURRENCY", "1")
+    assert md_mod._default_concurrency() == 1
+
+
+def test_default_concurrency_clamps_below_one(monkeypatch):
+    monkeypatch.setenv("PRASH_MAX_DIAGNOSIS_CONCURRENCY", "0")
+    assert md_mod._default_concurrency() == 1
+
+
+def test_default_concurrency_ignores_garbage(monkeypatch):
+    monkeypatch.setenv("PRASH_MAX_DIAGNOSIS_CONCURRENCY", "lots")
+    assert md_mod._default_concurrency() == 3
+
+
+def test_env_concurrency_bounds_in_flight_calls(monkeypatch):
+    """The env value (not just an explicit arg) actually bounds concurrency --
+    the dogfooding fix: an account capped at 1 can set the env var and stop
+    the 429-thrash."""
+    monkeypatch.setenv("PRASH_MAX_DIAGNOSIS_CONCURRENCY", "1")
+    logs = "".join(f"=== job{i}.txt ===\nerror {i}\n" for i in range(4))
+    in_flight = 0
+    max_seen = 0
+
+    async def fake_diagnose(logs, **kwargs):
+        nonlocal in_flight, max_seen
+        in_flight += 1
+        max_seen = max(max_seen, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return _diagnosis()
+
+    monkeypatch.setattr(md_mod, "diagnose_failure", fake_diagnose)
+    result = asyncio.run(diagnose_multi_failure(
+        logs=logs, repo_full_name="acme/repo", commit_message="msg", workflow_name="CI",
+    ))  # no explicit max_concurrency -> uses env
+    assert max_seen == 1
+    assert result.total_count == 4
