@@ -99,3 +99,135 @@ def test_log_agent_call_never_raises_even_with_bad_usage():
 
 def test_mark_agent_run_outcome_is_a_no_op_without_run_id():
     kc.mark_agent_run_outcome(None, "verified")  # must not raise
+
+
+# ── DeepSeek max_tokens truncation (found live, 2026-09-09 dogfooding) ───────
+# DeepSeek's thinking mode emits reasoning and the final tool call in ONE
+# continuous token stream sharing a single max_tokens budget. At the old
+# value (8000), a real diagnosis prompt (59KB system prompt + real CI logs)
+# reliably burned the entire budget on reasoning and got cut off before
+# emitting anything — confirmed live: output_tokens exactly 8000,
+# finish_reason "length", empty tool_calls and content. Every one of that
+# night's 9 sub-diagnosis calls failed this way before falling back to Kimi.
+
+class _FakeUsage:
+    def __init__(self, prompt_tokens=100, completion_tokens=8000):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class _FakeMessage:
+    def __init__(self, content=None, tool_calls=None, reasoning_content=""):
+        self.content = content
+        self.tool_calls = tool_calls
+        self.reasoning_content = reasoning_content
+
+    def model_dump(self):
+        return {"content": self.content, "tool_calls": self.tool_calls, "reasoning_content": self.reasoning_content}
+
+
+class _FakeChoice:
+    def __init__(self, message, finish_reason=None):
+        self.message = message
+        self.finish_reason = finish_reason
+
+
+class _FakeResponse:
+    def __init__(self, choices, usage=None):
+        self.choices = choices
+        self.usage = usage or _FakeUsage()
+
+
+def _truncated_response():
+    """Simulates the exact live failure: reasoning consumed the whole budget,
+    finish_reason is "length", and neither a tool call nor any content survived."""
+    msg = _FakeMessage(content=None, tool_calls=None, reasoning_content="")
+    return _FakeResponse([_FakeChoice(msg, finish_reason="length")], usage=_FakeUsage(completion_tokens=8000))
+
+
+def test_call_deepseek_uses_the_raised_max_tokens_budget(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+    captured = {}
+
+    async def fake_create_chat(client, **kwargs):
+        captured.update(kwargs)
+        msg = _FakeMessage(content=None, tool_calls=[])
+        return _FakeResponse([_FakeChoice(msg, finish_reason="stop")])
+
+    monkeypatch.setattr(kc, "_create_chat", fake_create_chat)
+    import asyncio
+    asyncio.run(kc._call_deepseek("deepseek-v4-flash", [{"role": "user", "content": "x"}], {"name": "t", "parameters": {}}))
+    assert captured["max_tokens"] == kc.DEEPSEEK_MAX_OUTPUT_TOKENS
+    assert kc.DEEPSEEK_MAX_OUTPUT_TOKENS > 8000  # the old, too-low value
+
+
+def test_call_deepseek_truncation_returns_none_not_a_crash(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+
+    async def fake_create_chat(client, **kwargs):
+        return _truncated_response()
+
+    monkeypatch.setattr(kc, "_create_chat", fake_create_chat)
+    import asyncio
+    args, raw, usage = asyncio.run(
+        kc._call_deepseek("deepseek-v4-flash", [{"role": "user", "content": "x"}], {"name": "t", "parameters": {}})
+    )
+    assert args is None
+    assert usage["output_tokens"] == 8000
+
+
+def test_call_deepseek_logs_truncation_distinctly_from_a_declined_tool_call(monkeypatch, caplog):
+    """The bug this whole fix targets: a truncated response used to log
+    identically to "the model just didn't call the tool" (reasoning=N chars,
+    tool_calls=0), giving no signal that max_tokens was the actual cause."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+
+    async def fake_create_chat(client, **kwargs):
+        return _truncated_response()
+
+    monkeypatch.setattr(kc, "_create_chat", fake_create_chat)
+    import asyncio
+    import logging
+    with caplog.at_level(logging.WARNING, logger="prash.brain.kimi_client"):
+        asyncio.run(
+            kc._call_deepseek("deepseek-v4-flash", [{"role": "user", "content": "x"}], {"name": "t", "parameters": {}})
+        )
+    assert any("truncated" in rec.message.lower() and "max_tokens" in rec.message for rec in caplog.records)
+
+
+def test_call_deepseek_does_not_warn_of_truncation_when_model_simply_declines(monkeypatch, caplog):
+    """A clean finish_reason="stop" with no tool call is the model choosing
+    not to call the tool — a real, distinct outcome that must NOT be
+    misreported as truncation."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+
+    async def fake_create_chat(client, **kwargs):
+        msg = _FakeMessage(content="I don't think a fix is needed here.", tool_calls=[])
+        return _FakeResponse([_FakeChoice(msg, finish_reason="stop")])
+
+    monkeypatch.setattr(kc, "_create_chat", fake_create_chat)
+    import asyncio
+    import logging
+    with caplog.at_level(logging.WARNING, logger="prash.brain.kimi_client"):
+        asyncio.run(
+            kc._call_deepseek("deepseek-v4-flash", [{"role": "user", "content": "x"}], {"name": "t", "parameters": {}})
+        )
+    assert not any("truncated" in rec.message.lower() for rec in caplog.records)
+
+
+def test_call_with_tools_uses_raised_deepseek_budget(monkeypatch):
+    """The investigation-loop call site (fetch_file/list_directory/search_code)
+    shares the same thinking-mode-truncation risk and needed the same fix."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    captured = {}
+
+    async def fake_create_chat(client, **kwargs):
+        captured.update(kwargs)
+        msg = _FakeMessage(content="ok", tool_calls=[])
+        return _FakeResponse([_FakeChoice(msg, finish_reason="stop")])
+
+    monkeypatch.setattr(kc, "_create_chat", fake_create_chat)
+    import asyncio
+    asyncio.run(kc._call_with_tools([{"role": "user", "content": "x"}], [{"name": "t", "parameters": {}}], model="deepseek-v4-flash"))
+    assert captured["max_tokens"] == kc.DEEPSEEK_MAX_OUTPUT_TOKENS

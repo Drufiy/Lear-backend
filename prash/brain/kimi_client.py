@@ -384,6 +384,22 @@ DEEPSEEK_DIAGNOSIS_BUDGET = 240  # seconds — total DeepSeek time across all in
 KIMI_FALLBACK_RESERVE = 35       # seconds — real headroom left for Kimi when DeepSeek exhausts its budget
 DEEPSEEK_CALL_TIMEOUT = 240      # seconds — default per-call cap (used outside investigation loop)
 
+# Real bug, caught live (2026-09-09 dogfooding): DeepSeek's thinking mode emits
+# reasoning and the final tool call in ONE continuous token stream sharing a
+# single max_tokens budget (unlike Kimi, whose reasoning/answer are split
+# across separate calls with their own budgets — see _call_kimi_reasoning's
+# budget_tokens=1500 vs _call_kimi_structured's thinking:disabled). At 8000,
+# a real diagnosis prompt (59KB system prompt + real CI logs) reliably burns
+# the entire budget on reasoning and gets cut off before emitting anything —
+# confirmed live: output_tokens exactly 8000, finish_reason "length", zero
+# reasoning_content or tool_calls returned. Every one of tonight's 9 sub-
+# diagnosis calls failed this way before falling back to Kimi (itself
+# capacity-locked to 1 concurrent call), which is why the run took as long
+# as it did. Raised well past what was observed necessary; still bounded,
+# not unlimited, so a genuinely pathological prompt still fails loudly
+# instead of running away.
+DEEPSEEK_MAX_OUTPUT_TOKENS = 32000
+
 
 async def _call_deepseek(model: str, messages: list, tool_schema: dict, timeout: float | None = None):
     """
@@ -411,7 +427,7 @@ async def _call_deepseek(model: str, messages: list, tool_schema: dict, timeout:
                     messages=messages,
                     tools=[{"type": "function", "function": tool_schema}],
                     tool_choice="auto",
-                    max_tokens=8000,
+                    max_tokens=DEEPSEEK_MAX_OUTPUT_TOKENS,
                     temperature=1,
                 ),
                 timeout=call_timeout,
@@ -429,9 +445,23 @@ async def _call_deepseek(model: str, messages: list, tool_schema: dict, timeout:
 
         latency_ms = int((time.time() - start) * 1000)
         usage = _usage_from_response(response, latency_ms)
-        msg = response.choices[0].message
+        choice = response.choices[0]
+        msg = choice.message
+        finish_reason = getattr(choice, "finish_reason", None)
         reasoning_content = getattr(msg, "reasoning_content", None) or ""
-        logger.info(f"DeepSeek ({model}): reasoning={len(reasoning_content)} chars, tool_calls={len(msg.tool_calls or [])}")
+        logger.info(
+            f"DeepSeek ({model}): reasoning={len(reasoning_content)} chars, "
+            f"tool_calls={len(msg.tool_calls or [])}, finish_reason={finish_reason}"
+        )
+        if finish_reason == "length" and not msg.tool_calls:
+            # The bug this constant's docstring describes: reasoning consumed the
+            # entire output budget before a tool call could be emitted. Distinct
+            # from "the model chose not to call the tool" — surfaced explicitly so
+            # it isn't silently indistinguishable from that in the logs again.
+            logger.warning(
+                f"DeepSeek ({model}) truncated by max_tokens={DEEPSEEK_MAX_OUTPUT_TOKENS} before emitting a "
+                f"tool call ({len(reasoning_content)} chars of reasoning) — prompt may need a higher budget"
+            )
 
         if msg.tool_calls:
             raw = msg.tool_calls[0].function.arguments
@@ -561,7 +591,7 @@ async def _call_with_tools(messages: list, tools: list[dict], model: str = "auto
                     messages=messages,
                     tools=[{"type": "function", "function": tool} for tool in tools],
                     tool_choice="auto",
-                    max_tokens=8000 if use_deepseek else 4000,
+                    max_tokens=DEEPSEEK_MAX_OUTPUT_TOKENS if use_deepseek else 4000,
                     temperature=1,
                     **extra,
                 ),
