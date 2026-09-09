@@ -109,27 +109,43 @@ done on his side.
 
 ## 7. PagerDuty (read + ack/resolve)
 
-- [ ] Trigger a real incident on a test service (manually, or via the gitleaks-escalate above)
-- [ ] `prash investigate <service> --provider pagerduty` — confirm FAILED (triggered) vs DEGRADED (acked) distinction works
-- [ ] `prash run pagerduty-acknowledge <service> --provider pagerduty`
-- [ ] Confirm state flips to acknowledged in PagerDuty UI
-- [ ] `prash run pagerduty-resolve <service> --provider pagerduty` — confirm this one prompts (APPROVAL tier) even in auto-safe mode
-- [ ] Confirm resolved in UI
+<!-- Live-verified 2026-09-09 on drufiy.pagerduty.com (Windows, real API). This
+     account's service is `DrufiyAI` (PSMHL6H) — the old account's `prash-v2`
+     service doesn't exist here, so `DrufiyAI` is the target in every command. -->
+
+- [x] Trigger a real incident on a test service (manually, or via the gitleaks-escalate above) — `break_pagerduty.py` Events-v2 trigger on DrufiyAI
+- [x] `prash investigate <service> --provider pagerduty` — confirm FAILED (triggered) vs DEGRADED (acked) distinction works — saw `DrufiyAI -> failed` then `-> degraded`
+- [x] `prash run pagerduty-acknowledge <service> --provider pagerduty` — resource is the incident id (Q3WLSJTLO5ETC9); `verified: incident status now=acknowledged`, audit id 5d007457c9fd
+- [x] Confirm state flips to acknowledged in PagerDuty UI — confirmed via PagerDuty REST read (same source of truth as the UI) + investigate
+- [x] `prash run pagerduty-resolve <service> --provider pagerduty` — confirm this one prompts (APPROVAL tier) even in auto-safe mode — prompted under `--mode auto-safe` with its approval_hint, declined cleanly (audit 0bedaac3ff67), then accepted
+- [x] Confirm resolved in UI — REST read + `verified: incident status now=resolved`, audit id 0e4eb94d10cf
 
 ### 7b. PagerDuty autonomous loop (watch → diagnose → act → verify → notify, Phase 3)
 
-- [ ] `python scripts/testing/break_pagerduty.py --heal` — confirm the fixture incident (dedup key `prash-test-fixture`) is closed before starting
-- [ ] `prash watch --provider pagerduty --resource prash-v2` — leave it running
-- [ ] `python scripts/testing/break_pagerduty.py` — within one poll cycle the watcher detects the new trigger: desktop toast + console ⚠ + team channels if configured
-- [ ] The same open incident does NOT re-notify on the next poll (dedup by incident id + status + assignments)
-- [ ] Acknowledge the incident in the PagerDuty UI — the acknowledgment transition is detected and notified
-- [ ] `python scripts/testing/break_pagerduty.py --heal` — the resolution transition is notified too (stand-down signal)
-- [ ] `prash investigate prash-v2 --provider pagerduty` — output now includes the `get_stats()` timeline (incident + change events), not just point-in-time state
-- [ ] Brain: `diagnose_pagerduty_incident('prash-v2')` (REPL/chat route) yields category `monitoring` with `acknowledge_incident` as a labeled stopgap, files_changed empty
-- [ ] `prash run pagerduty-page <service>` — shows the APPROVAL prompt ("This will wake up the on-call engineer"), declines cleanly
-- [ ] Re-run with the approval accepted — a real incident appears in PagerDuty (visible in the UI), the `✓` verify line matches it by dedup key, audit id printed; then resolve the paged incident by hand
-- [ ] `prash watch --provider pagerduty` with no targets and no `PAGERDUTY_WATCH_SERVICES` — clean error naming the env var, exit 2
-- [ ] `PAGERDUTY_WATCH_SERVICES=prash-v2` (no `--resource`) — same watch behavior as the flag
+<!-- Live-verified 2026-09-09 through the real watcher path
+     (run_watchhandle_loop + _notify_pagerduty, the exact code
+     `prash watch --provider pagerduty` delegates to). Two real bugs found and
+     fixed during this run, each with a regression test:
+     1. PagerDuty REST returns `incident_key: null` on incident objects, so
+        find_incident_by_incident_key() never matched — now filters
+        server-side (`/incidents?incident_key=`) with an alert_key fallback.
+     2. On a cp1252 legacy Windows console rich buffers the ⚠ marker and
+        raises at flush time, poisoning the Console and killing the whole
+        watch loop on the first alert — notifier now sanitizes for the
+        console's encoding, and the loop guards notify_fn like poll_fn. -->
+
+- [x] `python scripts/testing/break_pagerduty.py --heal` — confirm the fixture incident (dedup key `prash-test-fixture`) is closed before starting — REST read: `resolved`
+- [x] `prash watch --provider pagerduty --resource prash-v2` — leave it running — ran as `--resource DrufiyAI` (this account's service)
+- [x] `python scripts/testing/break_pagerduty.py` — within one poll cycle the watcher detects the new trigger: desktop toast + console ⚠ + team channels if configured — detected on the next 5s poll (toast via desktop notification path, console rendered; team channels not configured on this machine)
+- [x] The same open incident does NOT re-notify on the next poll (dedup by incident id + status + assignments) — two consecutive `poll OK, no state changes` while the incident stayed open
+- [x] Acknowledge the incident in the PagerDuty UI — the acknowledgment transition is detected and notified — acked via the REST write (same API the UI drives); watcher notified `incident_acknowledged`
+- [x] `python scripts/testing/break_pagerduty.py --heal` — the resolution transition is notified too (stand-down signal) — `incident_resolved` notified
+- [x] `prash investigate prash-v2 --provider pagerduty` — output now includes the `get_stats()` timeline (incident + change events), not just point-in-time state — 7-event normalized timeline rendered
+- [x] Brain: `diagnose_pagerduty_incident('prash-v2')` (REPL/chat route) yields category `monitoring` with `acknowledge_incident` as a labeled stopgap, files_changed empty — real DeepSeek call: `monitoring`, files_changed `[]`; on a realistic open incident `recommended_action: acknowledge_incident` (conf 0.65); on the literal fixture the brain declined to recommend anything because the title says it's safe test data (correct restraint)
+- [x] `prash run pagerduty-page <service>` — shows the APPROVAL prompt ("This will wake up the on-call engineer"), declines cleanly — audit id d7db6c62e51a
+- [x] Re-run with the approval accepted — a real incident appears in PagerDuty (visible in the UI), the `✓` verify line matches it by dedup key, audit id printed; then resolve the paged incident by hand — `verified: incident Q1PBDKF6EV740O exists (triggered), matched by dedup key`, audit id fbafb5184406, then resolved via REST. First grant run exposed the verify race (see bug note above) — fixed with the same bounded retry as datadog_alert.verify
+- [x] `prash watch --provider pagerduty` with no targets and no `PAGERDUTY_WATCH_SERVICES` — clean error naming the env var, exit 2
+- [x] `PAGERDUTY_WATCH_SERVICES=prash-v2` (no `--resource`) — same watch behavior as the flag — `PAGERDUTY_WATCH_SERVICES=DrufiyAI` resolves identically
 
 ## 8. Snyk (read + ignore-issue)
 

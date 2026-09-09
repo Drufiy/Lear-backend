@@ -111,6 +111,13 @@ python3 scripts/testing/break_pagerduty.py --heal   # resolve it
 
 Both directions live-verified 2026-08-26 — trigger produces a real
 `triggered` incident within seconds, resolve clears it within seconds.
+Re-verified 2026-09-09 along with the full autonomous loop (watch →
+diagnose → act → verify → notify; see E2E_TEST_CHECKLIST.md §7/§7b).
+
+**Note (2026-09-09):** the routing key determines which service an Events
+v2 trigger lands on — on the current account (drufiy.pagerduty.com) that's
+the `DrufiyAI` service, not `prash-v2`. Investigate/watch target the
+*service name* the routing key belongs to; everything else works as written.
 
 **Prash prompt to test with:**
 

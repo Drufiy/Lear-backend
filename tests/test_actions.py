@@ -1438,9 +1438,15 @@ def test_pagerduty_page_verify(tmp_path):
     assert "PINC9" in verification.detail
 
 
-def test_pagerduty_page_verify_not_yet_visible(tmp_path):
-    """The Events API accepted the trigger but the incident isn't in the REST
-    window yet -- verify reports honestly instead of claiming confirmation."""
+def test_pagerduty_page_verify_not_yet_visible(tmp_path, monkeypatch):
+    """The Events API accepted the trigger but the incident never becomes
+    REST-listable within the bounded retry window -- verify reports honestly
+    instead of claiming confirmation (3 attempts, 2s+4s backoff)."""
+    import prash.actions.pagerduty_page as page_mod
+
+    sleeps = []
+    monkeypatch.setattr(page_mod.time, "sleep", sleeps.append)
+
     pd = _FakePagePagerDuty(visible=False)
     action = PagerdutyPageAction()
     ctx = _page_ctx(tmp_path, pd=pd)
@@ -1448,6 +1454,38 @@ def test_pagerduty_page_verify_not_yet_visible(tmp_path):
     verification = action.verify(ctx, result)
     assert verification.ok is False
     assert "propagating" in verification.detail
+    assert pd.checked.count(result.detail["dedup_key"]) == 3
+    assert sleeps == [2, 4]
+
+
+def test_pagerduty_page_verify_retries_until_visible(tmp_path, monkeypatch):
+    """Found live 2026-09-09: a just-triggered Events v2 incident is not
+    REST-listable for a few seconds, so a single-shot verify reported 'not
+    verified' for a page that was real (intake -> incident propagation).
+    Bounded retry: confirm as soon as reality catches up."""
+    import prash.actions.pagerduty_page as page_mod
+
+    monkeypatch.setattr(page_mod.time, "sleep", lambda s: None)
+
+    class _LatePagerDuty(_FakePagePagerDuty):
+        def __init__(self):
+            super().__init__()
+            self.lookups = 0
+
+        def find_incident_by_incident_key(self, key, since):
+            self.lookups += 1
+            if self.lookups < 3:
+                return None
+            return {"id": "PINC9", "status": "triggered", "incident_key": key}
+
+    pd = _LatePagerDuty()
+    action = PagerdutyPageAction()
+    ctx = _page_ctx(tmp_path, pd=pd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert pd.lookups == 3
+    assert "PINC9" in verification.detail
 
 
 def test_pagerduty_page_risk_tier_is_approval():

@@ -13,13 +13,15 @@ The mechanism is the Events API v2 (PAGERDUTY_ROUTING_KEY), not the REST
 API -- triggering a NEW incident and updating an EXISTING one are
 different PagerDuty products with different auth models (see the
 connector's module docstring). verify() closes the loop honestly: the
-Events API response carries no incident id, so it scans the recent
-incident window for one whose incident_key matches the dedup key -- and
-reports "not visible yet" rather than success if the scan comes up empty.
+Events API response carries no incident id, so it looks up the incident
+by dedup key (server-side incident_key filter, alert_key fallback) with
+a bounded retry for PagerDuty's intake -> listable propagation -- and
+reports "not visible yet" rather than success if it never shows up.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -108,19 +110,30 @@ class PagerdutyPageAction(Action):
         if not dedup_key:
             return VerificationResult(ok=False, detail="could not verify: no dedup key was recorded")
         posted_at = _parse_ts(result.detail.get("posted_at")) or _utcnow() - timedelta(minutes=30)
-        try:
-            incident = pd.find_incident_by_incident_key(dedup_key, since=posted_at)
-        except Exception as exc:  # noqa: BLE001 — verification must report, never crash
-            return VerificationResult(ok=False, detail=f"could not verify: {exc}")
-        if incident is None:
+        # Found live (2026-09-09): a just-triggered Events v2 incident is not
+        # listable via REST for a few seconds (intake -> incident propagation),
+        # so a single immediate lookup reports "not verified" for a page that
+        # is real. Same bounded retry as datadog_alert.verify: confirm as soon
+        # as reality catches up; if it never does, report exactly that instead
+        # of claiming a verified success.
+        last = "could not verify: no lookup was attempted"
+        for attempt in range(3):
+            try:
+                incident = pd.find_incident_by_incident_key(dedup_key, since=posted_at)
+            except Exception as exc:  # noqa: BLE001 — verification must report, never crash
+                last = f"could not verify: {exc}"
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                continue
+            if incident is not None:
+                return VerificationResult(
+                    ok=True,
+                    detail=f"incident {incident.get('id')} exists ({incident.get('status')}), matched by dedup key",
+                )
             # The Events API accepted the trigger (execute() would have
             # failed otherwise), but the incident isn't visible in the REST
             # window yet -- report that honestly instead of claiming success.
-            return VerificationResult(
-                ok=False,
-                detail=f"no incident with incident_key {dedup_key} in the recent window (page may still be propagating)",
-            )
-        return VerificationResult(
-            ok=True,
-            detail=f"incident {incident.get('id')} exists ({incident.get('status')}), incident_key matches dedup key",
-        )
+            last = f"no incident with incident_key {dedup_key} in the recent window (page may still be propagating)"
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+        return VerificationResult(ok=False, detail=last)

@@ -588,14 +588,37 @@ def test_page_oncall_retries_429(monkeypatch):
 
 def test_find_incident_by_incident_key_matches_dedup(monkeypatch):
     page = _incidents_body(
-        _incident(id="PINC1", incident_key="dk-other"),
         _incident(id="PINC2", incident_key="dk-mine"),
+        _incident(id="PINC1", incident_key="dk-other"),
     )
-    _sequenced_urlopen(monkeypatch, [page, page])  # one page per scan call
+    calls = _sequenced_urlopen(monkeypatch, [page])  # legacy shape: field match, one request
     pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
     found = pd.find_incident_by_incident_key("dk-mine", since=_SINCE)
     assert found is not None and found["id"] == "PINC2"
-    assert pd.find_incident_by_incident_key("dk-absent", since=_SINCE) is None
+    assert "incident_key=dk-mine" in calls[0].full_url  # narrowed server-side
+
+
+def test_find_incident_by_incident_key_null_field_matches_via_alert_key(monkeypatch):
+    # Found live 2026-09-09: PagerDuty returns incident_key: null on the
+    # incident object even for Events-v2 triggers; the dedup key lives on
+    # the incident's alert as alert_key.
+    page = _incidents_body(_incident(id="PINC9", incident_key=None))
+    alerts = json.dumps({"alerts": [{"id": "AL1", "alert_key": "dk-mine"}], "more": False}).encode()
+    calls = _sequenced_urlopen(monkeypatch, [page, alerts])
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
+    found = pd.find_incident_by_incident_key("dk-mine", since=_SINCE)
+    assert found is not None and found["id"] == "PINC9"
+    assert "/incidents/PINC9/alerts" in calls[1].full_url
+
+
+def test_find_incident_by_incident_key_rejects_incident_without_matching_key(monkeypatch):
+    # A returned incident whose alert doesn't carry the dedup key must not
+    # be passed to the page action's verify() as a match.
+    page = _incidents_body(_incident(id="PINC9", incident_key=None))
+    alerts = json.dumps({"alerts": [{"id": "AL1", "alert_key": "dk-someone-elses"}], "more": False}).encode()
+    _sequenced_urlopen(monkeypatch, [page, alerts])
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
+    assert pd.find_incident_by_incident_key("dk-mine", since=_SINCE) is None
 
 
 def test_list_services_resolves_watch_targets(monkeypatch):

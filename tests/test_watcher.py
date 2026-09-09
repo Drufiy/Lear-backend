@@ -685,6 +685,53 @@ def test_notify_pagerduty_pushes_team_notification_when_creds_given(monkeypatch)
     assert "prash investigate checkout --provider pagerduty" in sent[0][1]
 
 
+def test_notify_pagerduty_survives_console_that_cannot_encode_marker(monkeypatch):
+    """Found live 2026-09-09: a cp1252 legacy Windows console raises
+    UnicodeEncodeError on the ⚠ marker -- rich buffers text and only raises at
+    flush time, so the unencodable segment poisons the Console and kills the
+    next print too. The notifier must sanitize up front instead."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+
+    class _Cp1252Console:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.printed = []
+
+        def print(self, text):
+            text.encode("cp1252")  # raises UnicodeEncodeError on '⚠'
+            self.printed.append(text)
+
+    console = _Cp1252Console()
+    watcher_mod._notify_pagerduty(_pd_event(), console=console)  # must not raise
+
+    assert len(console.printed) == 1
+    assert "⚠" not in console.printed[0]  # never handed to rich: no poisoned buffer
+    assert "?" in console.printed[0] and "500s spiking" in console.printed[0]
+
+    console.print("DrufiyAI: poll OK, no state changes")  # next print still works
+    assert len(console.printed) == 2
+
+
+def test_watchhandle_loop_survives_failing_notifier():
+    """A dying notification path (dead toast, unencodable console) must not
+    kill the watch loop -- same contract as poll errors."""
+    import prash.watcher as watcher_mod
+
+    handle = _FakePdHandle(script=[[_pd_event()], [], []])
+    called = []
+
+    def notifier(event, console=None, creds=None):
+        called.append(event)
+        raise UnicodeEncodeError("charmap", "⚠ x", 0, 1, "character maps to <undefined>")
+
+    watcher_mod.run_watchhandle_loop([handle], notifier, interval=0, max_iterations=3)
+
+    assert len(called) == 1  # the loop kept polling after the notifier died
+
+
 # ── G2: GitHub Actions watch loop + repo resolution ──
 
 def _gh_event(event_type="ci_failure", repo="acme/api"):

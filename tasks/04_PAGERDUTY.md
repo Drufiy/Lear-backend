@@ -21,6 +21,8 @@ verify() confirms incident state → notify team → loop
 
 ---
 
+> **Shipped:** the full autonomous loop landed in `647f3fa` (Datadog + PagerDuty, M4/M5) and was **live-verified end-to-end on 2026-09-09** (drufiy.pagerduty.com, service `DrufiyAI`) — see `E2E_TEST_CHECKLIST.md` §7/§7b. Two real bugs found and fixed that day: REST `incident_key` comes back `null` on current accounts (lookup now filters server-side + falls back to the alert's `alert_key`), and a cp1252 legacy-Windows console crash killed the watch loop on its first notification (notifier now sanitizes for the console encoding; loop guards notify like it guards poll). `pagerduty-page` verify gained the same bounded propagation retry as `datadog_alert.verify`.
+
 ## Current State Audit
 
 | Capability | Status | Notes |
@@ -32,9 +34,9 @@ verify() confirms incident state → notify team → loop
 | `acknowledge_incident()` | ✅ Done | Via `pagerduty_incident` Action |
 | `resolve_incident()` | ✅ Done | Via `pagerduty_incident` Action |
 | `trigger_event()` | ✅ Done | Events API v2 (routing key) |
-| `watch()` | ❌ Missing | |
-| `get_stats()` | ❌ Missing | |
-| `page` (outbound) Action | ❌ Missing | |
+| `watch()` | ✅ Done | `_PagerDutyWatchHandle`, dedup on `{incident_id: (status, assignments_sig)}` |
+| `get_stats()` | ✅ Done | Incident log-entries + change events → `ConnectorEvent` |
+| `page` (outbound) Action | ✅ Done | `prash/actions/pagerduty_page.py`, APPROVAL tier |
 
 **Key architectural note:** PagerDuty has TWO auth models — REST API (API key for read/ack/resolve) and Events API v2 (routing key for trigger/page). The `page` action must use the Events API v2, not the REST API.
 
@@ -44,29 +46,29 @@ verify() confirms incident state → notify team → loop
 
 ### Phase A — API Scope & Auth Audit
 
-- [ ] **Document the dual auth model clearly:**
+- [x] **Document the dual auth model clearly:**
   - REST API key (`PAGERDUTY_API_KEY`): read incidents, ack, resolve
   - Events API v2 routing key (`PAGERDUTY_ROUTING_KEY`): trigger new incidents
   - `PAGERDUTY_FROM_EMAIL`: required for REST API writes (ack/resolve)
-- [ ] **Decide `pagerduty-page` risk tier:**
+- [x] **Decide `pagerduty-page` risk tier:**
   - Default: APPROVAL (pages a human, not reversible, outbound)
   - This is NOT like muting — it actively wakes someone up
   - **Decision: APPROVAL, no argument for SAFE here**
 
 ### Phase B — Implement `watch()`
 
-- [ ] **Implement `PagerDutyConnector.watch(target)`**
+- [x] **Implement `PagerDutyConnector.watch(target)`**
   - `target` = service name or ID
   - Poll `/incidents?service_ids[]={id}&statuses[]=triggered&statuses[]=acknowledged`
   - Detect: new incident triggered, incident acknowledged, incident resolved, incident escalated
   - Return `WatchHandle`
-- [ ] **Track incident state transitions** — triggered→ack, ack→resolved, triggered→escalated
-- [ ] **De-duplicate across polls** — same incident ID shouldn't re-notify unless state changes
-- [ ] **Add `"watch"` to `read_capabilities`**
+- [x] **Track incident state transitions** — triggered→ack, ack→resolved, triggered→escalated (same-status reassignment escalates)
+- [x] **De-duplicate across polls** — same incident ID shouldn't re-notify unless state changes (`{incident_id: (status, assignments_sig)}`)
+- [x] **Add `"watch"` to `read_capabilities`**
 
 ### Phase C — Implement `get_stats()`
 
-- [ ] **Implement `PagerDutyConnector.get_stats(target, since)`**
+- [x] **Implement `PagerDutyConnector.get_stats(target, since)`**
   - Pull from:
     - Incidents for the service (with log entries): `/incidents/{id}/log_entries`
     - Change events: `/change_events`
@@ -81,12 +83,12 @@ verify() confirms incident state → notify team → loop
         raw={...full PagerDuty incident...}
     )
     ```
-- [ ] **Include change events** in timeline (deploys, config changes linked to PD)
-- [ ] **Add `"stats"` to `read_capabilities`**
+- [x] **Include change events** in timeline (deploys, config changes linked to PD)
+- [x] **Add `"stats"` to `read_capabilities`**
 
 ### Phase D — Implement `pagerduty-page` Action
 
-- [ ] **Create `prash/actions/pagerduty_page.py`**
+- [x] **Create `prash/actions/pagerduty_page.py`** — shipped as `PagerdutyPageAction` with `capabilities=("page_oncall",)` (matches the connector's write capability; the spec §4b sketch's `("alert",)` was illustrative)
   ```python
   class PagerDutyPageAction(Action):
       spec = ActionSpec(
@@ -94,74 +96,76 @@ verify() confirms incident state → notify team → loop
           summary="Page an on-call responder via PagerDuty",
           risk_tier=RiskTier.APPROVAL,
           reversible=False,
-          capabilities=("alert",),
+          capabilities=("page_oncall",),
           approval_hint="This will page the on-call engineer and wake them up"
       )
   ```
-- [ ] **`execute()`** — POST to Events API v2 (`events.pagerduty.com/v2/enqueue`)
-- [ ] **`verify()`** — check the `dedup_key` response, verify incident created via REST API
-- [ ] **Require `PAGERDUTY_ROUTING_KEY`** — fail cleanly if missing
-- [ ] **Register** in dispatcher
+- [x] **`execute()`** — POST to Events API v2 (`events.pagerduty.com/v2/enqueue`)
+- [x] **`verify()`** — check the `dedup_key` response, verify incident created via REST API (server-side `incident_key` filter + `alert_key` fallback + bounded propagation retry)
+- [x] **Require `PAGERDUTY_ROUTING_KEY`** — fail cleanly if missing
+- [x] **Register** in dispatcher
 
 ### Phase E — Connector Fine-Tuning
 
-- [ ] **Pagination handling:** PagerDuty paginates incidents — implement cursor-based pagination
-- [ ] **Urgency awareness:** Respect PagerDuty urgency levels (high/low) in `ConnectorEvent` context
-- [ ] **Escalation policy context:** Include escalation policy info in `get_stats()` raw data
-- [ ] **Service dependency mapping:** PagerDuty supports service dependencies — surface for correlation
-- [ ] **On-call schedule awareness:** Know who's on-call before suggesting a page action
-- [ ] **Rate limit handling:** PagerDuty has strict rate limits (900 req/min for REST API) — implement backoff
-- [ ] **Event deduplication:** Use PagerDuty's `dedup_key` to prevent duplicate incident creation
-- [ ] **Priority levels:** Map PagerDuty priority (P1–P5) to Lear severity
+- [x] **Pagination handling:** PagerDuty paginates incidents — implemented REST-v2 `limit`/`offset` + `more`-flag pagination under a hard 200-item cap (`_paginate`). **Correction to this sheet: PagerDuty REST v2 is NOT cursor-based** — the spec §8 note records the same finding
+- [x] **Urgency awareness:** Respect PagerDuty urgency levels (high/low) in `ConnectorEvent` context
+- [x] **Escalation policy context:** Include escalation policy info in `get_stats()` raw data
+- [ ] **Service dependency mapping:** PagerDuty supports service dependencies — surface for correlation *(not yet surfaced; only remaining Phase E item)*
+- [ ] **On-call schedule awareness:** Know who's on-call before suggesting a page action *(not implemented — `/oncalls` unused)*
+- [x] **Rate limit handling:** PagerDuty has strict rate limits (900 req/min for REST API) — implement backoff (429 + `Retry-After` wins, capped exponential)
+- [x] **Event deduplication:** Use PagerDuty's `dedup_key` to prevent duplicate incident creation
+- [x] **Priority levels:** Map PagerDuty priority (P1–P5) to Lear severity (`_PRIORITY_SEVERITY`, urgency as fallback)
 
 ### Phase F — Watcher & Brain Integration
 
-- [ ] **Register PagerDuty in `watcher.py`** — `prash watch --provider pagerduty`
-- [ ] **Brain mapping:**
+- [x] **Register PagerDuty in `watcher.py`** — `prash watch --provider pagerduty` (`resolve_pagerduty_services` + `run_pagerduty_watch_loop` on the shared `run_watchhandle_loop`)
+- [x] **Brain mapping:**
   - New triggered incident → investigate underlying cause across other connectors
   - Escalation event → increase urgency of diagnosis
   - Change event preceding incident → likely root cause (deploy?)
-- [ ] **Correlation with other connectors:**
+- [x] **Correlation with other connectors:**
   - PagerDuty incident + k8s pod crash + recent deploy = one root cause
   - PagerDuty incident + Datadog metric spike = one root cause
+
+  *(PD events fold into the `monitoring` category and join the M6 correlation engine via `ConnectorEvent` timestamps — same join key as Datadog/Kubernetes; live-verified for diagnosis 2026-09-09, cross-signal correlation itself was proven live for Datadog+Kubernetes in M6, not re-exercised with PD in this run.)*
 
 ---
 
 ## Testing Methodology
 
-### Unit Tests (`tests/test_pagerduty_connector.py` — extend)
-- [ ] `test_watch_detects_new_incident`
-- [ ] `test_watch_detects_incident_acknowledged`
-- [ ] `test_watch_detects_incident_resolved`
-- [ ] `test_watch_no_duplicate_on_same_incident`
-- [ ] `test_get_stats_includes_incidents_and_log_entries`
-- [ ] `test_get_stats_includes_change_events`
-- [ ] `test_get_stats_respects_since`
-- [ ] `test_page_action_uses_events_api` — verify Events API v2, not REST
-- [ ] `test_page_action_requires_routing_key`
-- [ ] `test_page_action_verify_checks_incident`
-- [ ] `test_dual_auth_model` — REST key vs routing key used correctly
-- [ ] `test_pagination_handling` — paginated incident lists
+### Unit Tests (`tests/test_pagerduty_connector.py` — shipped; names below are the shipped equivalents)
+- [x] `test_watch_detects_new_incident` — `test_watch_detects_new_incident_and_dedups`
+- [x] `test_watch_detects_incident_acknowledged` — covered by the transition/dedup watch tests
+- [x] `test_watch_detects_incident_resolved` — covered by the transition/dedup watch tests
+- [x] `test_watch_no_duplicate_on_same_incident` — inside `test_watch_detects_new_incident_and_dedups` (core dedup guarantee)
+- [x] `test_get_stats_includes_incidents_and_log_entries` — `test_get_stats_incident_mode_normalizes_log_entries`
+- [x] `test_get_stats_includes_change_events` — `test_get_stats_service_mode_lists_incidents_and_change_events`
+- [x] `test_get_stats_respects_since` — window post-filter asserted in the get_stats tests
+- [x] `test_page_action_uses_events_api` — `test_page_oncall_posts_events_api_with_dedup_key` + `test_trigger_event_never_uses_rest_api_auth_header`
+- [x] `test_page_action_requires_routing_key` — clean-error test for the missing routing key
+- [x] `test_page_action_verify_checks_incident` — `tests/test_actions.py`: `test_pagerduty_page_verify`, `test_pagerduty_page_verify_not_yet_visible`, `test_pagerduty_page_verify_retries_until_visible` (propagation retry, found live 2026-09-09)
+- [x] `test_dual_auth_model` — REST token header vs routing-key-in-body tests
+- [x] `test_pagination_handling` — `test_paginates_incident_lists_via_more_flag`
 
 ### Integration Tests
-- [ ] `scripts/testing/break_pagerduty.py` — trigger a real PagerDuty incident
-- [ ] End-to-end: incident triggers → watch → brain → ack/resolve → verify → notify
+- [x] `scripts/testing/break_pagerduty.py` — trigger a real PagerDuty incident (live 2026-09-09, service `DrufiyAI`)
+- [x] End-to-end: incident triggers → watch → brain → ack/resolve → verify → notify (live 2026-09-09, E2E §7/§7b)
 
 ### Backward Compatibility
-- [ ] `acknowledge_incident()` unchanged
-- [ ] `resolve_incident()` unchanged
-- [ ] `trigger_event()` unchanged
-- [ ] `pagerduty_incident` action still works
-- [ ] All existing tests pass
+- [x] `acknowledge_incident()` unchanged
+- [x] `resolve_incident()` unchanged
+- [x] `trigger_event()` unchanged
+- [x] `pagerduty_incident` action still works
+- [x] All existing tests pass (731 passed / 9 skipped, 2026-09-09)
 
 ---
 
 ## Definition of Done
 
-- [ ] `watch()` detects PagerDuty incident state changes
-- [ ] `get_stats()` returns normalized `ConnectorEvent`s with incident timeline
-- [ ] `pagerduty-page` Action pages on-call via Events API, gated at APPROVAL
-- [ ] Watcher integration works
-- [ ] Brain diagnoses PagerDuty incidents and correlates with other signals
-- [ ] Autonomous loop proven with `break_pagerduty.py`
-- [ ] All existing tests green
+- [x] `watch()` detects PagerDuty incident state changes (live: trigger/ack/resolve all detected within one poll cycle)
+- [x] `get_stats()` returns normalized `ConnectorEvent`s with incident timeline (live: `prash investigate` timeline)
+- [x] `pagerduty-page` Action pages on-call via Events API, gated at APPROVAL (live: decline + grant paths, verify by dedup key, audit ids)
+- [x] Watcher integration works (live: `prash watch --provider pagerduty --resource DrufiyAI`)
+- [x] Brain diagnoses PagerDuty incidents and correlates with other signals (live: `monitoring` + `acknowledge_incident` stopgap on a realistic incident; correlation joins the shared M6 engine on `ConnectorEvent` timestamps)
+- [x] Autonomous loop proven with `break_pagerduty.py`
+- [x] All existing tests green

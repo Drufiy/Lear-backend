@@ -187,6 +187,23 @@ def run_watch_loop(
     return state
 
 
+def _console_notify(console, text: str) -> None:
+    """Render a console line without dying on consoles whose codepage can't
+    encode it. Found live 2026-09-09: on a cp1252 legacy Windows console rich
+    buffers the text and raises UnicodeEncodeError only at flush time -- the
+    bad segment stays in the Console's buffer and kills the NEXT print too
+    (even a plain-ASCII one), which is how the whole watch loop died on its
+    first alert. So sanitize up front for the console's own encoding (the ⚠
+    marker degrades to '?') and never hand rich an unencodable character."""
+    if console is None:
+        return
+    try:
+        text.encode(getattr(console, "encoding", None) or "ascii")
+    except (UnicodeEncodeError, LookupError):
+        text = text.encode("ascii", "replace").decode("ascii")
+    console.print(text)
+
+
 def _notify_datadog(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
     """Same desktop+team+console path as _notify/_notify_terraform, for a
     Datadog monitor state transition. Recoveries are notified too (unlike a
@@ -208,7 +225,7 @@ def _notify_datadog(event: ConnectorEvent, console=None, creds: dict | None = No
         elif results:
             logger.info(f"team notification sent: {', '.join(results)}")
     if console is not None:
-        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+        _console_notify(console, f"[bold red]⚠ {title}[/bold red]\n  {message}")
 
 
 def resolve_datadog_monitors(spec: str | None, creds: dict | None = None) -> list[str]:
@@ -251,8 +268,10 @@ def run_watchhandle_loop(
     """Poll a list of WatchHandles each cycle; `notify_fn(event, console, creds)`
     is the provider-specific notification path. A poll error (rate limit
     exhausted, network down) warns and skips that handle for the cycle -- the
-    loop never dies on a bad API day. max_iterations is None for the real
-    `prash watch` command (runs until Ctrl+C); set to a small int in tests."""
+    loop never dies on a bad API day. A notification error (dead toast path, a
+    console whose codepage can't render the alert) warns and moves on for the
+    same reason. max_iterations is None for the real `prash watch` command
+    (runs until Ctrl+C); set to a small int in tests."""
     interval = interval or _interval_from_env()
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
@@ -263,9 +282,12 @@ def run_watchhandle_loop(
                 logger.warning(f"poll failed for {handle.target!r}: {exc}")
                 continue
             for event in events:
-                notify_fn(event, console, creds)
+                try:
+                    notify_fn(event, console, creds)
+                except Exception as exc:  # noqa: BLE001 — nor can a bad notification day
+                    logger.warning(f"notify failed for {handle.target!r}: {exc}")
             if console is not None and not events:
-                console.print(f"[dim]{handle.target}: poll OK, no state changes[/dim]")
+                _console_notify(console, f"[dim]{handle.target}: poll OK, no state changes[/dim]")
 
         iterations += 1
         if max_iterations is None or iterations < max_iterations:
@@ -325,8 +347,7 @@ def _notify_pagerduty(event: ConnectorEvent, console=None, creds: dict | None = 
             logger.warning(f"team notification failed: {', '.join(failed)}")
         elif results:
             logger.info(f"team notification sent: {', '.join(results)}")
-    if console is not None:
-        console.print(f"[bold red]⚠ {title}[/bold red]\n  {message}")
+    _console_notify(console, f"[bold red]⚠ {title}[/bold red]\n  {message}")
 
 
 def resolve_pagerduty_services(spec: str | None, creds: dict | None = None) -> list[str]:

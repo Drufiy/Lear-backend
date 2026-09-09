@@ -315,7 +315,7 @@ class PagerDutyConnector(Connector):
         """Walk a REST v2 list endpoint (limit/offset + `more` flag, NOT
         cursor-based) under a hard cap -- the rate-limit-friendly guard
         against a runaway list call. Understands the collection keys of the
-        four endpoints this connector actually paginates."""
+        five endpoints this connector actually paginates."""
         items: List[Dict[str, Any]] = []
         offset = 0
         limit = 100
@@ -325,7 +325,8 @@ class PagerDutyConnector(Connector):
             if not isinstance(resp, dict):
                 break
             batch = (resp.get("incidents") or resp.get("log_entries")
-                     or resp.get("services") or resp.get("change_events") or [])
+                     or resp.get("services") or resp.get("change_events")
+                     or resp.get("alerts") or [])
             items.extend(item for item in batch if isinstance(item, dict))
             if len(items) >= cap or not resp.get("more", False):
                 break
@@ -612,12 +613,20 @@ class PagerDutyConnector(Connector):
         """Find the incident an Events API trigger created, by dedup key --
         the Events API returns only the dedup_key (no incident id), so the
         pagerduty-page action's verify() scans the recent window for the
-        matching incident_key."""
+        matching incident. Found live 2026-09-09: current accounts return
+        `incident_key: null` on the incident object even for Events-v2
+        triggers, so narrow server-side via the incident_key query param
+        (the API still resolves it) and fall back to the incident's alert,
+        whose `alert_key` always carries the dedup key."""
         status_query = "&".join(f"statuses[]={s}" for s in _WATCH_STATUSES)
         path = (f"/incidents?{status_query}"
+                f"&incident_key={urllib.parse.quote(incident_key)}"
                 f"&since={urllib.parse.quote(since.isoformat())}&until={urllib.parse.quote(_utcnow().isoformat())}"
                 f"&sort_by=created_at:desc")
         for incident in self._paginate(path):
             if incident.get("incident_key") == incident_key:
+                return incident
+            alerts_path = f"/incidents/{incident['id']}/alerts"
+            if any(a.get("alert_key") == incident_key for a in self._paginate(alerts_path)):
                 return incident
         return None
