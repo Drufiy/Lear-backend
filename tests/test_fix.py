@@ -12,7 +12,7 @@ from argparse import Namespace
 import prash.cli as cli_mod
 import prash.fix as fix_mod
 from prash.brain.multi_diagnosis import MultiFailureResult
-from prash.brain.schemas import Diagnosis, FileChange
+from prash.brain.schemas import Diagnosis, FileChange, FileEdit
 from prash.connectors.kubernetes import PodStatus
 from prash.dispatch import Dispatcher
 
@@ -839,3 +839,148 @@ def test_diagnose_ci_run_no_failed_jobs_leaves_filter_unset(monkeypatch):
 
     asyncio.run(fix_mod.diagnose_ci_run(123, "acme/api", "tok"))
     assert captured["has_filter"] is False
+
+
+# ── edit grounding (dogfooding finding #4, 2026-09-09) ───────────────────────
+# Live case: red-CI diagnosis for a missing-dependency fix correctly named
+# .github/workflows/ci.yml as the file to edit but never fetched its real
+# content, so old_content was fabricated (plausible-looking CI YAML that
+# doesn't exist in the repo) and FileChange.apply() correctly refused. These
+# cover _ground_ci_diagnosis_edits repairing (or dropping) that edit instead
+# of silently shipping "diagnosed" with nothing that can actually apply.
+
+class _FakeGHFiles:
+    def __init__(self, creds=None, default_branch="main", files=None, get_repo_error=None):
+        self._default_branch = default_branch
+        self._files = files or {}
+        self._get_repo_error = get_repo_error
+
+    def failed_job_names(self, repo, run_id):
+        return set()
+
+    def get_repo(self, repo):
+        if self._get_repo_error:
+            raise self._get_repo_error
+        return {"default_branch": self._default_branch}
+
+    def get_file_content(self, repo, path, ref):
+        if path not in self._files:
+            raise ValueError(f"404: {path}")
+        return self._files[path]
+
+
+def _fc_with_edit(path, old_content, new_content, explanation="fix it"):
+    return FileChange(
+        path=path,
+        edits=[FileEdit(old_content=old_content, new_content=new_content)],
+        explanation=explanation,
+    )
+
+
+def test_ground_ci_diagnosis_edits_noop_when_no_files_changed(monkeypatch):
+    """No files_changed anywhere — short-circuits before touching GitHub at all."""
+    def boom(*a, **kw):
+        raise AssertionError("should not construct GitHubConnector when there's nothing to ground")
+
+    monkeypatch.setattr("prash.connectors.github.GitHubConnector", boom)
+    result = MultiFailureResult(diagnoses=[_diagnosis(files_changed=[])], job_names=["job"])
+    out = asyncio.run(fix_mod._ground_ci_diagnosis_edits(result, "acme/api", "tok"))
+    assert out is result
+
+
+def test_ground_ci_diagnosis_edits_leaves_already_applying_edit_untouched(monkeypatch):
+    """The edit's old_content genuinely matches the real file — no repair call, kept as-is."""
+    real = "line one\nline two\nline three\n"
+    fc = _fc_with_edit("f.py", "line two", "line TWO")
+
+    def repair_should_not_run(*a, **kw):
+        raise AssertionError("repair_edit should not be called for an edit that already applies")
+
+    monkeypatch.setattr(
+        "prash.connectors.github.GitHubConnector",
+        lambda creds=None: _FakeGHFiles(files={"f.py": real}),
+    )
+    monkeypatch.setattr("prash.brain.edit_repair.repair_edit", repair_should_not_run)
+
+    result = MultiFailureResult(diagnoses=[_diagnosis(files_changed=[fc])], job_names=["job"])
+    out = asyncio.run(fix_mod._ground_ci_diagnosis_edits(result, "acme/api", "tok"))
+    assert out.diagnoses[0].files_changed == [fc]
+
+
+def test_ground_ci_diagnosis_edits_repairs_broken_edit(monkeypatch):
+    """old_content is fabricated (doesn't match the real file) — repair_edit is
+    called with the real content, and its corrected FileChange replaces the
+    broken one in the diagnosis."""
+    real = "- name: Install dependencies\n  run: pip install -e .\n"
+    broken_fc = _fc_with_edit("ci.yml", "run: pytest", "run: pip install fastapi\n  run: pytest")
+    fixed_fc = _fc_with_edit("ci.yml", "run: pip install -e .", "run: pip install -e .\n  run: pip install fastapi")
+
+    async def fake_repair_edit(fc, real_content, fix_intent, run_id=None):
+        assert fc is broken_fc
+        assert real_content == real
+        return fixed_fc
+
+    monkeypatch.setattr(
+        "prash.connectors.github.GitHubConnector",
+        lambda creds=None: _FakeGHFiles(files={"ci.yml": real}),
+    )
+    monkeypatch.setattr("prash.brain.edit_repair.repair_edit", fake_repair_edit)
+
+    result = MultiFailureResult(diagnoses=[_diagnosis(files_changed=[broken_fc])], job_names=["job"])
+    out = asyncio.run(fix_mod._ground_ci_diagnosis_edits(result, "acme/api", "tok"))
+    assert out.diagnoses[0].files_changed == [fixed_fc]
+
+
+def test_ground_ci_diagnosis_edits_drops_file_when_repair_fails(monkeypatch):
+    """repair_edit gives up (still can't apply against real content) — the
+    file is dropped from files_changed, not left broken and not retried
+    forever."""
+    real = "actual content\n"
+    broken_fc = _fc_with_edit("ci.yml", "nonexistent line", "replacement")
+
+    async def fake_repair_edit(fc, real_content, fix_intent, run_id=None):
+        return None
+
+    monkeypatch.setattr(
+        "prash.connectors.github.GitHubConnector",
+        lambda creds=None: _FakeGHFiles(files={"ci.yml": real}),
+    )
+    monkeypatch.setattr("prash.brain.edit_repair.repair_edit", fake_repair_edit)
+
+    result = MultiFailureResult(diagnoses=[_diagnosis(files_changed=[broken_fc])], job_names=["job"])
+    out = asyncio.run(fix_mod._ground_ci_diagnosis_edits(result, "acme/api", "tok"))
+    assert out.diagnoses[0].files_changed == []
+
+
+def test_ground_ci_diagnosis_edits_new_content_files_skip_grounding(monkeypatch):
+    """A FileChange for a brand-new file (new_content, no edits) needs no
+    grounding — nothing to fetch or match against."""
+    fc = FileChange(path="new_file.py", new_content="print('hi')\n", explanation="new file")
+
+    def repair_should_not_run(*a, **kw):
+        raise AssertionError("repair_edit should not run for a new_content-only FileChange")
+
+    monkeypatch.setattr(
+        "prash.connectors.github.GitHubConnector",
+        lambda creds=None: _FakeGHFiles(),
+    )
+    monkeypatch.setattr("prash.brain.edit_repair.repair_edit", repair_should_not_run)
+
+    result = MultiFailureResult(diagnoses=[_diagnosis(files_changed=[fc])], job_names=["job"])
+    out = asyncio.run(fix_mod._ground_ci_diagnosis_edits(result, "acme/api", "tok"))
+    assert out.diagnoses[0].files_changed == [fc]
+
+
+def test_ground_ci_diagnosis_edits_leaves_diagnosis_alone_when_repo_lookup_fails(monkeypatch):
+    """Can't resolve the default branch at all (auth/network failure) —
+    return the diagnosis unmodified rather than crashing the whole run."""
+    fc = _fc_with_edit("ci.yml", "old", "new")
+
+    monkeypatch.setattr(
+        "prash.connectors.github.GitHubConnector",
+        lambda creds=None: _FakeGHFiles(get_repo_error=RuntimeError("401 Unauthorized")),
+    )
+
+    result = MultiFailureResult(diagnoses=[_diagnosis(files_changed=[fc])], job_names=["job"])
+    out = asyncio.run(fix_mod._ground_ci_diagnosis_edits(result, "acme/api", "tok"))
+    assert out.diagnoses[0].files_changed == [fc]

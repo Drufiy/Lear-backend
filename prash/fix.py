@@ -237,9 +237,71 @@ async def diagnose_ci_run(
         failed = GitHubConnector({"GITHUB_TOKEN": access_token}).failed_job_names(repo_full_name, run_id)
         if failed:
             diagnose_kwargs["failing_job_names"] = failed
-    return await _diagnose_ci_logs(
+    result = await _diagnose_ci_logs(
         logs, run_id, repo_full_name, workflow_name=f"github run {run_id}", **diagnose_kwargs
     )
+    return await _ground_ci_diagnosis_edits(result, repo_full_name, access_token)
+
+
+async def _ground_ci_diagnosis_edits(
+    result: MultiFailureResult, repo_full_name: str, access_token: str
+) -> MultiFailureResult:
+    """Repair (or drop) any files_changed edit that won't actually apply
+    against the real repo content — dogfooding finding #4 (see
+    prash/brain/edit_repair.py's module docstring). GitHub-only for now; the
+    GitLab CI path hasn't shown this failure shape yet and can get the same
+    treatment later if it does.
+
+    Runs after the sub-diagnoses are final, so it only touches edits that are
+    actually broken (fc.apply() already succeeding is left untouched) — a
+    pure repair pass, not a second-guessing one."""
+    if not any(d.files_changed for d in result.diagnoses):
+        return result
+
+    from .brain.edit_repair import repair_edit
+    from .connectors.github import GitHubConnector
+
+    gh = GitHubConnector({"GITHUB_TOKEN": access_token})
+    try:
+        default_branch = gh.get_repo(repo_full_name)["default_branch"]
+    except Exception as exc:  # noqa: BLE001 — can't ground without repo access; leave diagnoses as-is
+        logger.warning(f"Could not resolve default branch for edit grounding: {exc}")
+        return result
+
+    file_cache: dict[str, str | None] = {}
+    for i, diagnosis in enumerate(result.diagnoses):
+        if not diagnosis.files_changed:
+            continue
+        kept = []
+        changed = False
+        for fc in diagnosis.files_changed:
+            if not fc.edits:
+                kept.append(fc)  # new_content (new file) needs no grounding
+                continue
+            if fc.path not in file_cache:
+                try:
+                    file_cache[fc.path] = gh.get_file_content(repo_full_name, fc.path, default_branch)
+                except Exception as exc:  # noqa: BLE001 — file may genuinely not exist yet; can't ground, leave as-is
+                    logger.warning(f"Could not fetch {fc.path} for edit grounding: {exc}")
+                    file_cache[fc.path] = None
+            real_content = file_cache[fc.path]
+            if real_content is None:
+                kept.append(fc)
+                continue
+            try:
+                fc.apply(real_content)
+                kept.append(fc)  # already grounded, no repair needed
+            except ValueError:
+                changed = True
+                repaired = await repair_edit(fc, real_content, diagnosis.fix_description, run_id=str(result.job_names[i] if i < len(result.job_names) else ""))
+                if repaired is not None:
+                    kept.append(repaired)
+                else:
+                    job = result.job_names[i] if i < len(result.job_names) else "?"
+                    logger.warning(f"Dropping ungroundable edit for {fc.path} from diagnosis (job {job})")
+        if changed:
+            result.diagnoses[i] = diagnosis.model_copy(update={"files_changed": kept})
+    return result
 
 
 async def _diagnose_ci_logs(
