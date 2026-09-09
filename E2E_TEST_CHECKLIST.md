@@ -31,7 +31,7 @@ done on his side.
 | AWS | `AWS_ACCESS_KEY_ID/SECRET/REGION` | blank — skip unless needed tonight |
 | Kubernetes | `KUBECONFIG`/`KUBE_CONTEXT`/`KUBE_NAMESPACE` | ✓ set (kind-prash-dev) |
 | Datadog | `DATADOG_API_KEY` + `DATADOG_APP_KEY` | ✓ set + live-verified 2026-09-07 (note: this org's API key is denied Events v2 intake — connector falls back to v1, see §5b) |
-| Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` | ✓ set |
+| Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` | **not set** as of 2026-09-09 (checked both local .env stores — the earlier "✓ set" was stale; re-set from the Grafana Cloud org before running §6/§6b live) |
 | PagerDuty | `PAGERDUTY_API_KEY` + `FROM_EMAIL` + `ROUTING_KEY` | ✓ set |
 | Snyk | `SNYK_API_TOKEN` + `SNYK_ORG_ID` | ✓ set |
 | Gitleaks | binary on PATH | ✓ installed |
@@ -106,6 +106,25 @@ done on his side.
 - [ ] `prash investigate <alert> --provider grafana` — confirm state detected via Alertmanager cross-reference
 - [ ] `prash run grafana-silence-alert <alert> --provider grafana --minutes 10`
 - [ ] Confirm silence appears in Grafana's Alerting → Silences UI
+
+### 6b. Grafana autonomous loop (watch/get_stats, Phase 3 — landed 2026-09-09)
+
+<!-- Watch/get_stats shipped and verified 2026-09-09 as far as the missing
+     credentials allow (see §0: GRAFANA_URL / GRAFANA_API_KEY are NOT in
+     either local .env store right now — the real-cloud boxes below stay
+     unchecked until a token is re-set). Verified instead, 9/9 over real
+     HTTP sockets: a live-shaped probe speaking the exact WireMock payloads
+     (incl. a genuine forced 503 the retry path rode out), plus two new
+     WireMock integration tests in the grafana-mock-integration CI job. -->
+
+- [x] `prash watch --provider grafana` with no targets and no `GRAFANA_WATCH_RULES` — clean error naming the env var (unit-tested; CLI smoke-tested without creds: warns, skips, exits clean)
+- [ ] `python scripts/testing/break_grafana.py --heal` — confirm the fixture rule (`Prash E2E Test Alert`) settles before starting
+- [ ] `prash watch --provider grafana --resource "Prash E2E Test Alert"` — leave it running
+- [ ] `python scripts/testing/break_grafana.py` — within one poll cycle the watcher reports `alert_firing` (toast + console; dedup holds: no re-notify while unchanged)
+- [ ] `python scripts/testing/break_grafana.py --heal` — the recovery is notified too (`alert_recovered`; resolved alerts leave the Alertmanager list, so absence IS the recovery signal — timestamped at detection time)
+- [ ] Silencing the firing rule (Alerting → Silences UI or `grafana-silence-alert`) — watcher reports `alert_state_changed`, NOT a recovery (a silenced instance is still listed by the Alertmanager)
+- [ ] `prash investigate "Prash E2E Test Alert" --provider grafana` — output includes the `get_stats()` timeline (state-change annotations attributed by uid-tag/title, unattributed ones omitted, current firing anchored at startsAt), not just point-in-time state
+- [ ] Brain: `diagnose_grafana_alert('Prash E2E Test Alert')` (REPL/chat route) yields category `monitoring` with `silence_alert` as a labeled stopgap, files_changed empty (same restraint expected as the PagerDuty brain check: fixture-titled inputs may correctly decline a recommendation)
 
 ## 7. PagerDuty (read + ack/resolve)
 

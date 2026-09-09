@@ -30,6 +30,7 @@ from .brain.diagnosis_agent import (
     format_aws_context,
     format_gcp_context,
     format_pagerduty_context,
+    format_grafana_context,
 )
 from .brain.gitlab_log_fetcher import fetch_pipeline_logs
 from .brain.log_fetcher import fetch_workflow_logs
@@ -42,6 +43,7 @@ from .connectors.gcp import GCPConnector
 from .connectors.base import ConnectorState
 from .connectors.datadog import DatadogConnector
 from .connectors.pagerduty import PagerDutyConnector
+from .connectors.grafana import GrafanaConnector
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ _AUTO_ACTIONS = {
     "edit_configmap": "edit-configmap",
     "mute_monitor": "datadog-mute-monitor",
     "acknowledge_incident": "pagerduty-acknowledge",
+    "silence_alert": "grafana-silence-alert",
 }
 
 
@@ -212,6 +215,32 @@ async def diagnose_pagerduty_incident(service: str, creds: dict | None = None) -
         repo_full_name=f"pagerduty/{service}",
         commit_message="(no commit — PagerDuty incident diagnosis, not a CI run)",
         workflow_name="pagerduty",
+    )
+
+
+async def diagnose_grafana_alert(rule: str, creds: dict | None = None) -> Diagnosis:
+    """Gather the Grafana connector's poll_state + get_stats for an alert
+    rule, feed them to Track D's brain, and return the Diagnosis (connector
+    rewrite, Phase 3 rollout — Grafana). Same seam shape as the
+    datadog/pagerduty formatters: connector reads -> format_grafana_context
+    -> diagnose_failure, with silence_alert mapping through _AUTO_ACTIONS to
+    the grafana-silence-alert action at dispatch time.
+
+    get_stats() is swallow-to-[] by contract, so an empty event window is
+    still a valid diagnosis input (the ALERT RULE STATE block carries the
+    signal); an unresolvable rule is not, so that raises FixTargetError.
+    """
+    connector = GrafanaConnector(creds or {})
+    state = connector.poll_state(rule)
+    if state.state is ConnectorState.NOT_FOUND:
+        raise FixTargetError(f"alert rule {rule!r} not found")
+    events = connector.get_stats(rule, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    context = format_grafana_context(state, events)
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=f"grafana/{rule}",
+        commit_message="(no commit — Grafana alert-rule diagnosis, not a CI run)",
+        workflow_name="grafana",
     )
 
 

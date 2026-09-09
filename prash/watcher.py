@@ -27,6 +27,7 @@ from prash.connectors.terraform import TerraformConnector
 from prash.connectors.aws import AWSConnector
 from prash.connectors.datadog import DatadogConnector, DatadogError
 from prash.connectors.pagerduty import PagerDutyConnector, PagerDutyError
+from prash.connectors.grafana import GrafanaConnector, GrafanaError
 from prash.connectors.github import GitHubConnector, GitHubError
 from prash.connectors.gitlab import GitLabConnector, GitLabError
 from prash.connectors.base import ConnectorEvent, ConnectorState
@@ -399,6 +400,81 @@ def run_pagerduty_watch_loop(
         return
 
     run_watchhandle_loop(handles, _notify_pagerduty, interval=interval, console=console,
+                          max_iterations=max_iterations, creds=creds)
+
+
+def _notify_grafana(event: ConnectorEvent, console=None, creds: dict | None = None) -> None:
+    """Same desktop+team+console path as _notify_pagerduty, for a Grafana
+    alert-rule transition. Recoveries are notified too -- a firing rule
+    going quiet is the "stand down" signal the team is waiting for."""
+    raw = event.get("raw") or {}
+    rule = raw.get("rule_title") or event.get("summary", "")
+    title = f"Prash: {event['summary']}"
+    message = (
+        f"Grafana {rule}: {event['event_type']}. "
+        f"Run `prash investigate {rule} --provider grafana` to diagnose."
+    )
+    if not _send_desktop_notification(title, message):
+        logger.warning("Desktop notification failed on every available path — console only")
+    if creds:
+        results = send_team_notifications(creds, title, message)
+        failed = [channel for channel, ok in results.items() if not ok]
+        if failed:
+            logger.warning(f"team notification failed: {', '.join(failed)}")
+        elif results:
+            logger.info(f"team notification sent: {', '.join(results)}")
+    _console_notify(console, f"[bold red]⚠ {title}[/bold red]\n  {message}")
+
+
+def resolve_grafana_rules(spec: str | None, creds: dict | None = None) -> list[str]:
+    """Turn a --resource spec (or the GRAFANA_WATCH_RULES env value) into
+    watch targets. Comma-separated rule uids/titles, or the literal `all`
+    to watch every rule in the org (capped at 100 -- polling the whole org
+    fires on every firing anywhere, which must always be explicit)."""
+    value = (spec or os.environ.get("GRAFANA_WATCH_RULES") or "").strip()
+    if not value:
+        raise ValueError(
+            "no Grafana watch targets: pass --resource rule1,rule2 "
+            "or set GRAFANA_WATCH_RULES (comma-separated uids/titles, or `all`)"
+        )
+    if value.lower() == "all":
+        connector = GrafanaConnector(creds or {})
+        rules = connector.list_rules(limit=100)
+        return [rule["title"] or str(rule["uid"]) for rule in rules]
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def run_grafana_watch_loop(
+    rules: list[str],
+    interval: int | None = None,
+    console=None,
+    max_iterations: int | None = None,
+    creds: dict | None = None,
+) -> None:
+    """Poll Grafana alert rules via each connector.watch() handle
+    (CONNECTOR_REWRITE_SPEC §4a/§4d) -- a thin wrapper over the shared
+    WatchHandle loop. Every transition a handle reports (new firing,
+    silence/re-fire, recovery) fires the same desktop+team notification
+    path."""
+    interval = interval or _interval_from_env()
+    connector = GrafanaConnector(creds or {})
+    if not connector.authenticate():
+        logger.warning("Grafana credentials failed validation — watch will likely poll nothing")
+
+    handles = []
+    for rule in rules:
+        try:
+            handles.append(connector.watch(rule, interval=interval))
+        except GrafanaError as exc:
+            logger.warning(f"could not watch rule {rule!r}: {exc}")
+            if console is not None:
+                console.print(f"[yellow]skipping rule {rule}: {exc}[/yellow]")
+    if not handles:
+        if console is not None:
+            console.print("[yellow]no Grafana alert rules to watch[/yellow]")
+        return
+
+    run_watchhandle_loop(handles, _notify_grafana, interval=interval, console=console,
                           max_iterations=max_iterations, creds=creds)
 
 

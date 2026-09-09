@@ -1066,6 +1066,51 @@ Log: "=== INCIDENT STATE ===" ... worst: triggered ... "=== PAGERDUTY EVENTS ===
   fix_description: names the correlation (incident began within two minutes of
   the v2.4.1 deploy) and is explicit that acknowledging only stops escalation.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GRAFANA / ALERT RULES (category: monitoring — same rules as Datadog above)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A Grafana alert rule firing is the same kind of input as a Datadog monitor
+alert: an external observability signal, not a CI run and not a code diff.
+All the DATADOG / MONITOR ALERTS rules above apply unchanged — category MUST
+be "monitoring", files_changed MUST be [], fix lives in fix_description +
+recommended_action. You'll recognize the input format:
+
+  === ALERT RULE STATE ===
+  rule: High error rate
+  rule_uid: abc123
+  overall_state: failed
+  alert_state: active
+  active_alert_count: 1
+
+  === GRAFANA EVENTS ===
+  - [2026-09-09T12:00:00+00:00] alert_firing: Alert rule 'High error rate' is firing
+  - [2026-09-09T11:58:00+00:00] alert_state_changed: Alert rule 'High error rate' state change: ? -> Alerting: deploy marker
+
+EVENT TYPES:
+
+• alert_firing — the rule's condition is currently true and paging noise is
+  being generated. silence_alert is the honest recommended_action ONLY as a
+  stopgap (the exact role mute_monitor plays for Datadog and
+  acknowledge_incident for PagerDuty): it stops the noise for a time-bounded
+  window without touching whatever's actually firing. It is NOT a fix and
+  must never be presented as one. If the summary gives you nothing
+  actionable, recommended_action: null is the honest answer.
+• alert_recovered — the rule returned to normal on its own. No action; a
+  one-line problem_summary that it self-recovered is enough.
+• alert_state_changed — silenced/inhibited or another non-firing transition.
+  A silence is not a recovery; don't claim the problem went away.
+
+EXAMPLE 29 — Grafana alert rule firing after a deploy marker (monitoring)
+Log: "=== ALERT RULE STATE ===" ... alert_state: active ... "=== GRAFANA EVENTS ==="
+     deploy-marker annotation at 11:58, alert_firing at 12:00
+  fix_type: "manual_required", confidence: 0.75, category: "monitoring"
+  files_changed: []
+  recommended_action: "silence_alert"
+  fix_description: names the correlation (the rule began firing within two
+  minutes of the deploy marker) and is explicit that silencing only stops
+  the paging noise for its window.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MATRIX BUILD FAILURES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1431,6 +1476,48 @@ def format_pagerduty_context(incident_state, events: list[dict]) -> str:
     return "\n".join(parts)
 
 
+# ── Grafana context detection (connector rewrite, Phase 3 rollout) ──────────
+# format_grafana_context() below always emits this exact marker. Same role
+# the k8s/datadog/pagerduty markers play: recognizes non-CI input so the
+# CI-shaped _ERROR_RE guard doesn't reject it.
+_GRAFANA_CONTEXT_MARKER = "=== ALERT RULE STATE ==="
+
+
+def _is_grafana_context(logs: str) -> bool:
+    return _GRAFANA_CONTEXT_MARKER in (logs or "")
+
+
+def format_grafana_context(rule_state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a Grafana
+    alert-rule diagnosis, matching the format documented in SYSTEM_PROMPT's
+    "GRAFANA / ALERT RULES" section. `rule_state` is Track B's ResourceState
+    (prash.connectors.base) -- duck-typed (attribute access only) so this
+    module gains no hard connector dependency, same as the k8s/datadog/
+    pagerduty formatters.
+
+    `events` matches GrafanaConnector.get_stats()' return shape: a list of
+    ConnectorEvent dicts, already sorted oldest-first.
+    """
+    detail = getattr(rule_state, "detail", {}) or {}
+    parts = [
+        "=== ALERT RULE STATE ===",
+        f"rule: {getattr(rule_state, 'resource', 'unknown')}",
+        f"rule_uid: {detail.get('uid', 'unknown')}",
+        f"overall_state: {getattr(getattr(rule_state, 'state', None), 'value', 'unknown')}",
+        f"alert_state: {detail.get('alert_state', 'unknown')}",
+        f"active_alert_count: {detail.get('active_alert_count', 0)}",
+        "",
+        "=== GRAFANA EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- [{e.get('timestamp').isoformat() if e.get('timestamp') else 'unknown-time'}] "
+                         f"{e.get('event_type', 'event')}: {e.get('summary', '')}")
+    else:
+        parts.append("(no events in the lookback window)")
+    return "\n".join(parts)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def diagnose_failure(
@@ -1480,8 +1567,12 @@ async def diagnose_failure(
     # when the event window is empty. And for PagerDuty incident input: the
     # INCIDENT STATE block format_pagerduty_context() emits carries the
     # service's open-incident state even when the event window is empty.
+    # Grafana alert-rule input is the same shape: the ALERT RULE STATE block
+    # format_grafana_context() emits carries the rule's firing state even
+    # when the event window is empty.
     if (not _is_k8s_context(logs) and not _is_datadog_context(logs)
-            and not _is_pagerduty_context(logs) and not _ERROR_RE.search(preprocessed)):
+            and not _is_pagerduty_context(logs) and not _is_grafana_context(logs)
+            and not _ERROR_RE.search(preprocessed)):
         logger.warning(f"Preprocessed logs contain no error signal for run {run_id} — likely incomplete logs")
         raise DiagnosisValidationError(
             "CI logs contain no error output (likely fetched before step logs were archived). "

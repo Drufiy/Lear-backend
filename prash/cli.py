@@ -895,6 +895,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         resolve_datadog_monitors,
         run_pagerduty_watch_loop,
         resolve_pagerduty_services,
+        run_grafana_watch_loop,
+        resolve_grafana_rules,
         run_github_watch_loop,
         resolve_github_repos,
         run_gitlab_watch_loop,
@@ -1007,6 +1009,30 @@ def cmd_watch(args: argparse.Namespace) -> int:
             console.print(f"[dim]incident pings will also be sent to: {', '.join(team_channels)}[/dim]")
         try:
             run_pagerduty_watch_loop(services, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "grafana":
+        # Watch targets: --resource (comma-separated rule uids/titles, or
+        # `all`), falling back to GRAFANA_WATCH_RULES from .env/env.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            rules = resolve_grafana_rules(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve Grafana alert rules: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching Grafana alert rule(s): {', '.join(rules)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]alert pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_grafana_watch_loop(rules, interval=args.interval, console=console, creds=creds)
         except Exception as exc:
             console.print(f"[red]watch stopped: {exc}[/red]")
             return 2
@@ -1289,11 +1315,11 @@ def build_parser() -> argparse.ArgumentParser:
     circuit.add_argument("resource", nargs="?", help="reset only this resource (reset only)")
     circuit.set_defaults(func=cmd_circuit)
 
-    watch = sub.add_parser("watch", help="poll kubernetes pods / terraform state / datadog monitors / pagerduty incidents, notify on state changes", formatter_class=formatter_class)
+    watch = sub.add_parser("watch", help="poll kubernetes pods / terraform state / datadog monitors / pagerduty incidents / grafana alert rules, notify on state changes", formatter_class=formatter_class)
     watch.add_argument("--namespace", default=None, help="default: KUBE_NAMESPACE from .env, or 'default'")
     watch.add_argument("--interval", type=int, default=None, help="poll interval in seconds (default: PRASH_WATCH_INTERVAL_SECONDS or 30)")
-    watch.add_argument("--provider", default="kubernetes", help="provider to poll: kubernetes (default), terraform, datadog, or pagerduty")
-    watch.add_argument("--resource", default=".", help="resource to poll (terraform: state dir; datadog: monitors; pagerduty: services — comma-separated names/ids or 'all', default their *_WATCH_* env var)")
+    watch.add_argument("--provider", default="kubernetes", help="provider to poll: kubernetes (default), terraform, datadog, pagerduty, or grafana")
+    watch.add_argument("--resource", default=".", help="resource to poll (terraform: state dir; datadog: monitors; pagerduty: services; grafana: alert rules — comma-separated names/ids or 'all', default their *_WATCH_* env var)")
     watch.set_defaults(func=cmd_watch)
 
     notify = sub.add_parser("notify", help="send a message to every configured team channel (Slack/Discord webhooks)", formatter_class=formatter_class)

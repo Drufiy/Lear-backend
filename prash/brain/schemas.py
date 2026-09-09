@@ -34,6 +34,8 @@ _CATEGORY_ALIASES = {
     "monitor_alert": "monitoring", "observability": "monitoring",
     "pagerduty": "monitoring", "pd": "monitoring", "incident": "monitoring",
     "incident_page": "monitoring",
+    "grafana": "monitoring", "alert_firing": "monitoring",
+    "alert_recovered": "monitoring", "alert_state_changed": "monitoring",
 }
 
 

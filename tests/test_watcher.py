@@ -18,6 +18,7 @@ from prash.watcher import (
     _toast_clamp,
     detect_changes,
     run_datadog_watch_loop,
+    run_grafana_watch_loop,
     run_pagerduty_watch_loop,
     run_watch_loop,
 )
@@ -712,6 +713,185 @@ def test_notify_pagerduty_survives_console_that_cannot_encode_marker(monkeypatch
     assert "?" in console.printed[0] and "500s spiking" in console.printed[0]
 
     console.print("DrufiyAI: poll OK, no state changes")  # next print still works
+    assert len(console.printed) == 2
+
+
+# ── grafana watch loop (connector rewrite, Phase 3 rollout) ──────────────────
+
+def _gf_event(event_type="alert_firing",
+              summary="Alert rule 'Prash E2E Test Alert' is firing"):
+    from datetime import datetime, timezone
+
+    return ConnectorEvent(
+        timestamp=datetime.now(timezone.utc),
+        connector="grafana",
+        event_type=event_type,
+        summary=summary,
+        raw={"rule_uid": "afw5nq4yyq0owb", "rule_title": "Prash E2E Test Alert", "state": "active"},
+    )
+
+
+class _FakeGfHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.target = "Prash E2E Test Alert"
+        self.rule_title = "Prash E2E Test Alert"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeGfConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, rule, interval=30):
+        self.watched.append(rule)
+        return self._handle
+
+
+def test_grafana_watch_loop_notifies_on_transition(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGfHandle(script=[[_gf_event()], []])
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _FakeGfConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_grafana", lambda event, console=None, creds=None: notified.append(event))
+
+    run_grafana_watch_loop(["Prash E2E Test Alert"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1
+    assert notified[0]["event_type"] == "alert_firing"
+
+
+def test_grafana_watch_loop_survives_poll_errors(monkeypatch):
+    """A rate-limited or unreachable Grafana API (or a hibernating Grafana
+    Cloud instance's 503) must warn and skip the cycle -- the loop never
+    dies on a bad API day."""
+    import prash.watcher as watcher_mod
+    from prash.connectors.grafana import GrafanaError
+
+    handle = _FakeGfHandle(script=[GrafanaError("Grafana API 503: instance is loading"), [_gf_event()]])
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _FakeGfConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_grafana", lambda event, console=None, creds=None: notified.append(event))
+
+    run_grafana_watch_loop(["Prash E2E Test Alert"], interval=0, max_iterations=2)
+    assert len(notified) == 1
+
+
+def test_grafana_watch_loop_skips_unwatchable_rule(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.grafana import GrafanaError
+
+    class _BrokenWatchConnector(_FakeGfConnector):
+        def watch(self, rule, interval=30):
+            raise GrafanaError(f"alert rule not found: {rule}")
+
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _BrokenWatchConnector(None))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_grafana_watch_loop(["ghost"], interval=0, max_iterations=1)  # must not raise
+
+
+def test_grafana_watch_loop_warns_on_failed_auth(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGfHandle(script=[[]])
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _FakeGfConnector(handle, auth_ok=False))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_grafana_watch_loop(["Prash E2E Test Alert"], interval=0, max_iterations=1)  # warns, still watches
+
+
+def test_resolve_grafana_rules_splits_comma_list():
+    from prash.watcher import resolve_grafana_rules
+
+    assert resolve_grafana_rules("rule-a, rule-b") == ["rule-a", "rule-b"]
+
+
+def test_resolve_grafana_rules_requires_targets(monkeypatch):
+    from prash.watcher import resolve_grafana_rules
+
+    monkeypatch.delenv("GRAFANA_WATCH_RULES", raising=False)
+    try:
+        resolve_grafana_rules(None)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "GRAFANA_WATCH_RULES" in str(exc)
+
+
+def test_resolve_grafana_rules_env_fallback(monkeypatch):
+    from prash.watcher import resolve_grafana_rules
+
+    monkeypatch.setenv("GRAFANA_WATCH_RULES", "Prash E2E Test Alert")
+    assert resolve_grafana_rules(None) == ["Prash E2E Test Alert"]
+
+
+def test_resolve_grafana_rules_all_expands_via_connector(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    class _ListConnector:
+        def list_rules(self, limit=100):
+            return [{"uid": "afw5nq4yyq0owb", "title": "Prash E2E Test Alert"}, {"uid": "uid2", "title": ""}]
+
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _ListConnector())
+    assert watcher_mod.resolve_grafana_rules("all") == ["Prash E2E Test Alert", "uid2"]
+
+
+def test_notify_grafana_pushes_team_notification_when_creds_given(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify_grafana(_gf_event(), creds=creds)
+
+    assert len(sent) == 1
+    assert "Prash E2E Test Alert" in sent[0][0]
+    assert "prash investigate Prash E2E Test Alert --provider grafana" in sent[0][1]
+
+
+def test_notify_grafana_survives_console_that_cannot_encode_marker(monkeypatch):
+    """Same cp1252 poison found live on the PagerDuty path 2026-09-09: the
+    ⚠ marker must be sanitized up front, never handed to rich raw."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+
+    class _Cp1252Console:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.printed = []
+
+        def print(self, text):
+            text.encode("cp1252")  # raises UnicodeEncodeError on '⚠'
+            self.printed.append(text)
+
+    console = _Cp1252Console()
+    watcher_mod._notify_grafana(_gf_event(), console=console)  # must not raise
+
+    assert len(console.printed) == 1
+    assert "⚠" not in console.printed[0]
+    assert "?" in console.printed[0] and "Prash E2E Test Alert" in console.printed[0]
+
+    console.print("poll OK, no state changes")  # next print still works
     assert len(console.printed) == 2
 
 
