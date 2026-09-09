@@ -32,31 +32,28 @@ from .schemas import FileChange, FileEdit
 logger = logging.getLogger(__name__)
 
 _REPAIR_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "propose_corrected_edits",
-        "description": "Corrected search/replace edits against the file's real, current content.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "edits": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "old_content": {
-                                "type": "string",
-                                "description": "Exact text to find, copied VERBATIM from the real file content shown above — must appear exactly once.",
-                            },
-                            "new_content": {"type": "string", "description": "Replacement text."},
+    "name": "propose_corrected_edits",
+    "description": "Corrected search/replace edits against the file's real, current content.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_content": {
+                            "type": "string",
+                            "description": "Exact text to find, copied VERBATIM from the real file content shown above — must appear exactly once.",
                         },
-                        "required": ["old_content", "new_content"],
+                        "new_content": {"type": "string", "description": "Replacement text."},
                     },
+                    "required": ["old_content", "new_content"],
                 },
             },
-            "required": ["edits"],
         },
+        "required": ["edits"],
     },
 }
 

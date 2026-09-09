@@ -60,6 +60,21 @@ def test_repair_edit_returns_none_when_call_with_tool_raises(monkeypatch):
     assert result is None
 
 
+def test_repair_tool_schema_is_flat_not_openai_wrapped():
+    """Real bug caught live (2026-09-09): call_with_tool's callees read
+    tool_schema["name"] directly (kimi_client.py's tool_choice construction) —
+    wrapping it OpenAI-Chat-Completions-style as {"type": "function",
+    "function": {...}} makes that a KeyError, and DeepSeek's API separately
+    rejects the resulting double-wrapped tools[0] with 'missing field name'.
+    The schema must be the flat {name, description, parameters} shape, same
+    as DIAGNOSIS_TOOL in diagnosis_agent.py."""
+    schema = edit_repair_mod._REPAIR_TOOL_SCHEMA
+    assert schema["name"] == "propose_corrected_edits"
+    assert "parameters" in schema
+    assert "type" not in schema  # would indicate the wrong (OpenAI-tools-array) wrapping
+    assert "function" not in schema
+
+
 def test_repair_edit_returns_none_on_malformed_tool_response(monkeypatch):
     async def fake_call_with_tool(**kwargs):
         return {"edits": [{"old_content": ""}]}  # missing new_content, empty old_content
