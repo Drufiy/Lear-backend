@@ -3,7 +3,8 @@ import { useWatcher } from '../hooks/useWatcher';
 import { useWebSocket } from '../hooks/useWebSocket';
 
 export const WatcherPanel: React.FC = () => {
-    const { isRunning, status, startWatcher, stopWatcher } = useWatcher();
+    const { isRunning, status, startWatcher, stopWatcher } = useWatcher(); // This is correct!
+
     const { isConnected } = useWebSocket();
 
     return (
