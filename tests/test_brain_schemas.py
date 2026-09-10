@@ -37,6 +37,17 @@ def test_recommended_action_accepts_known_actions():
     assert d.recommended_action == "restart_pod"
 
 
+def test_recommended_action_accepts_silence_alert():
+    """Regression: the Grafana prompt (diagnosis_agent.py) instructs the model
+    to emit recommended_action='silence_alert' as the paging stopgap for a
+    firing alert rule, and fix.py's _AUTO_ACTIONS maps it to
+    grafana-silence-alert -- but the Literal here originally omitted it, so
+    the intended common case raised ValidationError and crashed the whole
+    diagnosis. It must be an accepted value."""
+    d = Diagnosis(**_base(recommended_action="silence_alert", category="monitoring"))
+    assert d.recommended_action == "silence_alert"
+
+
 def test_recommended_action_defaults_to_none():
     d = Diagnosis(**_base())
     assert d.recommended_action is None

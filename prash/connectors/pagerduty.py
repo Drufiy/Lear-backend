@@ -57,6 +57,7 @@ per-endpoint: 10s for single-document reads/writes, 30s for list queries.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import time
@@ -67,6 +68,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
+
+logger = logging.getLogger(__name__)
 
 API_URL = "https://api.pagerduty.com"
 EVENTS_URL = "https://events.pagerduty.com"
@@ -626,7 +629,18 @@ class PagerDutyConnector(Connector):
         for incident in self._paginate(path):
             if incident.get("incident_key") == incident_key:
                 return incident
+            # Per-incident fallback (incident_key is null on the object for
+            # Events-v2 triggers, so this branch is the normal path, not an
+            # edge case). Guard it: a single incident's /alerts fetch failing
+            # (404 on a purged/merged incident, a permission-scoped 403, or an
+            # exhausted-retry 5xx) must not abort the whole scan and skip a
+            # genuine match later in the window -- log and move on instead.
             alerts_path = f"/incidents/{incident['id']}/alerts"
-            if any(a.get("alert_key") == incident_key for a in self._paginate(alerts_path)):
+            try:
+                alerts = self._paginate(alerts_path)
+            except PagerDutyError as exc:
+                logger.warning(f"could not fetch alerts for incident {incident['id']}: {exc}")
+                continue
+            if any(a.get("alert_key") == incident_key for a in alerts):
                 return incident
         return None
