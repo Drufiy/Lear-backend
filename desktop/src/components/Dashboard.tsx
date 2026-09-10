@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ModesUI from './ModesUI';
 import PrashWindow from './PrashWindow';
 import Chatbot from './Chatbot';
-import { Cloud, GitBranch, Globe, Database, Activity, Search, Server, HardDrive, ArrowRight, X } from 'lucide-react';
+import { WatcherPanel } from './WatcherPanel';
+import { Cloud, GitBranch, Globe, Database, Activity, Search, Server, HardDrive, ArrowRight, X, Loader2 } from 'lucide-react';
 
 const Speedometer = ({ value }: { value: number }) => {
   const rotation = -90 + (value / 100) * 180;
@@ -172,6 +173,7 @@ export default function Dashboard() {
 
         {!chatOpen && (
           <div className="space-y-8">
+            <WatcherPanel />
             <ModesUI />
           </div>
         )}
