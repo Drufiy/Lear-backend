@@ -1,5 +1,8 @@
 import { useState } from 'react';
 
+/**
+ * Custom hook to manage the watcher state.
+ */
 export const useWatcher = () => {
     const [isRunning, setIsRunning] = useState(false);
     const [status, setStatus] = useState('Idle');

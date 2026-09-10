@@ -4,7 +4,7 @@ import ModesUI from './ModesUI';
 import PrashWindow from './PrashWindow';
 import Chatbot from './Chatbot';
 import { WatcherPanel } from './WatcherPanel';
-import { Cloud, GitBranch, Globe, Database, Activity, Search, Server, HardDrive, ArrowRight, X, Loader2 } from 'lucide-react';
+import { Cloud, GitBranch, Globe, Database, Activity, HardDrive, ArrowRight, Loader2 } from 'lucide-react';
 
 const Speedometer = ({ value }: { value: number }) => {
   const rotation = -90 + (value / 100) * 180;
