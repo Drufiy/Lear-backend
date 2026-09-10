@@ -15,7 +15,11 @@ from prash.connectors.kubernetes import PodStatus
 from prash.watcher import (
     _applescript_escape,
     _send_desktop_notification,
+    _toast_clamp,
     detect_changes,
+    run_datadog_watch_loop,
+    run_grafana_watch_loop,
+    run_pagerduty_watch_loop,
     run_watch_loop,
 )
 
@@ -264,3 +268,857 @@ def test_watch_loop_passes_creds_through_to_notify(monkeypatch):
     creds = {"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/x"}
     run_watch_loop("production", interval=0, max_iterations=1, creds=creds)
     assert seen["creds"] == creds
+
+
+# ── M5: the unified interface-driven multi-connector loop ───────────────────
+
+import datetime as _dt
+
+from prash.connectors.base import ConnectorState, ResourceState
+from prash.watcher import run_connector_watch_loop
+
+
+class _FakeConn:
+    """Minimal Connector stand-in: canned poll_state + get_stats."""
+
+    def __init__(self, state="healthy", events=None, stats_error=None):
+        self._state = state
+        self._events = events or []
+        self._stats_error = stats_error
+        self.stats_calls = 0
+
+    def poll_state(self, target):
+        return ResourceState(target, ConnectorState(self._state), {})
+
+    def get_stats(self, target, since=None):
+        self.stats_calls += 1
+        if self._stats_error is not None:
+            raise self._stats_error
+        return list(self._events)
+
+
+def _event(event_type="cpu_spike", summary="CPU high", ts=None):
+    return {
+        "timestamp": ts or _dt.datetime(2026, 9, 6, 12, 0, tzinfo=_dt.timezone.utc),
+        "connector": "aws",
+        "event_type": event_type,
+        "summary": summary,
+        "raw": {},
+    }
+
+
+def _capture_notifications(monkeypatch):
+    fired = []
+    monkeypatch.setattr(
+        "prash.watcher._notify_event",
+        lambda provider, target, event_type, summary, console=None, creds=None: fired.append(
+            (provider, target, event_type)
+        ),
+    )
+    monkeypatch.setattr("prash.watcher.time", MagicMock())  # no real sleeping in tests
+    return fired
+
+
+def test_connector_loop_notifies_on_new_event(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    conn = _FakeConn(state="healthy", events=[_event("cpu_spike")])
+    run_connector_watch_loop([(conn, "i-1", "aws")], interval=0, max_iterations=1)
+    assert ("aws", "i-1", "cpu_spike") in fired
+
+
+def test_connector_loop_dedups_same_event_across_cycles(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    conn = _FakeConn(state="healthy", events=[_event("cpu_spike")])
+    run_connector_watch_loop([(conn, "i-1", "aws")], interval=0, max_iterations=3)
+    # same event_type+timestamp every cycle -> notified exactly once
+    assert fired.count(("aws", "i-1", "cpu_spike")) == 1
+    assert conn.stats_calls == 3  # but it did poll all three cycles
+
+
+def test_connector_loop_notifies_on_degraded_state(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    conn = _FakeConn(state="failed", events=[])
+    run_connector_watch_loop([(conn, "i-1", "aws")], interval=0, max_iterations=2)
+    # failed state notified once (deduped), no get_stats events
+    assert fired == [("aws", "i-1", "failed")]
+
+
+def test_connector_loop_reads_all_watches_in_one_cycle(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+    aws = _FakeConn(state="healthy", events=[_event("cpu_spike", "aws cpu")])
+    gcp = _FakeConn(state="healthy", events=[_event("disk_full", "gcp disk")])
+    run_connector_watch_loop(
+        [(aws, "i-1", "aws"), (gcp, "vm-2", "gcp")], interval=0, max_iterations=1
+    )
+    assert ("aws", "i-1", "cpu_spike") in fired
+    assert ("gcp", "vm-2", "disk_full") in fired
+    assert aws.stats_calls == 1 and gcp.stats_calls == 1  # both read, parallel fan-out
+
+
+def test_connector_loop_survives_a_flaky_connector(monkeypatch):
+    _capture_notifications(monkeypatch)
+    boom = _FakeConn(state="healthy", stats_error=ValueError("api blew up"))
+    ok = _FakeConn(state="healthy", events=[_event("cpu_spike")])
+    # must not raise even though one connector's get_stats throws
+    seen = run_connector_watch_loop(
+        [(boom, "i-1", "aws"), (ok, "vm-2", "gcp")], interval=0, max_iterations=1
+    )
+    assert ("gcp", "vm-2") in seen  # healthy one still tracked
+
+
+def test_connector_loop_skips_connectors_without_get_stats(monkeypatch):
+    fired = _capture_notifications(monkeypatch)
+
+    class _NoStats(_FakeConn):
+        def get_stats(self, target, since=None):
+            raise NotImplementedError
+
+    conn = _NoStats(state="failed")
+    # NotImplementedError is swallowed; poll_state-based notify still fires
+    run_connector_watch_loop([(conn, "x", "azure")], interval=0, max_iterations=1)
+    assert ("azure", "x", "failed") in fired
+
+
+# ── datadog watch loop (connector rewrite M4) ────────────────────────────────
+
+def _dd_event(event_type="monitor_alert", summary="Monitor 'cpu-high' entered Alert state"):
+    from prash.connectors.base import ConnectorEvent
+    from datetime import datetime, timezone
+
+    return ConnectorEvent(
+        timestamp=datetime.now(timezone.utc),
+        connector="datadog",
+        event_type=event_type,
+        summary=summary,
+        raw={"monitor_id": 42, "monitor_name": "cpu-high", "previous_state": "OK", "current_state": "Alert"},
+    )
+
+
+class _FakeDdHandle:
+    """Mimics DatadogConnector.watch()'s WatchHandle: scripted poll() results."""
+
+    def __init__(self, script):
+        self.script = iter(script)
+        self.target = "cpu-high"
+        self.monitor_name = "cpu-high"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeDdConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, monitor, interval=30):
+        self.watched.append(monitor)
+        return self._handle
+
+
+def test_datadog_watch_loop_notifies_on_transition(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeDdHandle(script=[[_dd_event()], []])
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _FakeDdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_datadog", lambda event, console=None, creds=None: notified.append(event))
+
+    run_datadog_watch_loop(["cpu-high"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1  # the transition fires once; the next poll is silent
+    assert notified[0]["event_type"] == "monitor_alert"
+
+
+def test_datadog_watch_loop_survives_poll_errors(monkeypatch):
+    """A rate-limited or unreachable API must warn and skip the cycle — the
+    watch loop never dies on a bad API day."""
+    import prash.watcher as watcher_mod
+    from prash.connectors.datadog import DatadogError
+
+    handle = _FakeDdHandle(script=[DatadogError("Datadog API 429: rate limited"), [_dd_event()]])
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _FakeDdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_datadog", lambda event, console=None, creds=None: notified.append(event))
+
+    run_datadog_watch_loop(["cpu-high"], interval=0, max_iterations=2)
+    assert len(notified) == 1  # cycle 1 skipped, cycle 2 still delivered
+
+
+def test_datadog_watch_loop_skips_unwatchable_monitor(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.datadog import DatadogError
+
+    class _BrokenWatchConnector(_FakeDdConnector):
+        def watch(self, monitor, interval=30):
+            raise DatadogError(f"monitor not found: {monitor}")
+
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _BrokenWatchConnector(None))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_datadog_watch_loop(["ghost"], interval=0, max_iterations=1)  # must not raise
+
+
+def test_datadog_watch_loop_warns_on_failed_auth(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeDdHandle(script=[[]])
+    fake = _FakeDdConnector(handle, auth_ok=False)
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: fake)
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_datadog_watch_loop(["cpu-high"], interval=0, max_iterations=1)  # warns, still watches
+
+
+def test_resolve_datadog_monitors_splits_comma_list():
+    from prash.watcher import resolve_datadog_monitors
+
+    assert resolve_datadog_monitors("cpu-high, api-errors") == ["cpu-high", "api-errors"]
+
+
+def test_resolve_datadog_monitors_requires_targets(monkeypatch):
+    from prash.watcher import resolve_datadog_monitors
+
+    monkeypatch.delenv("DATADOG_WATCH_MONITORS", raising=False)
+    try:
+        resolve_datadog_monitors(None)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "DATADOG_WATCH_MONITORS" in str(exc)
+
+
+def test_resolve_datadog_monitors_env_fallback(monkeypatch):
+    from prash.watcher import resolve_datadog_monitors
+
+    monkeypatch.setenv("DATADOG_WATCH_MONITORS", "cpu-high")
+    assert resolve_datadog_monitors(None) == ["cpu-high"]
+
+
+def test_resolve_datadog_monitors_all_expands_via_connector(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    class _ListConnector:
+        def list_monitors(self, query=None, limit=100):
+            return [{"monitor_id": 1, "name": "api errors"}, {"monitor_id": 2, "name": ""}]
+
+    monkeypatch.setattr(watcher_mod, "DatadogConnector", lambda creds: _ListConnector())
+    assert watcher_mod.resolve_datadog_monitors("all") == ["api errors", "2"]
+
+
+def test_notify_datadog_pushes_team_notification_when_creds_given(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify_datadog(_dd_event(), creds=creds)
+
+    assert len(sent) == 1
+    assert "entered Alert state" in sent[0][0]
+    assert "prash investigate cpu-high --provider datadog" in sent[0][1]
+
+
+# ── pagerduty watch loop (connector rewrite, Phase 3 rollout) ────────────────
+
+def _pd_event(event_type="incident_triggered",
+              summary="Incident '500s spiking' on checkout triggered (critical severity, high urgency)"):
+    from datetime import datetime, timezone
+
+    return ConnectorEvent(
+        timestamp=datetime.now(timezone.utc),
+        connector="pagerduty",
+        event_type=event_type,
+        summary=summary,
+        raw={"incident_id": "PINC1", "service_name": "checkout", "severity": "critical",
+             "previous_status": None, "status": "triggered"},
+    )
+
+
+from prash.connectors.base import ConnectorEvent  # noqa: E402 — used by the _pd_event helper above
+
+
+class _FakePdHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.target = "checkout"
+        self.service_name = "checkout"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakePdConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, service, interval=30):
+        self.watched.append(service)
+        return self._handle
+
+
+def test_pagerduty_watch_loop_notifies_on_transition(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakePdHandle(script=[[_pd_event()], []])
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _FakePdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_pagerduty", lambda event, console=None, creds=None: notified.append(event))
+
+    run_pagerduty_watch_loop(["checkout"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1
+    assert notified[0]["event_type"] == "incident_triggered"
+
+
+def test_pagerduty_watch_loop_survives_poll_errors(monkeypatch):
+    """A rate-limited or unreachable PagerDuty API must warn and skip the
+    cycle -- the loop never dies on a bad API day."""
+    import prash.watcher as watcher_mod
+    from prash.connectors.pagerduty import PagerDutyError
+
+    handle = _FakePdHandle(script=[PagerDutyError("PagerDuty API 429: rate limited"), [_pd_event()]])
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _FakePdConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_pagerduty", lambda event, console=None, creds=None: notified.append(event))
+
+    run_pagerduty_watch_loop(["checkout"], interval=0, max_iterations=2)
+    assert len(notified) == 1
+
+
+def test_pagerduty_watch_loop_skips_unwatchable_service(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.pagerduty import PagerDutyError
+
+    class _BrokenWatchConnector(_FakePdConnector):
+        def watch(self, service, interval=30):
+            raise PagerDutyError(f"service not found: {service}")
+
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _BrokenWatchConnector(None))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_pagerduty_watch_loop(["ghost"], interval=0, max_iterations=1)  # must not raise
+
+
+def test_pagerduty_watch_loop_warns_on_failed_auth(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakePdHandle(script=[[]])
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _FakePdConnector(handle, auth_ok=False))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_pagerduty_watch_loop(["checkout"], interval=0, max_iterations=1)  # warns, still watches
+
+
+def test_resolve_pagerduty_services_splits_comma_list():
+    from prash.watcher import resolve_pagerduty_services
+
+    assert resolve_pagerduty_services("checkout, api") == ["checkout", "api"]
+
+
+def test_resolve_pagerduty_services_requires_targets(monkeypatch):
+    from prash.watcher import resolve_pagerduty_services
+
+    monkeypatch.delenv("PAGERDUTY_WATCH_SERVICES", raising=False)
+    try:
+        resolve_pagerduty_services(None)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "PAGERDUTY_WATCH_SERVICES" in str(exc)
+
+
+def test_resolve_pagerduty_services_env_fallback(monkeypatch):
+    from prash.watcher import resolve_pagerduty_services
+
+    monkeypatch.setenv("PAGERDUTY_WATCH_SERVICES", "checkout")
+    assert resolve_pagerduty_services(None) == ["checkout"]
+
+
+def test_resolve_pagerduty_services_all_expands_via_connector(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    class _ListConnector:
+        def list_services(self, limit=100):
+            return [{"service_id": "PSVC1", "name": "checkout"}, {"service_id": "PSVC2", "name": ""}]
+
+    monkeypatch.setattr(watcher_mod, "PagerDutyConnector", lambda creds: _ListConnector())
+    assert watcher_mod.resolve_pagerduty_services("all") == ["checkout", "PSVC2"]
+
+
+def test_notify_pagerduty_pushes_team_notification_when_creds_given(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify_pagerduty(_pd_event(), creds=creds)
+
+    assert len(sent) == 1
+    assert "500s spiking" in sent[0][0]
+    assert "prash investigate checkout --provider pagerduty" in sent[0][1]
+
+
+def test_notify_pagerduty_survives_console_that_cannot_encode_marker(monkeypatch):
+    """Found live 2026-09-09: a cp1252 legacy Windows console raises
+    UnicodeEncodeError on the ⚠ marker -- rich buffers text and only raises at
+    flush time, so the unencodable segment poisons the Console and kills the
+    next print too. The notifier must sanitize up front instead."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+
+    class _Cp1252Console:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.printed = []
+
+        def print(self, text):
+            text.encode("cp1252")  # raises UnicodeEncodeError on '⚠'
+            self.printed.append(text)
+
+    console = _Cp1252Console()
+    watcher_mod._notify_pagerduty(_pd_event(), console=console)  # must not raise
+
+    assert len(console.printed) == 1
+    assert "⚠" not in console.printed[0]  # never handed to rich: no poisoned buffer
+    assert "?" in console.printed[0] and "500s spiking" in console.printed[0]
+
+    console.print("DrufiyAI: poll OK, no state changes")  # next print still works
+    assert len(console.printed) == 2
+
+
+# ── grafana watch loop (connector rewrite, Phase 3 rollout) ──────────────────
+
+def _gf_event(event_type="alert_firing",
+              summary="Alert rule 'Prash E2E Test Alert' is firing"):
+    from datetime import datetime, timezone
+
+    return ConnectorEvent(
+        timestamp=datetime.now(timezone.utc),
+        connector="grafana",
+        event_type=event_type,
+        summary=summary,
+        raw={"rule_uid": "afw5nq4yyq0owb", "rule_title": "Prash E2E Test Alert", "state": "active"},
+    )
+
+
+class _FakeGfHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.target = "Prash E2E Test Alert"
+        self.rule_title = "Prash E2E Test Alert"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeGfConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, rule, interval=30):
+        self.watched.append(rule)
+        return self._handle
+
+
+def test_grafana_watch_loop_notifies_on_transition(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGfHandle(script=[[_gf_event()], []])
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _FakeGfConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_grafana", lambda event, console=None, creds=None: notified.append(event))
+
+    run_grafana_watch_loop(["Prash E2E Test Alert"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1
+    assert notified[0]["event_type"] == "alert_firing"
+
+
+def test_grafana_watch_loop_survives_poll_errors(monkeypatch):
+    """A rate-limited or unreachable Grafana API (or a hibernating Grafana
+    Cloud instance's 503) must warn and skip the cycle -- the loop never
+    dies on a bad API day."""
+    import prash.watcher as watcher_mod
+    from prash.connectors.grafana import GrafanaError
+
+    handle = _FakeGfHandle(script=[GrafanaError("Grafana API 503: instance is loading"), [_gf_event()]])
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _FakeGfConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_grafana", lambda event, console=None, creds=None: notified.append(event))
+
+    run_grafana_watch_loop(["Prash E2E Test Alert"], interval=0, max_iterations=2)
+    assert len(notified) == 1
+
+
+def test_grafana_watch_loop_skips_unwatchable_rule(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.grafana import GrafanaError
+
+    class _BrokenWatchConnector(_FakeGfConnector):
+        def watch(self, rule, interval=30):
+            raise GrafanaError(f"alert rule not found: {rule}")
+
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _BrokenWatchConnector(None))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_grafana_watch_loop(["ghost"], interval=0, max_iterations=1)  # must not raise
+
+
+def test_grafana_watch_loop_warns_on_failed_auth(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGfHandle(script=[[]])
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _FakeGfConnector(handle, auth_ok=False))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+
+    run_grafana_watch_loop(["Prash E2E Test Alert"], interval=0, max_iterations=1)  # warns, still watches
+
+
+def test_resolve_grafana_rules_splits_comma_list():
+    from prash.watcher import resolve_grafana_rules
+
+    assert resolve_grafana_rules("rule-a, rule-b") == ["rule-a", "rule-b"]
+
+
+def test_resolve_grafana_rules_requires_targets(monkeypatch):
+    from prash.watcher import resolve_grafana_rules
+
+    monkeypatch.delenv("GRAFANA_WATCH_RULES", raising=False)
+    try:
+        resolve_grafana_rules(None)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "GRAFANA_WATCH_RULES" in str(exc)
+
+
+def test_resolve_grafana_rules_env_fallback(monkeypatch):
+    from prash.watcher import resolve_grafana_rules
+
+    monkeypatch.setenv("GRAFANA_WATCH_RULES", "Prash E2E Test Alert")
+    assert resolve_grafana_rules(None) == ["Prash E2E Test Alert"]
+
+
+def test_resolve_grafana_rules_all_expands_via_connector(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    class _ListConnector:
+        def list_rules(self, limit=100):
+            return [{"uid": "afw5nq4yyq0owb", "title": "Prash E2E Test Alert"}, {"uid": "uid2", "title": ""}]
+
+    monkeypatch.setattr(watcher_mod, "GrafanaConnector", lambda creds: _ListConnector())
+    assert watcher_mod.resolve_grafana_rules("all") == ["Prash E2E Test Alert", "uid2"]
+
+
+def test_notify_grafana_pushes_team_notification_when_creds_given(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+    sent = []
+    monkeypatch.setattr(
+        watcher_mod, "send_team_notifications",
+        lambda creds, title, message: sent.append((title, message)) or {"slack": True},
+    )
+
+    creds = {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"}
+    watcher_mod._notify_grafana(_gf_event(), creds=creds)
+
+    assert len(sent) == 1
+    assert "Prash E2E Test Alert" in sent[0][0]
+    assert "prash investigate Prash E2E Test Alert --provider grafana" in sent[0][1]
+
+
+def test_notify_grafana_survives_console_that_cannot_encode_marker(monkeypatch):
+    """Same cp1252 poison found live on the PagerDuty path 2026-09-09: the
+    ⚠ marker must be sanitized up front, never handed to rich raw."""
+    import prash.watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "_send_desktop_notification", lambda t, m: True)
+
+    class _Cp1252Console:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.printed = []
+
+        def print(self, text):
+            text.encode("cp1252")  # raises UnicodeEncodeError on '⚠'
+            self.printed.append(text)
+
+    console = _Cp1252Console()
+    watcher_mod._notify_grafana(_gf_event(), console=console)  # must not raise
+
+    assert len(console.printed) == 1
+    assert "⚠" not in console.printed[0]
+    assert "?" in console.printed[0] and "Prash E2E Test Alert" in console.printed[0]
+
+    console.print("poll OK, no state changes")  # next print still works
+    assert len(console.printed) == 2
+
+
+def test_watchhandle_loop_survives_failing_notifier():
+    """A dying notification path (dead toast, unencodable console) must not
+    kill the watch loop -- same contract as poll errors."""
+    import prash.watcher as watcher_mod
+
+    handle = _FakePdHandle(script=[[_pd_event()], [], []])
+    called = []
+
+    def notifier(event, console=None, creds=None):
+        called.append(event)
+        raise UnicodeEncodeError("charmap", "⚠ x", 0, 1, "character maps to <undefined>")
+
+    watcher_mod.run_watchhandle_loop([handle], notifier, interval=0, max_iterations=3)
+
+    assert len(called) == 1  # the loop kept polling after the notifier died
+
+
+# ── G2: GitHub Actions watch loop + repo resolution ──
+
+def _gh_event(event_type="ci_failure", repo="acme/api"):
+    import datetime as _dt
+    return {
+        "timestamp": _dt.datetime(2026, 9, 7, 12, 0, tzinfo=_dt.timezone.utc),
+        "connector": "github", "event_type": event_type,
+        "summary": f"CI run #7 {event_type} on main (abc1234)",
+        "raw": {"run_id": 7, "repo": repo},
+    }
+
+
+class _FakeGhHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.connector = "github"
+        self.target = "acme/api"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeGhConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, repo, interval=30):
+        self.watched.append(repo)
+        return self._handle
+
+
+def test_github_watch_loop_notifies_on_new_failure(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGhHandle(script=[[_gh_event()], []])
+    monkeypatch.setattr(watcher_mod, "GitHubConnector", lambda creds: _FakeGhConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_github", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_github_watch_loop(["acme/api"], interval=0, max_iterations=2)
+
+    assert len(notified) == 1  # failure fires once; next poll (unchanged) is silent
+    assert notified[0]["event_type"] == "ci_failure"
+
+
+def test_github_watch_loop_survives_poll_errors(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.github import GitHubError
+
+    handle = _FakeGhHandle(script=[GitHubError("GitHub API 429: rate limited"), [_gh_event()]])
+    monkeypatch.setattr(watcher_mod, "GitHubConnector", lambda creds: _FakeGhConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_github", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_github_watch_loop(["acme/api"], interval=0, max_iterations=2)
+    assert len(notified) == 1  # cycle 1 skipped, cycle 2 delivered
+
+
+def test_resolve_github_repos_splits_comma_list():
+    from prash.watcher import resolve_github_repos
+    assert resolve_github_repos("acme/api, acme/web") == ["acme/api", "acme/web"]
+
+
+def test_resolve_github_repos_requires_targets(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_github_repos
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {})
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_github_repos(None)
+
+
+def test_resolve_github_repos_reads_env(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_github_repos
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {"GITHUB_WATCH_REPOS": "acme/api"})
+    assert resolve_github_repos(None) == ["acme/api"]
+
+
+# ── G3: GitLab CI watch loop + project resolution ──
+
+def _gl_event(event_type="ci_failure", project="acme/api"):
+    import datetime as _dt
+    return {
+        "timestamp": _dt.datetime(2026, 9, 7, 12, 0, tzinfo=_dt.timezone.utc),
+        "connector": "gitlab", "event_type": event_type,
+        "summary": f"pipeline #7 {event_type} on main (abcd1234)",
+        "raw": {"pipeline_id": 7, "project": project},
+    }
+
+
+class _FakeGlHandle:
+    def __init__(self, script):
+        self.script = iter(script)
+        self.connector = "gitlab"
+        self.target = "acme/api"
+
+    def poll(self):
+        result = next(self.script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _FakeGlConnector:
+    def __init__(self, handle, auth_ok=True):
+        self._handle = handle
+        self._auth_ok = auth_ok
+        self.watched = []
+
+    def authenticate(self):
+        return self._auth_ok
+
+    def watch(self, project, interval=30):
+        self.watched.append(project)
+        return self._handle
+
+
+def test_gitlab_watch_loop_notifies_on_new_failure(monkeypatch):
+    import prash.watcher as watcher_mod
+
+    handle = _FakeGlHandle(script=[[_gl_event()], []])
+    monkeypatch.setattr(watcher_mod, "GitLabConnector", lambda creds: _FakeGlConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_gitlab", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_gitlab_watch_loop(["acme/api"], interval=0, max_iterations=2)
+    assert len(notified) == 1 and notified[0]["event_type"] == "ci_failure"
+
+
+def test_gitlab_watch_loop_survives_poll_errors(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.connectors.gitlab import GitLabError
+
+    handle = _FakeGlHandle(script=[GitLabError("GitLab API 429: rate limited"), [_gl_event()]])
+    monkeypatch.setattr(watcher_mod, "GitLabConnector", lambda creds: _FakeGlConnector(handle))
+    monkeypatch.setattr(watcher_mod, "time", MagicMock())
+    notified = []
+    monkeypatch.setattr(watcher_mod, "_notify_gitlab", lambda event, console=None, creds=None: notified.append(event))
+
+    watcher_mod.run_gitlab_watch_loop(["acme/api"], interval=0, max_iterations=2)
+    assert len(notified) == 1
+
+
+def test_resolve_gitlab_projects_splits_comma_list():
+    from prash.watcher import resolve_gitlab_projects
+    assert resolve_gitlab_projects("acme/api, acme/web") == ["acme/api", "acme/web"]
+
+
+def test_resolve_gitlab_projects_requires_targets(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_gitlab_projects
+    import pytest
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {})
+    with pytest.raises(ValueError):
+        resolve_gitlab_projects(None)
+
+
+def test_resolve_gitlab_projects_reads_env(monkeypatch):
+    import prash.watcher as watcher_mod
+    from prash.watcher import resolve_gitlab_projects
+
+    monkeypatch.setattr(watcher_mod.os, "environ", {"GITLAB_WATCH_PROJECTS": "acme/api"})
+    assert resolve_gitlab_projects(None) == ["acme/api"]
+
+
+# ── plyer win32 toast limit (real bug found live 2026-09-07) ────────────────
+
+def test_toast_clamp_bounds_plyer_struct_limit():
+    """plyer's win32 balloon backend packs title/message into NOTIFYICONDATAW
+    struct fields capped at 64 chars; anything longer crashes its worker
+    thread after notify() returned, so the toast silently never shows. The
+    clamp must guarantee the packed length, not just 'shorter'."""
+    long_text = "Datadog monitor 'prash-test-synthetic-error-rate' entered Alert state"
+    clamped = _toast_clamp(long_text)
+    assert len(clamped) <= 64
+    assert clamped.endswith("…") and long_text.startswith(clamped[:-1])
+    assert _toast_clamp("short") == "short"  # untouched when already within limit
+
+
+def test_send_desktop_notification_clamps_overlong_text_for_plyer(monkeypatch):
+    """The live failure: a 68-char notification title raised ValueError inside
+    plyer's balloon_tip thread. Whatever the caller passes, the strings handed
+    to plyer must already fit the packed limit."""
+    captured = {}
+
+    def fake_notify(*, title, message, timeout):
+        captured["title"], captured["message"] = title, message
+        if len(title) > 64 or len(message) > 64:
+            raise ValueError("string too long (69, maximum length 64)")
+
+    monkeypatch.setitem(sys.modules, "plyer", MagicMock(notification=MagicMock(notify=fake_notify)))
+
+    assert _send_desktop_notification("P" * 100, "M" * 200) is True
+    assert len(captured["title"]) <= 64
+    assert len(captured["message"]) <= 64

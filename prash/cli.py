@@ -43,12 +43,20 @@ from .actions.contract import (
 from .actions.edit_config import EditConfigMapAction, EditSecretAction
 from .actions.exec_command import ExecAction
 from .actions.execute_aws import ExecuteAwsAction
+from .actions.execute_gcp import ExecuteGCPAction
+from .actions.execute_azure import ExecuteAzureAction
+from .actions.aws_alert import AWSAlertAction
+from .actions.gcp_alert import GCPAlertAction
 from .actions.missing_secret import RequestSecretAction
 from .actions.datadog_mute import DatadogMuteMonitorAction
+from .actions.datadog_alert import DatadogAlertAction
+from .actions.github_alert import GitHubOpenIssueAction
+from .actions.gitlab_alert import GitLabOpenIssueAction
 from .actions.gitleaks_escalate import GitleaksEscalateAction
 from .actions.grafana_silence import GrafanaSilenceAlertAction
 from .actions.open_pr import OpenPrAction
 from .actions.pagerduty_incident import PagerdutyAcknowledgeAction, PagerdutyResolveAction
+from .actions.pagerduty_page import PagerdutyPageAction
 from .actions.restart_pod import RestartPodAction
 from .actions.snyk_ignore import SnykIgnoreIssueAction
 from .actions.rollback import RollbackAction
@@ -278,6 +286,9 @@ def _make_context(
             "base": getattr(args, "base", None),
             "title": getattr(args, "title", None),
             "body": getattr(args, "body", None),
+            "text": getattr(args, "text", None),
+            "priority": getattr(args, "priority", None),
+            "tags": getattr(args, "tags", None),
             "command": getattr(args, "command", None),
             "pem_path": getattr(args, "pem_path", None),
             "replicas": getattr(args, "replicas", None),
@@ -309,12 +320,20 @@ def _build_dispatcher(mode: PermissionMode) -> Dispatcher:
             ApplyCiFixAction(),
             ApplyGitlabCiFixAction(),
             ApplyManifestFixAction(),
+            GCPAlertAction(),
             ExecuteAwsAction(),
+            ExecuteGCPAction(),
+            ExecuteAzureAction(),
+            AWSAlertAction(),
             PagerdutyAcknowledgeAction(),
             PagerdutyResolveAction(),
+            PagerdutyPageAction(),
             VercelRedeployAction(),
             VercelRollbackAction(),
             DatadogMuteMonitorAction(),
+            DatadogAlertAction(),
+            GitHubOpenIssueAction(),
+            GitLabOpenIssueAction(),
             GrafanaSilenceAlertAction(),
             SnykIgnoreIssueAction(),
             GitleaksEscalateAction(),
@@ -419,6 +438,8 @@ def cmd_fix(args: argparse.Namespace) -> int:
         diagnose_ci_run,
         diagnose_gitlab_ci_run,
         diagnose_k8s_pod,
+        diagnose_aws_instance,
+    diagnose_gcp_instance,
         recommended_action_id,
         render_diagnosis,
         render_multi_failure,
@@ -500,6 +521,37 @@ def cmd_fix(args: argparse.Namespace) -> int:
             return 2
         return _render_run_result(run_result)
 
+    provider = getattr(args, "provider", "kubernetes") or "kubernetes"
+    
+    if provider == "aws":
+        try:
+            diagnosis = asyncio.run(diagnose_aws_instance(args.target, creds))
+        except FixTargetError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]AWS instance diagnosis failed: {exc}[/red]")
+            return 2
+        
+        render_diagnosis(diagnosis, console)
+        
+        action_id = recommended_action_id(diagnosis.recommended_action)
+        if action_id is None:
+            _render_no_auto_action(diagnosis.recommended_action, args.target)
+            return 0
+
+        dispatcher = _build_dispatcher(mode)
+        ctx = _make_context(args, store, creds, resource=args.target, env=args.env)
+        try:
+            result = dispatcher.run(action_id, ctx, ask=None if args.noninteractive else CliAsk())
+        except KeyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except MissingSecretError as exc:
+            console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
+            return 3
+        return _render_run_result(result)
+
     try:
         namespace, pod = split_k8s_target(args.target)
     except FixTargetError as exc:
@@ -566,7 +618,14 @@ def cmd_fix(args: argparse.Namespace) -> int:
             _render_no_auto_action(chosen, namespace)
             return 0
         dispatcher = _build_dispatcher(mode)
-        ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
+        if action_id == "edit-configmap":
+            # The brain named a specific ConfigMap (not the pod) as the
+            # target — mirror the apply-manifest-fix pattern of overriding
+            # ctx.target.resource before dispatching (PRASH_V2.md §9).
+            ctx = _make_context(args, store, creds, resource=f"{namespace}/{chosen.config_patch_target}", env=args.env or namespace)
+            ctx.extra["config_data"] = chosen.config_patch
+        else:
+            ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
         try:
             # Whatever the user picked still runs through the normal pipeline:
             # risk tiers, circuit breaker, and the audit log all apply.
@@ -585,7 +644,14 @@ def cmd_fix(args: argparse.Namespace) -> int:
         return 0
 
     dispatcher = _build_dispatcher(mode)
-    ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
+    if action_id == "edit-configmap":
+        # The brain named a specific ConfigMap (not the pod) as the target —
+        # mirror the apply-manifest-fix pattern of overriding
+        # ctx.target.resource before dispatching (PRASH_V2.md §9).
+        ctx = _make_context(args, store, creds, resource=f"{namespace}/{diagnosis.config_patch_target}", env=args.env or namespace)
+        ctx.extra["config_data"] = diagnosis.config_patch
+    else:
+        ctx = _make_context(args, store, creds, resource=f"{namespace}/{pod}", env=args.env or namespace)
     try:
         result = dispatcher.run(action_id, ctx, ask=None if args.noninteractive else CliAsk())
     except KeyError as exc:
@@ -678,7 +744,89 @@ def cmd_investigate(args: argparse.Namespace) -> int:
     state = connector.poll_state(args.resource)
     console.print(f"[bold]{args.resource}[/bold] -> {state.state.value}")
     console.print(f"[dim]{state.detail}[/dim]")
+    stats = _timeline_for(connector, args.resource)
+    if stats is not None:
+        # Connectors with a normalized timeline (datadog, pagerduty) surface
+        # their recent events here; every other connector's investigate is
+        # unchanged -- still just the point-in-time state check.
+        console.print(f"[bold]timeline ({len(stats)} event(s) in the last hour):[/bold]")
+        for event in stats[:20]:
+            console.print(f"[dim]  [{event['timestamp'].isoformat()}] {event['event_type']}: {event['summary']}[/dim]")
+        if len(stats) > 20:
+            console.print(f"[dim]  ... {len(stats) - 20} more[/dim]")
     return 0
+
+
+def _connector_for(provider: str, creds: dict[str, Any]) -> Connector | None:
+    """Build one connector by name. kubernetes isn't in PROVIDERS (it's the
+    module-function connector) so it's constructed directly — same special-
+    case the intent tool schema already makes for it."""
+    if provider == "kubernetes":
+        from .connectors.kubernetes import KubernetesConnector
+        return KubernetesConnector(creds)
+    return _make_connectors(creds).get(provider)
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Read-only event timeline for a resource — the user-facing surface for a
+    connector's get_stats() (§4a). Point-in-time health is `investigate`
+    (poll_state); this is 'what happened, on a shared clock' (ConnectorEvents).
+    """
+    import datetime
+
+    store = CredentialStore.from_env()
+    creds = store.load()
+    _export_cluster_env(creds)
+
+    connector = _connector_for(args.provider, creds)
+    if connector is None:
+        console.print(f"[red]unknown provider: {args.provider}[/red]")
+        return 2
+    if not connector.authenticate():
+        console.print(f"[yellow]{connector.name}: auth not configured[/yellow]")
+        return 1
+
+    # k8s get_stats requires a `since`; the API connectors default it to None.
+    # A sensible default window keeps the one command uniform across providers.
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=args.since_minutes)
+    try:
+        events = connector.get_stats(args.resource, since=since)
+    except NotImplementedError:
+        console.print(f"[yellow]{connector.name} has no get_stats() yet — nothing to show[/yellow]")
+        return 1
+    except Exception as exc:  # noqa: BLE001 — a read must fail clean, not traceback
+        console.print(f"[red]stats failed: {exc}[/red]")
+        return 2
+
+    if not events:
+        console.print(f"[bold]{args.resource}[/bold] -> no events in the last {args.since_minutes}m")
+        return 0
+
+    console.print(f"[bold]{args.resource}[/bold] -> {len(events)} event(s) in the last {args.since_minutes}m:")
+    for e in events:
+        ts = e["timestamp"]
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if hasattr(ts, "strftime") else str(ts)
+        console.print(f"[dim]{ts_str}[/dim] [cyan]{e['event_type']}[/cyan] {e['summary']}")
+    return 0
+
+
+def _timeline_for(connector, resource: str):
+    """Best-effort get_stats() timeline; None when the connector doesn't
+    implement one (base-class default raises NotImplementedError). A
+    timeline failure is a warning, never a failed investigate -- the state
+    check above already succeeded."""
+    get_stats = getattr(connector, "get_stats", None)
+    if get_stats is None:
+        return None
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        return get_stats(resource, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    except NotImplementedError:
+        return None
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]timeline unavailable: {exc}[/yellow]")
+        return None
 
 
 def cmd_actions(_args: argparse.Namespace) -> int:
@@ -739,13 +887,58 @@ def cmd_config(_args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    from .watcher import run_watch_loop, run_terraform_watch_loop
+    from .watcher import (
+        run_watch_loop,
+        run_terraform_watch_loop,
+        run_aws_watch_loop,
+        run_datadog_watch_loop,
+        resolve_datadog_monitors,
+        run_pagerduty_watch_loop,
+        resolve_pagerduty_services,
+        run_grafana_watch_loop,
+        resolve_grafana_rules,
+        run_github_watch_loop,
+        resolve_github_repos,
+        run_gitlab_watch_loop,
+        resolve_gitlab_projects,
+    )
 
     store = CredentialStore.from_env()
     creds = store.load()
     _export_cluster_env(creds)
     
     provider = getattr(args, "provider", "kubernetes") or "kubernetes"
+
+    # Multi-connector watch (M5, spec §4d): `--provider aws,gcp --resource i-1,vm-2`
+    # runs one loop over all of them, reading in parallel each cycle. Providers
+    # and resources are zipped positionally; a single --resource applies to all.
+    if "," in provider:
+        from .watcher import run_connector_watch_loop
+
+        providers = [p.strip() for p in provider.split(",") if p.strip()]
+        resources = [r.strip() for r in getattr(args, "resource", ".").split(",") if r.strip()]
+        if len(resources) == 1:
+            resources = resources * len(providers)
+        if len(resources) != len(providers):
+            console.print(f"[red]watch: {len(providers)} providers but {len(resources)} resources — give one --resource each (or a single shared one)[/red]")
+            return 2
+        watches = []
+        for p, r in zip(providers, resources):
+            conn = _connector_for(p, creds)
+            if conn is None:
+                console.print(f"[red]unknown provider: {p}[/red]")
+                return 2
+            watches.append((conn, r, p))
+        console.print(f"[bold]Watching {len(watches)} resources across {', '.join(providers)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_connector_watch_loop(watches, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
 
     if provider == "terraform":
         resource = getattr(args, "resource", ".")
@@ -755,6 +948,139 @@ def cmd_watch(args: argparse.Namespace) -> int:
             console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
         try:
             run_terraform_watch_loop(resource, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "aws":
+        resource = getattr(args, "resource", ".")
+        console.print(f"[bold]Watching AWS metrics/events for '{resource}'...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]new-problem pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_aws_watch_loop(resource, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "datadog":
+        # Watch targets: --resource (comma-separated monitor ids/names, or
+        # `all`), falling back to DATADOG_WATCH_MONITORS from .env/env.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            monitors = resolve_datadog_monitors(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve Datadog monitors: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching Datadog monitor(s): {', '.join(monitors)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]state-change pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_datadog_watch_loop(monitors, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "pagerduty":
+        # Watch targets: --resource (comma-separated service names/ids, or
+        # `all`), falling back to PAGERDUTY_WATCH_SERVICES from .env/env.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            services = resolve_pagerduty_services(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve PagerDuty services: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching PagerDuty service(s): {', '.join(services)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]incident pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_pagerduty_watch_loop(services, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "grafana":
+        # Watch targets: --resource (comma-separated rule uids/titles, or
+        # `all`), falling back to GRAFANA_WATCH_RULES from .env/env.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            rules = resolve_grafana_rules(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve Grafana alert rules: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching Grafana alert rule(s): {', '.join(rules)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]alert pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_grafana_watch_loop(rules, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "github":
+        # Watch targets: --resource (comma-separated owner/repo), falling back
+        # to GITHUB_WATCH_REPOS from .env/env. No `all` -- always explicit.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            repos = resolve_github_repos(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve GitHub repos: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching GitHub repo(s): {', '.join(repos)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]CI-failure pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_github_watch_loop(repos, interval=args.interval, console=console, creds=creds)
+        except Exception as exc:
+            console.print(f"[red]watch stopped: {exc}[/red]")
+            return 2
+        return 0
+
+    if provider == "gitlab":
+        # Watch targets: --resource (comma-separated namespace/project),
+        # falling back to GITLAB_WATCH_PROJECTS from .env/env. No `all`.
+        resource_spec = getattr(args, "resource", ".")
+        spec = resource_spec if resource_spec and resource_spec != "." else None
+        try:
+            projects = resolve_gitlab_projects(spec, creds)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except Exception as exc:
+            console.print(f"[red]could not resolve GitLab projects: {exc}[/red]")
+            return 2
+        console.print(f"[bold]Watching GitLab project(s): {', '.join(projects)}...[/bold] (Ctrl+C to stop)")
+        team_channels = [n.name for n in team_notifiers(creds)]
+        if team_channels:
+            console.print(f"[dim]CI-failure pings will also be sent to: {', '.join(team_channels)}[/dim]")
+        try:
+            run_gitlab_watch_loop(projects, interval=args.interval, console=console, creds=creds)
         except Exception as exc:
             console.print(f"[red]watch stopped: {exc}[/red]")
             return 2
@@ -935,6 +1261,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--deployment-id", default=None, help="Vercel deployment id (vercel-redeploy/vercel-rollback)")
     run.add_argument("--minutes", type=int, default=60, help="mute/silence duration in minutes (datadog-mute-monitor/grafana-silence-alert)")
     run.add_argument("--reason", default=None, help="reason for the change (snyk-ignore-issue)")
+    run.add_argument("--text", help="event text (datadog-alert)")
+    run.add_argument("--priority", default=None, help="event priority: normal|low|high (datadog-alert)")
+    run.add_argument("--tags", help="comma-separated event tags (datadog-alert)")
     run.set_defaults(func=cmd_run)
 
     fix = sub.add_parser("fix", help="diagnose a problem (k8s pod or CI run) and run the brain's recommended action through the permission pipeline", formatter_class=formatter_class)
@@ -964,6 +1293,12 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--dependabot", action="store_true", help="github only: list open Dependabot alerts instead of CI run status (Sprint 2 Tier 3)")
     inv.set_defaults(func=cmd_investigate)
 
+    stats = sub.add_parser("stats", help="show a resource's recent event timeline (a connector's get_stats — 'what happened', not just current state)", formatter_class=formatter_class)
+    stats.add_argument("resource", help="<namespace>/<pod> (kubernetes) or an instance/resource id for other providers")
+    stats.add_argument("--provider", choices=list(PROVIDERS) + ["kubernetes"], default="kubernetes")
+    stats.add_argument("--since-minutes", type=int, default=60, help="how far back to pull events (default 60)")
+    stats.set_defaults(func=cmd_stats)
+
     logs = sub.add_parser("logs", help="read a pod's logs, optionally following live (sprint-2 Kubernetes Depth)", formatter_class=formatter_class)
     logs.add_argument("target", help="<namespace>/<pod>")
     logs.add_argument("--follow", action="store_true", help="live-follow, like `kubectl logs -f` (Ctrl+C to stop)")
@@ -980,11 +1315,11 @@ def build_parser() -> argparse.ArgumentParser:
     circuit.add_argument("resource", nargs="?", help="reset only this resource (reset only)")
     circuit.set_defaults(func=cmd_circuit)
 
-    watch = sub.add_parser("watch", help="poll a namespace for CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck pods, notify on new problems", formatter_class=formatter_class)
+    watch = sub.add_parser("watch", help="poll kubernetes pods / terraform state / datadog monitors / pagerduty incidents / grafana alert rules, notify on state changes", formatter_class=formatter_class)
     watch.add_argument("--namespace", default=None, help="default: KUBE_NAMESPACE from .env, or 'default'")
     watch.add_argument("--interval", type=int, default=None, help="poll interval in seconds (default: PRASH_WATCH_INTERVAL_SECONDS or 30)")
-    watch.add_argument("--provider", default="kubernetes", help="provider to poll: kubernetes (default) or terraform")
-    watch.add_argument("--resource", default=".", help="resource to poll (for terraform)")
+    watch.add_argument("--provider", default="kubernetes", help="provider to poll: kubernetes (default), terraform, datadog, pagerduty, or grafana")
+    watch.add_argument("--resource", default=".", help="resource to poll (terraform: state dir; datadog: monitors; pagerduty: services; grafana: alert rules — comma-separated names/ids or 'all', default their *_WATCH_* env var)")
     watch.set_defaults(func=cmd_watch)
 
     notify = sub.add_parser("notify", help="send a message to every configured team channel (Slack/Discord webhooks)", formatter_class=formatter_class)

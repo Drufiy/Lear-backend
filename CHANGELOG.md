@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Lear Desktop Application v2.0 (Full Overhaul & Backend API Bridge)**:
+  - *Zero Hardcoding Guarantee*: Audited and eliminated all hardcoded mock metrics (`45.2`, `12.5`, `32.1`, `"14ms"`), static status returns, and mock fallback handlers across `prash/server.py`. Added an AST-based test suite (`tests/test_desktop_api.py`) verifying no static telemetry dictionaries exist.
+  - *Dynamic Connector Registry (`prash/connector_registry.py`)*: Built a dynamic registry for all 13 supported providers (AWS, Azure, GCP, Kubernetes, Vercel, GitHub, GitLab, Datadog, Grafana, PagerDuty, Snyk, Gitleaks, Terraform). Provides metadata, authentication field specifications, icon/color tokens, default widget templates, and lazy instance caching.
+  - *Backend API Bridge*: Implemented connector-agnostic endpoints (`/api/connectors`, `/api/connectors/{id}/validate`, `/api/connectors/{id}/stats`, `/logs`, `/state`), background watch lifecycle endpoints (`/api/watcher/start`, `/stop`, `/status`), activity audit log query (`/api/activity`), and settings management (`/api/settings`).
+  - *Real-time WebSocket Streaming (`/ws/events`)*: Implemented an active broadcast stream that pushes real-time watcher cycles, telemetry updates, and incident alerts without client polling.
+  - *AI Widget Generation (`POST /api/connectors/{id}/generate-widgets`)*: Introduced an endpoint that inspects live telemetry, metric names, and resource shapes to synthesize optimized custom SVG widget layouts on the fly.
+  - *Multi-Environment Project System (`desktop/src/components/Projects.tsx`)*: Created project workspace management with support for multiple environments (`Production`, `Staging`, `Development`) and service attachments, persisting directly to `prash.yaml`.
+  - *Dynamic Onboarding Wizard (`desktop/src/components/Wizard.tsx`)*: Replaced hardcoded credential screens with a dynamic form engine generated directly from connector `auth_fields`, backed by live STS/token verification and instant feedback.
+  - *Pure SVG Metric Widgets (`desktop/src/components/widgets/`)*: Developed dynamic visual components without external charting dependencies:
+    - `MetricGauge`: Circular SVG arc gauge (0-100%) with dynamic color interpolation.
+    - `MetricLineChart`: Smoothed Bezier curve SVG time-series charts with area gradients and hover tooltips.
+    - `MetricCard`: KPI stat card with live trend percentages and inline sparklines.
+    - `EventTimeline`: Vertical incident and alarm timeline with severity badges.
+    - `StatusGrid`: System health tile matrix.
+  - *Lear Copilot / Chatbot (`desktop/src/components/Chatbot.tsx`)*: Upgraded chat interface with live service context chips, real-time telemetry injection, and interactive "Execute Action" confirmation flows.
+  - *Design System Overhaul (`desktop/src/index.css`)*: Implemented a dark obsidian design system (`#080B11`, surface `#0E131F`, emerald accent `#10B981`, glassmorphism, radar-pulse keyframe).
 - **Terraform Integration (Tracks B, C, D, E)**: Added comprehensive Terraform support across the entire architecture.
   - *Connectors*: Added `TerraformConnector` to monitor `.tfstate` and execute drift detection locally, with stubs for future Terraform Cloud integrations.
   - *Actions*: Added `terraform_init` (SAFE tier) and `terraform_apply` (dynamic risk tier defaulting to APPROVAL) to resolve config drift and setup failures.
@@ -19,8 +35,14 @@ All notable changes to this project will be documented in this file.
 - **agent_guidelines.md**: Added a guidelines file to establish conventions for AI agents working on this project.
 - **Azure & GCP Connectors (Execution & SSH Fallback)**: Added `AzureConnector` and `GCPConnector` mirroring the AWS EC2 execution pattern. They support read operations (`instance_status`, `logs`) and use official SDKs with CLI fallbacks (`az`, `gcloud`), ultimately falling back to native SSH execution with `.pem` files if execution APIs fail.
 - **Azure/GCP execute actions**: Wired `execute-azure` and `execute-gcp` into the dispatcher as formal actions under the APPROVAL Risk Tier, matching the interactive fallback workflow of AWS.
+- **AWS Watcher & Metrics (Sprint 3)**: Enriched `AWSConnector` to fetch `DiskReadOps`, `DiskWriteOps`, `NetworkIn`, `NetworkOut`, `StatusCheckFailed`, and CloudWatch Alarms. Added a dedicated `run_aws_watch_loop` to `prash watch` to continuously monitor EC2 state and metric spikes.
+- **AWS Brain Integration**: Wired AWS EC2 context directly into the `DiagnosisAgent` via `format_aws_context` and `diagnose_aws_instance`, allowing `prash fix <instance> --provider aws` to produce AI-driven root cause analyses based on instance metrics and logs.
 - **Wizard enhancements**: `prash setup` now prompts for Azure VM configurations (`AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_LOCATION`) and Google Cloud Compute Engine keys (`GCP_PROJECT_ID`, `GCP_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`).
 ### Fixed
+- **PagerDuty Phase 3 live-verification bugs (found live 2026-09-09, each with a regression test)**:
+  - *Dedup-key lookup never matched*: PagerDuty REST returns `incident_key: null` on incident objects even for Events-v2 triggers, so `find_incident_by_incident_key()` (and therefore `pagerduty-page`'s verify) always missed. Lookup now filters server-side (`/incidents?incident_key=`) and falls back to the incident alert's `alert_key`; `_paginate` learned the `alerts` collection key.
+  - *Watch loop died on its first notification on cp1252 legacy Windows consoles*: rich buffers text and raises `UnicodeEncodeError` at flush time on the `⚠` marker, poisoning the Console so even the next plain-ASCII print crashed. New `watcher._console_notify()` sanitizes for the console's own encoding; both the PagerDuty and Datadog notifiers route through it, and `run_watchhandle_loop` now guards `notify_fn` the same way it guards `poll()`.
+  - *`pagerduty-page` verify raced incident propagation*: a just-triggered incident isn't REST-listable for a few seconds, so a real page reported "not verified". Verify now uses the same bounded retry as `datadog-alert` (3 attempts, 2s/4s backoff).
 - **AWS Connector — registered and hardened**: `AWSConnector` is now registered in `prash/cli.py`'s `PROVIDERS`, making `prash investigate <resource> --provider aws` usable. `authenticate()` now caches its result per connector instance instead of re-hitting STS on every method call. `read_capabilities` corrected from copy-pasted Kubernetes names (`pod_status`) to `instance_status`/`logs`. `execute_command` remains unwired to any dispatcher action — read-only only, per spec.
 
 ### Security

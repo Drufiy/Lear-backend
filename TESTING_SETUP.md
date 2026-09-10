@@ -96,6 +96,16 @@ state to `suppressed`, which `poll_state()` maps to `degraded` — so testing
 the silence action also naturally exercises the DEGRADED state, unlike
 Datadog where muting doesn't change `overall_state`.
 
+**Autonomous loop (watch, Phase 3):** `prash watch --provider grafana
+--resource "Prash E2E Test Alert"` (or `GRAFANA_WATCH_RULES` in .env, or
+`all` to watch every rule in the org, capped at 100). Same break/heal script
+drives the loop: a break is detected as `alert_firing` within one poll
+cycle, the heal as `alert_recovered` (resolved alerts leave the Alertmanager
+list entirely — absence IS the recovery signal), and silencing as
+`alert_state_changed`, not a recovery. Dedup contract matches the other
+providers: unchanged state never re-notifies, and a rule already firing when
+the watch starts is baselined silently (only the NEXT transition pings).
+
 ## PagerDuty
 
 **Status: ready.**
@@ -111,6 +121,13 @@ python3 scripts/testing/break_pagerduty.py --heal   # resolve it
 
 Both directions live-verified 2026-08-26 — trigger produces a real
 `triggered` incident within seconds, resolve clears it within seconds.
+Re-verified 2026-09-09 along with the full autonomous loop (watch →
+diagnose → act → verify → notify; see E2E_TEST_CHECKLIST.md §7/§7b).
+
+**Note (2026-09-09):** the routing key determines which service an Events
+v2 trigger lands on — on the current account (drufiy.pagerduty.com) that's
+the `DrufiyAI` service, not `prash-v2`. Investigate/watch target the
+*service name* the routing key belongs to; everything else works as written.
 
 **Prash prompt to test with:**
 

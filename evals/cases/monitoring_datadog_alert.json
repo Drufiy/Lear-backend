@@ -1,0 +1,19 @@
+{
+  "id": "monitoring_datadog_alert",
+  "source": "verified",
+  "repo_full_name": "datadog/high-cpu-on-web",
+  "workflow_name": "datadog",
+  "commit_message": "(no commit — Datadog monitor diagnosis, not a CI run)",
+  "logs": "=== MONITOR STATE ===\nmonitor: high-cpu-on-web\nmonitor_id: 1234567\noverall_state: Alert\nconnector_state: failed\n\n=== DATADOG EVENTS ===\n- [2026-09-04T11:58:12+00:00] deploy_event: Production deploy of web-frontend v2.4.1\n- [2026-09-04T12:00:00+00:00] monitor_alert: Monitor 'high-cpu-on-web' entered Alert state\n    metric: query=avg:system.cpu.user{*} by {host} max=96.4 mean=88.1 peak_at=2026-09-04T11:59:00+00:00",
+  "current_files": {},
+  "expected": {
+    "category": "monitoring",
+    "fix_type": "manual_required",
+    "confidence": 0.7,
+    "recommended_action": "mute_monitor",
+    "files_changed_paths": [],
+    "problem_summary": "Datadog monitor 'high-cpu-on-web' entered Alert state: CPU on web hosts peaked at 96.4% right after the v2.4.1 production deploy",
+    "verified": true
+  },
+  "notes": "Hand-authored (connector rewrite M2/M4) — mirrors the runtime_* k8s cases for the Datadog surface: tests that the brain categorizes monitor alerts as 'monitoring' (not code/workflow_config), leaves files_changed empty (an observability signal is not a diff), and recommends mute_monitor as an explicitly-labeled stopgap while the deploy-correlated CPU spike is investigated (that correlation reasoning isn't scored automatically, spot-checked manually)."
+}

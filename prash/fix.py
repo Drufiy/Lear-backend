@@ -14,6 +14,7 @@ seam Aradhya's schema built for us (§6 cross-track, schemas.py docstring).
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from rich.panel import Panel
@@ -24,7 +25,12 @@ from .brain.diagnosis_agent import (
     deployment_name_from_pod,
     diagnose_failure,
     find_deployment_manifest,
+    format_datadog_context,
     format_k8s_context,
+    format_aws_context,
+    format_gcp_context,
+    format_pagerduty_context,
+    format_grafana_context,
 )
 from .brain.gitlab_log_fetcher import fetch_pipeline_logs
 from .brain.log_fetcher import fetch_workflow_logs
@@ -32,6 +38,12 @@ from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
 from .brain.schemas import Diagnosis
 from .connectors.github import GitHubConnector
 from .connectors.kubernetes import get_pod_events, get_pod_logs, get_pod_status
+from .connectors.aws import AWSConnector
+from .connectors.gcp import GCPConnector
+from .connectors.base import ConnectorState
+from .connectors.datadog import DatadogConnector
+from .connectors.pagerduty import PagerDutyConnector
+from .connectors.grafana import GrafanaConnector
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +52,16 @@ logger = logging.getLogger(__name__)
 # doesn't derive from a pod (no pod->deployment lookup), so it surfaces as a
 # manual next-step instead of us guessing. scale has no action this sprint
 # (§7 out of scope) — same honest surface, no fabricated capability.
-_AUTO_ACTIONS = {"restart_pod": "restart-pod"}
+# edit_configmap dispatches to edit-configmap when the brain names a specific
+# ConfigMap key/value fix with high-confidence log evidence (schemas.py
+# Diagnosis.config_patch / config_patch_target).
+_AUTO_ACTIONS = {
+    "restart_pod": "restart-pod",
+    "edit_configmap": "edit-configmap",
+    "mute_monitor": "datadog-mute-monitor",
+    "acknowledge_incident": "pagerduty-acknowledge",
+    "silence_alert": "grafana-silence-alert",
+}
 
 
 class FixTargetError(Exception):
@@ -145,6 +166,84 @@ async def diagnose_k8s_pod(
     )
 
 
+async def diagnose_datadog_monitor(monitor: str, creds: dict | None = None) -> Diagnosis:
+    """Gather the Datadog connector's poll_state + get_stats for a monitor, feed
+    them to Track D's brain, and return the Diagnosis (connector rewrite
+    milestone M4). Mirrors diagnose_k8s_pod's seam shape: connector reads ->
+    format_datadog_context -> diagnose_failure, with the brain's mute_monitor
+    recommendation mapping through _AUTO_ACTIONS to the datadog-mute-monitor
+    action at dispatch time.
+
+    get_stats() is swallow-to-[] by contract, so an empty event window is
+    still a valid diagnosis input (the MONITOR STATE block carries the
+    signal); an unresolvable monitor is not, so that raises FixTargetError.
+    """
+    connector = DatadogConnector(creds or {})
+    state = connector.poll_state(monitor)
+    if state.state is ConnectorState.NOT_FOUND:
+        raise FixTargetError(f"monitor {monitor!r} not found")
+    events = connector.get_stats(monitor, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    context = format_datadog_context(state, events)
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=f"datadog/{monitor}",
+        commit_message="(no commit — Datadog monitor diagnosis, not a CI run)",
+        workflow_name="datadog",
+    )
+
+
+async def diagnose_pagerduty_incident(service: str, creds: dict | None = None) -> Diagnosis:
+    """Gather the PagerDuty connector's poll_state + get_stats for a service,
+    feed them to Track D's brain, and return the Diagnosis (connector
+    rewrite, Phase 3 rollout — PagerDuty). Same seam shape as the datadog/k8s
+    formatters: connector reads -> format_pagerduty_context ->
+    diagnose_failure, with acknowledge_incident mapping through _AUTO_ACTIONS
+    to pagerduty-acknowledge at dispatch time.
+
+    get_stats() is swallow-to-[] by contract, so an empty event window is
+    still a valid diagnosis input (the INCIDENT STATE block carries the
+    signal); an unresolvable service is not, so that raises FixTargetError.
+    """
+    connector = PagerDutyConnector(creds or {})
+    state = connector.poll_state(service)
+    if state.state is ConnectorState.NOT_FOUND:
+        raise FixTargetError(f"service {service!r} not found")
+    events = connector.get_stats(service, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    context = format_pagerduty_context(state, events)
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=f"pagerduty/{service}",
+        commit_message="(no commit — PagerDuty incident diagnosis, not a CI run)",
+        workflow_name="pagerduty",
+    )
+
+
+async def diagnose_grafana_alert(rule: str, creds: dict | None = None) -> Diagnosis:
+    """Gather the Grafana connector's poll_state + get_stats for an alert
+    rule, feed them to Track D's brain, and return the Diagnosis (connector
+    rewrite, Phase 3 rollout — Grafana). Same seam shape as the
+    datadog/pagerduty formatters: connector reads -> format_grafana_context
+    -> diagnose_failure, with silence_alert mapping through _AUTO_ACTIONS to
+    the grafana-silence-alert action at dispatch time.
+
+    get_stats() is swallow-to-[] by contract, so an empty event window is
+    still a valid diagnosis input (the ALERT RULE STATE block carries the
+    signal); an unresolvable rule is not, so that raises FixTargetError.
+    """
+    connector = GrafanaConnector(creds or {})
+    state = connector.poll_state(rule)
+    if state.state is ConnectorState.NOT_FOUND:
+        raise FixTargetError(f"alert rule {rule!r} not found")
+    events = connector.get_stats(rule, since=datetime.now(timezone.utc) - timedelta(hours=1))
+    context = format_grafana_context(state, events)
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=f"grafana/{rule}",
+        commit_message="(no commit — Grafana alert-rule diagnosis, not a CI run)",
+        workflow_name="grafana",
+    )
+
+
 async def diagnose_ci_run(
     run_id: int, repo_full_name: str, access_token: str, **diagnose_kwargs
 ) -> MultiFailureResult:
@@ -153,11 +252,85 @@ async def diagnose_ci_run(
     run_id + repo only) — the brain still gets run context via workflow_name.
     `diagnose_kwargs` (iteration / repeated_failure / previous_diagnosis) are
     threaded through to diagnose_multi_failure so the reconcile loop's
-    repeated-failure directive reaches the brain."""
+    repeated-failure directive reaches the brain.
+
+    Scopes diagnosis to the run's actually-failed jobs (found live 2026-09-07
+    dogfooding: diagnosing every job in the ZIP, passing ones included, made
+    the brain report a passing job's non-blocking `ruff` warnings as the build
+    failure). Best-effort + graceful: if the jobs API errors or no name
+    matches a log section, diagnose_multi_failure falls back to all sections,
+    i.e. the prior behavior. An explicitly-passed failing_job_names wins."""
     logs = await fetch_workflow_logs(run_id, repo_full_name, access_token)
-    return await _diagnose_ci_logs(
+    if "failing_job_names" not in diagnose_kwargs:
+        from .connectors.github import GitHubConnector
+        failed = GitHubConnector({"GITHUB_TOKEN": access_token}).failed_job_names(repo_full_name, run_id)
+        if failed:
+            diagnose_kwargs["failing_job_names"] = failed
+    result = await _diagnose_ci_logs(
         logs, run_id, repo_full_name, workflow_name=f"github run {run_id}", **diagnose_kwargs
     )
+    return await _ground_ci_diagnosis_edits(result, repo_full_name, access_token)
+
+
+async def _ground_ci_diagnosis_edits(
+    result: MultiFailureResult, repo_full_name: str, access_token: str
+) -> MultiFailureResult:
+    """Repair (or drop) any files_changed edit that won't actually apply
+    against the real repo content — dogfooding finding #4 (see
+    prash/brain/edit_repair.py's module docstring). GitHub-only for now; the
+    GitLab CI path hasn't shown this failure shape yet and can get the same
+    treatment later if it does.
+
+    Runs after the sub-diagnoses are final, so it only touches edits that are
+    actually broken (fc.apply() already succeeding is left untouched) — a
+    pure repair pass, not a second-guessing one."""
+    if not any(d.files_changed for d in result.diagnoses):
+        return result
+
+    from .brain.edit_repair import repair_edit
+    from .connectors.github import GitHubConnector
+
+    gh = GitHubConnector({"GITHUB_TOKEN": access_token})
+    try:
+        default_branch = gh.get_repo(repo_full_name)["default_branch"]
+    except Exception as exc:  # noqa: BLE001 — can't ground without repo access; leave diagnoses as-is
+        logger.warning(f"Could not resolve default branch for edit grounding: {exc}")
+        return result
+
+    file_cache: dict[str, str | None] = {}
+    for i, diagnosis in enumerate(result.diagnoses):
+        if not diagnosis.files_changed:
+            continue
+        kept = []
+        changed = False
+        for fc in diagnosis.files_changed:
+            if not fc.edits:
+                kept.append(fc)  # new_content (new file) needs no grounding
+                continue
+            if fc.path not in file_cache:
+                try:
+                    file_cache[fc.path] = gh.get_file_content(repo_full_name, fc.path, default_branch)
+                except Exception as exc:  # noqa: BLE001 — file may genuinely not exist yet; can't ground, leave as-is
+                    logger.warning(f"Could not fetch {fc.path} for edit grounding: {exc}")
+                    file_cache[fc.path] = None
+            real_content = file_cache[fc.path]
+            if real_content is None:
+                kept.append(fc)
+                continue
+            try:
+                fc.apply(real_content)
+                kept.append(fc)  # already grounded, no repair needed
+            except ValueError:
+                changed = True
+                repaired = await repair_edit(fc, real_content, diagnosis.fix_description, run_id=str(result.job_names[i] if i < len(result.job_names) else ""))
+                if repaired is not None:
+                    kept.append(repaired)
+                else:
+                    job = result.job_names[i] if i < len(result.job_names) else "?"
+                    logger.warning(f"Dropping ungroundable edit for {fc.path} from diagnosis (job {job})")
+        if changed:
+            result.diagnoses[i] = diagnosis.model_copy(update={"files_changed": kept})
+    return result
 
 
 async def _diagnose_ci_logs(
@@ -404,3 +577,66 @@ def render_multi_failure(result: MultiFailureResult, console) -> None:
     for job, diagnosis in zip(result.job_names, result.diagnoses, strict=False):
         verdict = "[red]no fix proposed[/red]" if not diagnosis.files_changed else "[green]fix proposed[/green]"
         console.print(f"  {verdict}  [bold]{job}[/bold] — {diagnosis.problem_summary}")
+
+async def diagnose_aws_instance(
+    target: str,
+    creds: dict,
+) -> Diagnosis:
+    """Gather AWS connector metrics, state, and logs for an instance, feed them to
+    Track D's brain, and return the Diagnosis.
+    """
+    import datetime
+    
+    aws = AWSConnector(creds)
+    info = aws.locate(target)
+    if not info:
+        raise FixTargetError(f"AWS instance {target} not found")
+        
+    state = aws.poll_state(target)
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    stats = aws.get_stats(target, since=since)
+    
+    context = format_aws_context(target, state, stats)
+    
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=target,
+        commit_message="(no commit — AWS instance diagnosis)",
+        workflow_name="aws",
+        investigation_context=None,
+        multi_file=False,
+        category_hint="aws infrastructure, resource limits, instance state",
+        include_manifest_tools=False,
+    )
+
+
+async def diagnose_gcp_instance(
+    target: str,
+    creds: dict,
+) -> Diagnosis:
+    """Gather GCP connector metrics, state, and logs for an instance, feed them to
+    Track D's brain, and return the Diagnosis.
+    """
+    import datetime
+    
+    gcp = GCPConnector(creds)
+    info = gcp.locate(target)
+    if not info:
+        raise FixTargetError(f"GCP instance {target} not found")
+        
+    state = gcp.poll_state(target)
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    stats = gcp.get_stats(target, since=since)
+    
+    context = format_gcp_context(target, state, stats)
+    
+    return await diagnose_failure(
+        logs=context,
+        repo_full_name=target,
+        commit_message="(no commit — GCP instance diagnosis)",
+        workflow_name="gcp",
+        investigation_context=None,
+        multi_file=False,
+        category_hint="gcp infrastructure, resource limits, instance state",
+        include_manifest_tools=False,
+    )

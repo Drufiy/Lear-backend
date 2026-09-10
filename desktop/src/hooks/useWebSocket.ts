@@ -1,52 +1,67 @@
-import { useState, useCallback } from 'react';
-import io from 'socket.io-client';
-// Force TS Server reload
-interface WebSocketMessage {
-    type: string;
-    date: any;
-    timestamp: string;
+import { useEffect, useRef, useState, useCallback } from 'react';
+
+export interface WebSocketEvent {
+  watch_id?: string;
+  connector?: string;
+  event_type: string;
+  summary: string;
+  raw?: any;
+  timestamp: string;
 }
 
-export function useWebSocket(url: string = 'ws://localhost:8000/ws/events') {
-    const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
-    const [isConnected, setIsConnected] = useState(false);
-    const [error, setError] = useState<Error | null>(null);
+export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
+  const [isConnected, setIsConnected] = useState(false);
+  const [lastEvent, setLastEvent] = useState<WebSocketEvent | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
 
-    const startListening = useCallback(() => {
-        const socket = io(url, {
-            transports: ['websocket']
-        })
+  const connect = useCallback(() => {
+    try {
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
 
-        socket.on('connect', () => {
-            setIsConnected(true);
-            setError(null);
-        })
+      ws.onopen = () => {
+        setIsConnected(true);
+      };
 
-        socket.on('message', (data: WebSocketMessage) => {
-            setLastMessage(data);
-        })
-
-        socket.on('error', (err) => {
-            setError(err);
-            setIsConnected(false);
-        })
-
-        socket.on('disconnect', () => {
-            setIsConnected(false);
-        });
-
-        return () => {
-            socket.off('connect');
-            socket.off('message');
-            socket.off('error');
-            socket.off('disconnect');
+      ws.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+          if (parsed && parsed.events && Array.isArray(parsed.events)) {
+            parsed.events.forEach((ev: WebSocketEvent) => setLastEvent(ev));
+          } else if (parsed.event_type) {
+            setLastEvent(parsed);
+          }
+        } catch (e) {
+          console.error('Failed to parse WebSocket message:', e);
         }
-    }, [url]);
+      };
 
-    return {
-        lastMessage,
-        isConnected,
-        error,
-        startListening
+      ws.onclose = () => {
+        setIsConnected(false);
+        // Attempt reconnect after 3 seconds
+        reconnectTimeoutRef.current = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        setIsConnected(false);
+        ws.close();
+      };
+    } catch (e) {
+      console.error('WebSocket connection error:', e);
+      reconnectTimeoutRef.current = setTimeout(connect, 3000);
+    }
+  }, [url]);
+
+  useEffect(() => {
+    connect();
+    return () => {
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (wsRef.current) wsRef.current.close();
     };
-};
+  }, [connect]);
+
+  return { isConnected, lastEvent };
+}
+
+export default useWebSocket;

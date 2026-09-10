@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkout-api-config
+  namespace: lear-demo
+data:
+  DATABASE_HOST: "postgres"

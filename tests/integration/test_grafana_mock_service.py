@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
+from datetime import datetime, timezone
 
 import pytest
 
 from prash.connectors.base import ConnectorState
 from prash.connectors.grafana import GrafanaConnector
-
 
 WIREMOCK_BASE_URL = os.getenv("WIREMOCK_BASE_URL")
 pytestmark = pytest.mark.skipif(not WIREMOCK_BASE_URL, reason="WireMock is not configured")
@@ -115,6 +115,64 @@ def test_grafana_connector_lifecycle_over_http() -> None:
 
     assert connector.fetch_logs("ci-alert") == ["1000 CI deployment"]
     assert connector.silence_alert("ci-alert", minutes=30)["silenceID"] == "ci-silence-1"
+
+    # Watch surface (Phase 3 rollout): the already-active alert is baselined
+    # silently by watch(), so the first poll is deduped silence; flipping the
+    # alerts endpoint to empty turns the previously-firing instance into a
+    # recovery -- resolved alerts leave the Alertmanager list entirely, so
+    # absence IS the recovery signal.
+    handle = connector.watch("ci-alert")
+    assert handle.rule_uid == "ci-alert"
+    assert handle.poll() == []
+
+    _register_mapping(_grafana_mapping("GET", "/api/alertmanager/grafana/api/v2/alerts", [], priority=1))
+    recovered = handle.poll()
+    assert [e["event_type"] for e in recovered] == ["alert_recovered"]
+    assert "no longer listed" in recovered[0]["summary"]
+
+    # get_stats over the same mock: the annotation body references neither
+    # the rule uid nor the title (unattributed -> omitted), and the active
+    # alert carries no startsAt inside the window. An empty window is a
+    # valid result, not an error.
+    assert connector.get_stats("ci-alert") == []
+
+
+def test_grafana_connector_get_stats_annotates_state_changes() -> None:
+    _register_mapping(_grafana_mapping("GET", "/api/org", {"id": 1, "name": "CI Org"}))
+    _register_mapping(
+        _grafana_mapping(
+            "GET",
+            "/api/v1/provisioning/alert-rules",
+            [{"uid": "ci-alert", "title": "CI Test Alert"}],
+        )
+    )
+    ts = int(datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    _register_mapping(
+        _grafana_mapping(
+            "GET",
+            "/api/annotations",
+            [
+                # matched by title in text; Alerting -> alert_firing
+                {"time": ts, "newState": "Alerting", "prevState": "Pending", "text": "CI Test Alert", "tags": []},
+                # references neither uid nor title -> unattributed, omitted
+                {"time": ts, "newState": "Alerting", "prevState": "Pending", "text": "other rule fired", "tags": ["other"]},
+            ],
+        )
+    )
+    _register_mapping(_grafana_mapping("GET", "/api/alertmanager/grafana/api/v2/alerts", []))
+
+    connector = GrafanaConnector(
+        {
+            "GRAFANA_URL": os.environ["GRAFANA_URL"],
+            "GRAFANA_API_KEY": os.environ["GRAFANA_API_KEY"],
+        }
+    )
+
+    events = connector.get_stats("ci-alert", since=datetime(2026, 9, 9, 10, 0, tzinfo=timezone.utc))
+
+    assert [e["event_type"] for e in events] == ["alert_firing"]
+    assert "Pending -> Alerting" in events[0]["summary"]
+    assert events[0]["timestamp"].isoformat() == "2026-09-09T11:00:00+00:00"
 
 
 def test_grafana_connector_reports_unknown_on_alert_api_failure() -> None:

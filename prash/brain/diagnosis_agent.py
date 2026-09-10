@@ -106,7 +106,7 @@ DIAGNOSIS_TOOL = {
             },
             "category": {
                 "type": "string",
-                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "unknown"],
+                "enum": ["code", "workflow_config", "dependency", "environment", "flaky_test", "runtime", "infra_as_code", "monitoring", "unknown"],
                 "description": (
                     "code: app code bug. workflow_config: .github/workflows/*.yml wrong. "
                     "dependency: package.json/requirements.txt/go.mod issue. "
@@ -116,6 +116,9 @@ DIAGNOSIS_TOOL = {
                     "CrashLoopBackOff/OOMKilled/ImagePullBackOff/stuck) — not a CI failure, "
                     "nothing to diff. See the KUBERNETES / RUNTIME FAILURES section below. "
                     "infra_as_code: Terraform drift, missing modules, state lock errors, or provider auth failures. "
+                    "monitoring: an external observability signal fired (Datadog monitor "
+                    "entered Alert/Warn, metric spike, monitor recovery) — not a CI failure, "
+                    "nothing to diff. See the DATADOG / MONITOR ALERTS section below. "
                     "unknown: cannot determine."
                 ),
             },
@@ -137,20 +140,46 @@ DIAGNOSIS_TOOL = {
             },
             "recommended_action": {
                 "type": ["string", "null"],
-                "enum": ["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply", None],
+                "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", "mute_monitor", "acknowledge_incident", None],
                 "description": (
-                    "ONLY populate when category='runtime' or 'infra_as_code'. Which infrastructure action "
+                    "ONLY populate when category='runtime', 'infra_as_code', or 'monitoring'. Which infrastructure action "
                     "addresses this failure: restart_pod (clears a wedged/stuck container — "
                     "does NOT help if the image or command is genuinely broken, it will just "
                     "crash-loop again), rollback (the last deployment introduced the problem), "
-                    "terraform_init (resolves missing modules or uninitialized backend), "
-                    "terraform_apply (resolves config drift or applies pending state changes). "
-                    "Leave null if no action can help, OR if you are instead populating `options` "
-                    "below for a genuinely ambiguous case, OR — importantly — if you are proposing "
-                    "a corrected Deployment manifest in files_changed (the manifest change IS the "
-                    "fix; a restart on top of it is noise). Only leave files_changed=[] for "
-                    "category='runtime' when you have no manifest repo available, or when the fix "
-                    "genuinely isn't in the manifest. See the KUBERNETES / RUNTIME FAILURES section."
+                    "edit_configmap (a specific ConfigMap key holds a wrong value and the pod's "
+                    "own logs name both the key and what the correct value should be — see "
+                    "config_patch/config_patch_target below and the KUBERNETES / RUNTIME "
+                    "FAILURES section), terraform_init (resolves missing modules or uninitialized "
+                    "backend), terraform_apply (resolves config drift or applies pending state "
+                    "changes), mute_monitor (silences a firing Datadog monitor's paging while the "
+                    "underlying metric is investigated — never a fix for the metric itself), "
+                    "acknowledge_incident (claims 'someone is looking' on a PagerDuty incident "
+                    "— stops escalation pressure, never a fix for the underlying problem). "
+                    "Leave null if no action can help, OR if you are instead populating "
+                    "`options` below for a genuinely ambiguous case, OR — importantly — if you are "
+                    "proposing a corrected Deployment manifest in files_changed (the manifest "
+                    "change IS the fix; a restart on top of it is noise). Only leave "
+                    "files_changed=[] for category='runtime' when you have no manifest repo "
+                    "available, or when the fix genuinely isn't in the manifest. See the "
+                    "KUBERNETES / RUNTIME FAILURES section."
+                ),
+            },
+            "config_patch": {
+                "type": ["object", "null"],
+                "description": (
+                    "ONLY populate when recommended_action='edit_configmap'. Maps key -> "
+                    "corrected_value for the ConfigMap merge-patch, e.g. "
+                    "{'DATABASE_HOST': 'postgres'}. Every key/value must be named with high "
+                    "confidence directly from the pod's own logs — never guess a value that "
+                    "isn't evidenced there. Leave null otherwise."
+                ),
+                "additionalProperties": {"type": "string"},
+            },
+            "config_patch_target": {
+                "type": ["string", "null"],
+                "description": (
+                    "ONLY populate when recommended_action='edit_configmap'. The ConfigMap's "
+                    "own name (not the pod's), e.g. 'checkout-api-config'. Leave null otherwise."
                 ),
             },
             "options": {
@@ -172,7 +201,7 @@ DIAGNOSIS_TOOL = {
                     "properties": {
                         "action": {
                             "type": ["string", "null"],
-                            "enum": ["restart_pod", "rollback", "scale", "terraform_init", "terraform_apply", None],
+                            "enum": ["restart_pod", "rollback", "scale", "edit_configmap", "terraform_init", "terraform_apply", "mute_monitor", "acknowledge_incident", None],
                             "description": "This option's action id, or null for 'no automated action, escalate to a human' as one of the ranked choices.",
                         },
                         "rationale": {
@@ -182,6 +211,15 @@ DIAGNOSIS_TOOL = {
                         "is_default": {
                             "type": "boolean",
                             "description": "True for exactly one option: what you would pick if forced to choose a single action.",
+                        },
+                        "config_patch": {
+                            "type": ["object", "null"],
+                            "description": "Only populated when this option's action='edit_configmap'. Same shape as the top-level config_patch field.",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "config_patch_target": {
+                            "type": ["string", "null"],
+                            "description": "Only populated when this option's action='edit_configmap'. Same shape as the top-level config_patch_target field.",
                         },
                     },
                 },
@@ -665,7 +703,20 @@ have been given access to the repository holding the Deployment manifest:
 **WITHOUT a manifest repo** (no investigation tools available): there is no
 code diff you can write. files_changed MUST be [] (fix_type auto-resolves to
 manual_required) and you communicate what to do via recommended_action:
-"restart_pod", "rollback", or null if no available action can help.
+"restart_pod", "rollback", "edit_configmap", or null if no available action
+can help.
+
+edit_configmap is the one exception to "no code diff you can write" — it is a
+live patch, not a manifest edit, so it needs no repo access. Use it ONLY when
+BOTH hold: (1) the pod's own logs name the exact ConfigMap key/value at fault
+with high confidence (e.g. the app logs "could not reach postgres-wrong:5432"
+and also logs which ConfigMap/key that came from — you are reading the value
+out of the evidence, never guessing it), and (2) you can name the ConfigMap
+itself (config_patch_target) — usually visible in the pod's own log line, or
+inferable with high confidence from a "<deployment>-config" naming pattern
+you've actually seen evidenced. If the logs show a broken value but not which
+key/ConfigMap it lives in, that's still recommended_action: null — a
+low-confidence guess at the target is worse than surfacing nothing.
 
 **WITH a manifest repo** (fetch_file / list_directory / search_code are
 available to you): most real Kubernetes failures are NOT fixed by restarting —
@@ -771,6 +822,31 @@ available, so the Deployment is readable and editable.
     being useless — but instead of stopping at "a human must fix the Deployment", you hand the
     human the corrected Deployment. Do not fall back to files_changed=[] just because the
     category is "runtime"; if you can read the manifest, fix the manifest.
+
+EXAMPLE 20c — CrashLoopBackOff, wrong ConfigMap value, NO manifest repo (edit_configmap)
+POD STATUS: problem=CrashLoopBackOff, restart_count=6
+POD LOGS:
+  "[checkout-api] starting up, DATABASE_HOST='postgres-wrong' DATABASE_PORT=5432"
+  "[checkout-api] attempt 1/8: could not reach postgres-wrong:5432 -- ConnectionRefusedError"
+  ... (7 more identical attempts) ...
+  "[checkout-api] FATAL: could not connect to database at postgres-wrong:5432 after 8 attempts -- ConnectionRefusedError"
+  "[checkout-api] check configmap/checkout-api-config key DATABASE_HOST -- current value is 'postgres-wrong'"
+No investigation tools available — you cannot see or edit the Deployment or the ConfigMap.
+  category: "runtime", fix_type: "manual_required", confidence: 0.9
+  recommended_action: "edit_configmap"
+  config_patch: {"DATABASE_HOST": "postgres"}
+  config_patch_target: "checkout-api-config"
+  files_changed: []
+  root_cause: "checkout-api's ConfigMap key DATABASE_HOST is set to 'postgres-wrong', a host that doesn't exist — every connection attempt is refused, and the app's own logs confirm both the ConfigMap name and the key."
+  fix_description: "Patch configmap/checkout-api-config so DATABASE_HOST points at the real service name 'postgres' (the cluster's Service for the database, inferred from the app's naming convention and the fact that 'postgres-wrong' is a corrupted variant of it), then restart the deployment to pick up the change."
+  ← Why this is safe to name without fetch_file: the pod's own log line names BOTH the exact
+    ConfigMap (checkout-api-config) and the exact key (DATABASE_HOST) at fault — that's not a
+    guess, it's the app doing your investigation for you. The corrected value ("postgres") is
+    inferred from the broken value being an obvious corruption of the real Service name; if the
+    logs gave no hint at all what the right value should be, this would drop to
+    recommended_action: null instead of fabricating a value.
+  ← WRONG would be recommended_action="restart_pod" — DATABASE_HOST is unchanged after a restart,
+    so the pod fails identically every time, exactly like EXAMPLE 20's missing-file case.
 
 EXAMPLE 21 — CrashLoopBackOff, no clear cause (manual_required, tentative restart)
 POD STATUS: problem=CrashLoopBackOff, restart_count=4
@@ -884,7 +960,158 @@ scheduling failure, no other signal — same shape as EXAMPLE 21, just far more 
   a menu. Never use options as a way to avoid making the call you're actually equipped \
   to make.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATADOG / MONITOR ALERTS (category: monitoring — NOT a CI failure)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You will sometimes be asked to diagnose a Datadog monitor firing, not a CI run
+and not a Kubernetes pod. You'll recognize this from the input format:
+
+  === MONITOR STATE ===
+  monitor: high-cpu-on-web
+  monitor_id: 1234567
+  overall_state: Alert
+  connector_state: failed
+
+  === DATADOG EVENTS ===
+  - [2026-09-04T12:00:00+00:00] monitor_alert: Monitor 'high-cpu-on-web' entered Alert state
+      metric: query=avg:system.cpu.user{*} by {host} max=96.4 mean=88.1 peak_at=2026-09-04T11:59:00+00:00
+  - [2026-09-04T11:58:12+00:00] deploy_event: Production deploy of web-frontend v2.4.1
+
+category MUST be "monitoring". files_changed MUST be [] — an observability
+signal is not a code diff, and manufacturing one would be a fabrication. The
+fix lives in fix_description + recommended_action, exactly like the
+no-manifest-repo Kubernetes case above.
+
+THE EVENT TYPES:
+
+• monitor_alert — the monitor's condition crossed its threshold. mute_monitor
+  is the honest recommended_action ONLY as a stopgap: it silences the paging
+  while a human works the real cause, exactly like restart_pod for a wedged
+  pod. NEVER present it as a fix — fix_description must say what actually
+  needs investigating (the metric in the context block, the host/scope that
+  spiked, the threshold that tripped). When the raw metric context is missing
+  or unclear, recommended_action: null is the honest answer — do not mute a
+  monitor you cannot characterize.
+• metric_spike — underlying metric context, usually attached to an alert.
+  Use it: name the magnitude (max vs mean), when it peaked, and what service
+  that metric belongs to. A spike with no alert attached → recommended_action:
+  null, describe what to check (correlated services, recent deploys).
+• deploy_event — a deployment happened near the incident window. This is
+  correlation gold: a monitor_alert right after a deploy_event is most likely
+  caused by that deploy. Say so in root_cause with both timestamps.
+• monitor_recovered — the monitor returned to OK on its own. No action; a
+  one-line problem_summary that it self-recovered is enough.
+
+EXAMPLE 26 — Monitor alert with clear metric context (manual_required, mute as stopgap)
+Log: "=== MONITOR STATE ===" ... overall_state: Alert ... "=== DATADOG EVENTS ==="
+     monitor_alert with metric context: max=96.4 mean=88.1 (CPU on web hosts)
+  fix_type: "manual_required", confidence: 0.75, category: "monitoring"
+  files_changed: []
+  recommended_action: "mute_monitor"
+  fix_description: names the actual investigation (which host crossed 90% CPU,
+  since when) and is explicit that muting only stops the paging.
+
+EXAMPLE 27 — Monitor alert immediately after a deploy (genuinely ambiguous → options)
+Log: "=== DATADOG EVENTS ===" deploy_event at 11:58:12, monitor_alert at 12:00:00
+     with metric context showing the spike starting at 11:58
+  fix_type: "manual_required", confidence: 0.70, category: "monitoring", files_changed: []
+  options: [{action: "mute_monitor", rationale: "stops the paging while the new
+  release is investigated — the spike started within seconds of the deploy",
+  is_default: true},
+            {action: "rollback", rationale: "if the CPU regression is confirmed in
+  the new release, reverting it removes the cause instead of the paging"}]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PAGERDUTY / INCIDENT PAGES (category: monitoring — same rules as Datadog above)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A PagerDuty incident is the same kind of input as a Datadog monitor alert:
+an external observability signal, not a CI run and not a code diff. All the
+DATADOG / MONITOR ALERTS rules above apply unchanged — category MUST be
+"monitoring", files_changed MUST be [], fix lives in fix_description +
+recommended_action. You'll recognize the input format:
+
+  === INCIDENT STATE ===
+  service: checkout
+  service_id: PSVC1
+  overall_state: failed
+  open_incidents: 1 (worst: triggered)
+
+  === PAGERDUTY EVENTS ===
+  - [2026-09-04T12:00:00+00:00] incident_triggered: Incident '500s spiking' on checkout triggered (critical severity, high urgency)
+  - [2026-09-04T11:58:00+00:00] change_event: Production deploy of web-frontend v2.4.1
+
+EVENT TYPES:
+
+• incident_triggered — someone is being PAGED right now. acknowledge_incident
+  is the honest recommended_action ONLY as a stopgap: it claims "someone is
+  looking," which stops escalation pressure while the real cause is worked —
+  the exact role mute_monitor plays for Datadog. It is NOT a fix and must
+  never be presented as one. If the severity is critical but the summary
+  gives you nothing actionable, recommended_action: null is the honest answer.
+• incident_acknowledged / incident_escalated — a human claimed it, or it
+  re-paged to the next rotation (a signal nobody is actually on it).
+• incident_resolved — over; no action, one-line acknowledgment.
+• change_event — a deploy/config change PagerDuty recorded near the
+  incident window. Correlation gold, same as a GitHub deploy_event: an
+  incident_triggered right after a change_event is most likely caused by it.
+
+EXAMPLE 28 — PagerDuty incident right after a change event (monitoring)
+Log: "=== INCIDENT STATE ===" ... worst: triggered ... "=== PAGERDUTY EVENTS ==="
+     change_event at 11:58, incident_triggered at 12:00 (critical severity, high urgency)
+  fix_type: "manual_required", confidence: 0.75, category: "monitoring"
+  files_changed: []
+  recommended_action: "acknowledge_incident"
+  fix_description: names the correlation (incident began within two minutes of
+  the v2.4.1 deploy) and is explicit that acknowledging only stops escalation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GRAFANA / ALERT RULES (category: monitoring — same rules as Datadog above)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A Grafana alert rule firing is the same kind of input as a Datadog monitor
+alert: an external observability signal, not a CI run and not a code diff.
+All the DATADOG / MONITOR ALERTS rules above apply unchanged — category MUST
+be "monitoring", files_changed MUST be [], fix lives in fix_description +
+recommended_action. You'll recognize the input format:
+
+  === ALERT RULE STATE ===
+  rule: High error rate
+  rule_uid: abc123
+  overall_state: failed
+  alert_state: active
+  active_alert_count: 1
+
+  === GRAFANA EVENTS ===
+  - [2026-09-09T12:00:00+00:00] alert_firing: Alert rule 'High error rate' is firing
+  - [2026-09-09T11:58:00+00:00] alert_state_changed: Alert rule 'High error rate' state change: ? -> Alerting: deploy marker
+
+EVENT TYPES:
+
+• alert_firing — the rule's condition is currently true and paging noise is
+  being generated. silence_alert is the honest recommended_action ONLY as a
+  stopgap (the exact role mute_monitor plays for Datadog and
+  acknowledge_incident for PagerDuty): it stops the noise for a time-bounded
+  window without touching whatever's actually firing. It is NOT a fix and
+  must never be presented as one. If the summary gives you nothing
+  actionable, recommended_action: null is the honest answer.
+• alert_recovered — the rule returned to normal on its own. No action; a
+  one-line problem_summary that it self-recovered is enough.
+• alert_state_changed — silenced/inhibited or another non-firing transition.
+  A silence is not a recovery; don't claim the problem went away.
+
+EXAMPLE 29 — Grafana alert rule firing after a deploy marker (monitoring)
+Log: "=== ALERT RULE STATE ===" ... alert_state: active ... "=== GRAFANA EVENTS ==="
+     deploy-marker annotation at 11:58, alert_firing at 12:00
+  fix_type: "manual_required", confidence: 0.75, category: "monitoring"
+  files_changed: []
+  recommended_action: "silence_alert"
+  fix_description: names the correlation (the rule began firing within two
+  minutes of the deploy marker) and is explicit that silencing only stops
+  the paging noise for its window.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 MATRIX BUILD FAILURES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1134,6 +1361,163 @@ def format_k8s_context(pod_status, logs: str, events: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def format_aws_context(target: str, state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for an AWS diagnosis.
+    `state` is a ConnectorState (e.g., HEALTHY, FAILED).
+    `events` is a list of ConnectorEvent dicts (CloudWatch/CloudTrail events).
+    """
+    parts = [
+        "=== AWS INSTANCE STATUS ===",
+        f"target: {target}",
+        f"state: {state.state.value if hasattr(state, 'state') else state}",
+        "",
+        "=== AWS EVENTS (METRICS & ALARMS) ===",
+    ]
+    if events:
+        for e in events:
+            # e is a dict: timestamp, event_type, summary, raw
+            parts.append(f"- {e.get('timestamp')}: [{e.get('event_type')}] {e.get('summary')}")
+    else:
+        parts.append("(no events)")
+    return "\n".join(parts)
+
+
+# ── Datadog context detection (connector rewrite, milestones M2/M4) ─────────
+# format_datadog_context() below always emits this exact marker. Used to
+# recognize Datadog monitor input so the CI-shaped _ERROR_RE guard doesn't
+# reject it — same role _K8S_CONTEXT_MARKER plays for pod diagnoses.
+_DATADOG_CONTEXT_MARKER = "=== MONITOR STATE ==="
+
+
+def _is_datadog_context(logs: str) -> bool:
+    return _DATADOG_CONTEXT_MARKER in (logs or "")
+
+
+def format_datadog_context(monitor_state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a Datadog
+    monitor diagnosis, matching the exact format documented in SYSTEM_PROMPT's
+    "DATADOG / MONITOR ALERTS" section. `monitor_state` is Track B's
+    ResourceState (prash.connectors.base) -- duck-typed here (attribute
+    access only) rather than imported, so this module doesn't gain a hard
+    dependency on the connectors package, same as format_k8s_context.
+
+    `events` matches DatadogConnector.get_stats()' return shape: a list of
+    ConnectorEvent dicts (timestamp/connector/event_type/summary/raw),
+    already sorted oldest-first.
+    """
+    detail = getattr(monitor_state, "detail", {}) or {}
+    parts = [
+        "=== MONITOR STATE ===",
+        f"monitor: {getattr(monitor_state, 'resource', 'unknown')}",
+        f"monitor_id: {detail.get('monitor_id', 'unknown')}",
+        f"overall_state: {detail.get('overall_state', 'unknown')}",
+        f"connector_state: {getattr(getattr(monitor_state, 'state', None), 'value', 'unknown')}",
+        "",
+        "=== DATADOG EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- [{e.get('timestamp').isoformat() if e.get('timestamp') else 'unknown-time'}] "
+                         f"{e.get('event_type', 'event')}: {e.get('summary', '')}")
+            metric = (e.get("raw") or {}).get("metric")
+            if metric:
+                parts.append(
+                    f"    metric: query={metric.get('query')} max={metric.get('max')} "
+                    f"mean={metric.get('mean')} peak_at={metric.get('peak_at')}"
+                )
+    else:
+        parts.append("(no events in the lookback window)")
+    return "\n".join(parts)
+
+
+# ── PagerDuty context detection (connector rewrite, Phase 3 rollout) ────────
+# format_pagerduty_context() below always emits this exact marker. Same role
+# the k8s/datadog markers play: recognizes non-CI input so the CI-shaped
+# _ERROR_RE guard doesn't reject it.
+_PAGERDUTY_CONTEXT_MARKER = "=== INCIDENT STATE ==="
+
+
+def _is_pagerduty_context(logs: str) -> bool:
+    return _PAGERDUTY_CONTEXT_MARKER in (logs or "")
+
+
+def format_pagerduty_context(incident_state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a PagerDuty
+    incident diagnosis, matching the format documented in SYSTEM_PROMPT's
+    "PAGERDUTY / INCIDENT PAGES" section. `incident_state` is Track B's
+    ResourceState (prash.connectors.base) -- duck-typed (attribute access
+    only) so this module gains no hard connector dependency, same as the
+    k8s/datadog formatters.
+
+    `events` matches PagerDutyConnector.get_stats()' return shape: a list of
+    ConnectorEvent dicts, already sorted oldest-first.
+    """
+    detail = getattr(incident_state, "detail", {}) or {}
+    open_incidents = detail.get("open_incidents") or []
+    worst = ""
+    if open_incidents:
+        worst = sorted((str(i.get("status")) for i in open_incidents), key=lambda s: s != "triggered")[0]
+        worst = f" (worst: {worst})"
+    parts = [
+        "=== INCIDENT STATE ===",
+        f"service: {getattr(incident_state, 'resource', 'unknown')}",
+        f"service_id: {detail.get('service_id', 'unknown')}",
+        f"overall_state: {getattr(getattr(incident_state, 'state', None), 'value', 'unknown')}",
+        f"open_incidents: {len(open_incidents)}{worst}",
+        "",
+        "=== PAGERDUTY EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- [{e.get('timestamp').isoformat() if e.get('timestamp') else 'unknown-time'}] "
+                         f"{e.get('event_type', 'event')}: {e.get('summary', '')}")
+    else:
+        parts.append("(no events in the lookback window)")
+    return "\n".join(parts)
+
+
+# ── Grafana context detection (connector rewrite, Phase 3 rollout) ──────────
+# format_grafana_context() below always emits this exact marker. Same role
+# the k8s/datadog/pagerduty markers play: recognizes non-CI input so the
+# CI-shaped _ERROR_RE guard doesn't reject it.
+_GRAFANA_CONTEXT_MARKER = "=== ALERT RULE STATE ==="
+
+
+def _is_grafana_context(logs: str) -> bool:
+    return _GRAFANA_CONTEXT_MARKER in (logs or "")
+
+
+def format_grafana_context(rule_state, events: list[dict]) -> str:
+    """Build the `logs` string diagnose_failure() expects for a Grafana
+    alert-rule diagnosis, matching the format documented in SYSTEM_PROMPT's
+    "GRAFANA / ALERT RULES" section. `rule_state` is Track B's ResourceState
+    (prash.connectors.base) -- duck-typed (attribute access only) so this
+    module gains no hard connector dependency, same as the k8s/datadog/
+    pagerduty formatters.
+
+    `events` matches GrafanaConnector.get_stats()' return shape: a list of
+    ConnectorEvent dicts, already sorted oldest-first.
+    """
+    detail = getattr(rule_state, "detail", {}) or {}
+    parts = [
+        "=== ALERT RULE STATE ===",
+        f"rule: {getattr(rule_state, 'resource', 'unknown')}",
+        f"rule_uid: {detail.get('uid', 'unknown')}",
+        f"overall_state: {getattr(getattr(rule_state, 'state', None), 'value', 'unknown')}",
+        f"alert_state: {detail.get('alert_state', 'unknown')}",
+        f"active_alert_count: {detail.get('active_alert_count', 0)}",
+        "",
+        "=== GRAFANA EVENTS ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- [{e.get('timestamp').isoformat() if e.get('timestamp') else 'unknown-time'}] "
+                         f"{e.get('event_type', 'event')}: {e.get('summary', '')}")
+    else:
+        parts.append("(no events in the lookback window)")
+    return "\n".join(parts)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def diagnose_failure(
@@ -1178,7 +1562,17 @@ async def diagnose_failure(
     # kubernetes.py's get_pod_logs docstring), but the POD STATUS block
     # format_k8s_context() emits always carries real signal via the `problem`
     # field even when there's nothing in POD LOGS for _ERROR_RE to match.
-    if not _is_k8s_context(logs) and not _ERROR_RE.search(preprocessed):
+    # Same reasoning for Datadog monitor input: the MONITOR STATE block
+    # format_datadog_context() emits carries the overall_state field even
+    # when the event window is empty. And for PagerDuty incident input: the
+    # INCIDENT STATE block format_pagerduty_context() emits carries the
+    # service's open-incident state even when the event window is empty.
+    # Grafana alert-rule input is the same shape: the ALERT RULE STATE block
+    # format_grafana_context() emits carries the rule's firing state even
+    # when the event window is empty.
+    if (not _is_k8s_context(logs) and not _is_datadog_context(logs)
+            and not _is_pagerduty_context(logs) and not _is_grafana_context(logs)
+            and not _ERROR_RE.search(preprocessed)):
         logger.warning(f"Preprocessed logs contain no error signal for run {run_id} — likely incomplete logs")
         raise DiagnosisValidationError(
             "CI logs contain no error output (likely fetched before step logs were archived). "
@@ -1291,6 +1685,17 @@ async def diagnose_failure(
                 not has_edits and basename in _KNOWN_EMPTY_FILENAMES and not fc.get("edits")
             )
             explicitly_empty = fc.get("create_empty") is True
+
+            # A missing/blank per-file `explanation` (required on FileChange)
+            # must not sink the whole job's diagnosis. Found live 2026-09-07
+            # dogfooding (Lear on its own failed CI run): the model omitted
+            # `explanation` on one file, Pydantic rejected the whole Diagnosis,
+            # and diagnose_multi_failure dropped that entire job silently. Fill
+            # it from the top-level fix_description, else an honest placeholder,
+            # so a real fix survives one missing sub-field.
+            if not (fc.get("explanation") or "").strip():
+                fc["explanation"] = (raw_args.get("fix_description") or "").strip() or \
+                    "No per-file explanation was provided by the model."
 
             if has_new_content or has_edits:
                 valid_files.append(fc)
@@ -2047,4 +2452,20 @@ def _build_user_prompt(
             "Your fix will be pushed to the same branch for CI verification."
         )
 
+    return "\n".join(parts)
+
+
+def format_gcp_context(target: str, state, events: list[dict]) -> str:
+    parts = [
+        "=== GCP INSTANCE STATUS ===",
+        f"target: {target}",
+        f"state: {state.state.value if hasattr(state, 'state') else state}",
+        "",
+        "=== GCP EVENTS (METRICS & LOGS) ===",
+    ]
+    if events:
+        for e in events:
+            parts.append(f"- {e.get('timestamp')}: [{e.get('event_type')}] {e.get('summary')}")
+    else:
+        parts.append("(no events)")
     return "\n".join(parts)

@@ -12,6 +12,8 @@ from prash.actions.exec_command import ExecAction
 from prash.actions.execute_aws import ExecuteAwsAction
 from prash.actions.missing_secret import RequestSecretAction
 from prash.actions.datadog_mute import DatadogMuteMonitorAction
+from prash.actions.datadog_alert import DatadogAlertAction
+from prash.actions.pagerduty_page import PagerdutyPageAction
 from prash.actions.gitleaks_escalate import GitleaksEscalateAction
 from prash.actions.grafana_silence import GrafanaSilenceAlertAction
 from prash.actions.open_pr import OpenPrAction
@@ -1190,6 +1192,313 @@ def test_datadog_mute_risk_tier_is_safe():
     assert DatadogMuteMonitorAction().spec.risk_tier.value == "safe"
 
 
+# ── datadog-alert (connector rewrite M4: APPROVAL-gated outbound event) ─────
+
+class _FakeAlertDatadog:
+    def __init__(self, fail=False, verify_ok=True):
+        self.fail = fail
+        self.verify_ok = verify_ok
+        self.posted = []
+        self.checked = []
+
+    def post_event(self, title, text, tags=None, priority="normal"):
+        if self.fail:
+            raise RuntimeError("datadog api error")
+        self.posted.append((title, text, tags, priority))
+        return {"data": {"id": "evt-1", "attributes": {"title": title}}}
+
+    def get_event(self, event_id):
+        self.checked.append(event_id)
+        if not self.verify_ok:
+            raise RuntimeError("404: event not found")
+        return {"data": {"id": event_id, "attributes": {}}}
+
+
+def _alert_ctx(tmp_path, dd=None, **extra):
+    return _ctx(tmp_path, resource="checkout-api",
+                extra={"connectors": {"datadog": dd if dd is not None else _FakeAlertDatadog()}, **extra})
+
+
+def test_datadog_alert_plan(tmp_path):
+    action = DatadogAlertAction()
+    plan = action.plan(_alert_ctx(tmp_path))
+    assert plan.action_id == "datadog-alert"
+    assert plan.reversible is False
+    assert plan.risk_tier.value == "approval"
+    assert "Post Datadog event 'Prash alert: checkout-api'" in plan.steps[0].description
+    assert "Visible to the whole team" in plan.steps[0].impact
+
+
+def test_datadog_alert_plan_with_params(tmp_path):
+    plan = DatadogAlertAction().plan(_alert_ctx(tmp_path, title="DB down", tags="team:db,env:prod", priority="low"))
+    assert "Post Datadog event 'DB down' (priority low) tagged team:db, env:prod" in plan.steps[0].description
+
+
+def test_datadog_alert_execute(tmp_path):
+    dd = _FakeAlertDatadog()
+    result = DatadogAlertAction().execute(_alert_ctx(tmp_path, dd=dd))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["event_id"] == "evt-1"
+    assert dd.posted == [("Prash alert: checkout-api", "checkout-api", None, "normal")]
+
+
+def test_datadog_alert_execute_with_params(tmp_path):
+    dd = _FakeAlertDatadog()
+    ctx = _alert_ctx(tmp_path, dd=dd, title="DB down", text="p0 outage", tags="team:db, env:prod", priority="low")
+    result = DatadogAlertAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert dd.posted == [("DB down", "p0 outage", ["team:db", "env:prod"], "low")]
+
+
+def test_datadog_alert_execute_fails_honestly(tmp_path):
+    ctx = _alert_ctx(tmp_path, dd=_FakeAlertDatadog(fail=True))
+    result = DatadogAlertAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "datadog api error" in result.summary
+
+
+def test_datadog_alert_execute_without_connector(tmp_path):
+    result = DatadogAlertAction().execute(_ctx(tmp_path, resource="x", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_datadog_alert_verify(tmp_path):
+    dd = _FakeAlertDatadog()
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert dd.checked == ["evt-1"]
+    assert "evt-1" in verification.detail
+
+
+def test_datadog_alert_verify_missing_event(tmp_path, monkeypatch):
+    dd = _FakeAlertDatadog(verify_ok=False)
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    sleeps: list = []
+    monkeypatch.setattr("prash.actions.datadog_alert.time.sleep", lambda s: sleeps.append(s))
+    verification = action.verify(ctx, result)
+    assert verification.ok is False
+    assert len(dd.checked) == 3  # bounded retry, not a single shot
+    assert sleeps == [2, 4]
+    assert "may still be propagating" in verification.detail or "not found" in verification.detail
+
+
+def test_datadog_alert_verify_retries_through_propagation(tmp_path, monkeypatch):
+    """Found live (2026-09-07): a just-posted event 404s for a few seconds
+    before it is queryable. Verification must retry within bounds and confirm
+    once reality catches up -- and still report honestly if it never does."""
+    import prash.actions.datadog_alert as alert_mod
+
+    class _PropagatingDatadog(_FakeAlertDatadog):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def get_event(self, event_id):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("404: event not found")
+            return {"data": {"id": event_id}}
+
+    monkeypatch.setattr(alert_mod.time, "sleep", lambda s: None)
+    dd = _PropagatingDatadog()
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert dd.calls == 2
+
+
+def test_datadog_alert_verify_accepts_v2_encoded_id_with_nested_evt_id(tmp_path, monkeypatch):
+    """v2 GET of a v1-posted event returns its own encoded data.id with the
+    original numeric id nested at attributes.attributes.evt.id -- that shape
+    must count as confirmed, not 'not found'."""
+    import prash.actions.datadog_alert as alert_mod
+
+    class _V2ShapeDatadog(_FakeAlertDatadog):
+        def get_event(self, event_id):
+            return {"data": {"id": "AwAAAaB9EncodedId", "attributes": {"attributes": {"evt": {"id": event_id}}}}}
+
+    monkeypatch.setattr(alert_mod.time, "sleep", lambda s: None)
+    dd = _V2ShapeDatadog()
+    action = DatadogAlertAction()
+    ctx = _alert_ctx(tmp_path, dd=dd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert "exists in the Datadog event stream" in verification.detail
+
+
+def test_datadog_alert_risk_tier_is_approval():
+    spec = DatadogAlertAction().spec
+    assert spec.risk_tier.value == "approval"
+    assert spec.reversible is False
+    assert spec.always_asks is True  # prompts even in bypass mode
+    assert spec.approval_hint == "This will create a visible alert in Datadog"
+    assert spec.capabilities == ("alert",)
+
+
+# ── pagerduty-page (Phase 3 rollout: APPROVAL-gated on-call page) ───────────
+
+class _FakePagePagerDuty:
+    def __init__(self, fail=False, accepted=True, visible=True):
+        self.fail = fail
+        self.accepted = accepted
+        self.visible = visible
+        self.posted = []
+        self.checked = []
+
+    def page_oncall(self, summary, source, severity="critical", dedup_key=None, custom_details=None):
+        if self.fail:
+            raise RuntimeError("pagerduty api error")
+        self.posted.append((summary, source, severity, dedup_key, custom_details))
+        if not self.accepted:
+            return {"status": "error", "message": "event rejected"}
+        return {"status": "success", "dedup_key": dedup_key, "message": "Event processed"}
+
+    def find_incident_by_incident_key(self, key, since):
+        self.checked.append(key)
+        if not self.visible:
+            return None
+        return {"id": "PINC9", "status": "triggered", "incident_key": key}
+
+
+def _page_ctx(tmp_path, pd=None, **extra):
+    return _ctx(tmp_path, resource="checkout-service",
+                extra={"connectors": {"pagerduty": pd if pd is not None else _FakePagePagerDuty()}, **extra})
+
+
+def test_pagerduty_page_plan(tmp_path):
+    action = PagerdutyPageAction()
+    plan = action.plan(_page_ctx(tmp_path))
+    assert plan.action_id == "pagerduty-page"
+    assert plan.reversible is False
+    assert plan.risk_tier.value == "approval"
+    assert "Trigger PagerDuty incident 'Prash page: checkout-service'" in plan.steps[0].description
+    assert "cannot be un-triggered" in plan.steps[0].impact
+
+
+def test_pagerduty_page_plan_with_params(tmp_path):
+    plan = PagerdutyPageAction().plan(_page_ctx(tmp_path, summary="DB down", severity="warning"))
+    assert "Trigger PagerDuty incident 'DB down' (severity warning)" in plan.steps[0].description
+
+
+def test_pagerduty_page_execute(tmp_path):
+    pd = _FakePagePagerDuty()
+    result = PagerdutyPageAction().execute(_page_ctx(tmp_path, pd=pd))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["dedup_key"]
+    assert pd.posted == [("Prash page: checkout-service", "prash", "critical", result.detail["dedup_key"], None)]
+
+
+def test_pagerduty_page_execute_with_params(tmp_path):
+    pd = _FakePagePagerDuty()
+    ctx = _page_ctx(tmp_path, pd=pd, summary="DB down", severity="warning", dedup_key="dk-fixed",
+                    custom_details={"runbook": "r-1"})
+    result = PagerdutyPageAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["dedup_key"] == "dk-fixed"
+    assert pd.posted == [("DB down", "prash", "warning", "dk-fixed", {"runbook": "r-1"})]
+
+
+def test_pagerduty_page_execute_fails_honestly_on_api_error(tmp_path):
+    ctx = _page_ctx(tmp_path, pd=_FakePagePagerDuty(fail=True))
+    result = PagerdutyPageAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "pagerduty api error" in result.summary
+
+
+def test_pagerduty_page_execute_fails_when_not_accepted(tmp_path):
+    """The Events API answering non-success is a FAILED page, not a success
+    with a weird payload -- the action must not claim a human was paged."""
+    ctx = _page_ctx(tmp_path, pd=_FakePagePagerDuty(accepted=False))
+    result = PagerdutyPageAction().execute(ctx)
+    assert result.status is ActionResultStatus.FAILED
+    assert "not accepted" in result.summary
+
+
+def test_pagerduty_page_execute_without_connector(tmp_path):
+    result = PagerdutyPageAction().execute(_ctx(tmp_path, resource="x", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_pagerduty_page_verify(tmp_path):
+    pd = _FakePagePagerDuty()
+    action = PagerdutyPageAction()
+    ctx = _page_ctx(tmp_path, pd=pd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert pd.checked == [result.detail["dedup_key"]]
+    assert "PINC9" in verification.detail
+
+
+def test_pagerduty_page_verify_not_yet_visible(tmp_path, monkeypatch):
+    """The Events API accepted the trigger but the incident never becomes
+    REST-listable within the bounded retry window -- verify reports honestly
+    instead of claiming confirmation (3 attempts, 2s+4s backoff)."""
+    import prash.actions.pagerduty_page as page_mod
+
+    sleeps = []
+    monkeypatch.setattr(page_mod.time, "sleep", sleeps.append)
+
+    pd = _FakePagePagerDuty(visible=False)
+    action = PagerdutyPageAction()
+    ctx = _page_ctx(tmp_path, pd=pd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is False
+    assert "propagating" in verification.detail
+    assert pd.checked.count(result.detail["dedup_key"]) == 3
+    assert sleeps == [2, 4]
+
+
+def test_pagerduty_page_verify_retries_until_visible(tmp_path, monkeypatch):
+    """Found live 2026-09-09: a just-triggered Events v2 incident is not
+    REST-listable for a few seconds, so a single-shot verify reported 'not
+    verified' for a page that was real (intake -> incident propagation).
+    Bounded retry: confirm as soon as reality catches up."""
+    import prash.actions.pagerduty_page as page_mod
+
+    monkeypatch.setattr(page_mod.time, "sleep", lambda s: None)
+
+    class _LatePagerDuty(_FakePagePagerDuty):
+        def __init__(self):
+            super().__init__()
+            self.lookups = 0
+
+        def find_incident_by_incident_key(self, key, since):
+            self.lookups += 1
+            if self.lookups < 3:
+                return None
+            return {"id": "PINC9", "status": "triggered", "incident_key": key}
+
+    pd = _LatePagerDuty()
+    action = PagerdutyPageAction()
+    ctx = _page_ctx(tmp_path, pd=pd)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert pd.lookups == 3
+    assert "PINC9" in verification.detail
+
+
+def test_pagerduty_page_risk_tier_is_approval():
+    """Hardcoded by spec: paging a human is irreversible and disruptive --
+    always prompts, even in bypass mode."""
+    spec = PagerdutyPageAction().spec
+    assert spec.risk_tier.value == "approval"
+    assert spec.reversible is False
+    assert spec.always_asks is True
+    assert "wake up the on-call engineer" in spec.approval_hint
+    assert spec.capabilities == ("page_oncall",)
+
+
 class _FakeGrafana:
     def __init__(self, fail=False):
         self.fail = fail
@@ -1365,3 +1674,166 @@ def test_gitleaks_escalate_risk_tier_is_safe():
     """Escalating a real problem is the opposite of suppressing one --
     surfacing it to a human is low blast radius, unlike pagerduty-resolve."""
     assert GitleaksEscalateAction().spec.risk_tier.value == "safe"
+
+
+# ── G2: github-open-issue alert action (CI escalation, APPROVAL/reversible) ──
+
+from prash.actions.github_alert import GitHubOpenIssueAction  # noqa: E402
+
+
+class _FakeIssueGitHub:
+    def __init__(self, fail=False, verify_state="open"):
+        self.fail = fail
+        self.verify_state = verify_state
+        self.created = []
+        self.checked = []
+
+    def create_issue(self, repo, title, body=""):
+        if self.fail:
+            raise RuntimeError("github api error")
+        self.created.append((repo, title, body))
+        return {"number": 42, "html_url": f"https://github.com/{repo}/issues/42", "title": title, "state": "open"}
+
+    def get_issue(self, repo, number):
+        self.checked.append((repo, number))
+        return {"number": number, "state": self.verify_state}
+
+
+def _issue_ctx(tmp_path, gh=None, **extra):
+    return _ctx(tmp_path, resource="acme/api",
+                extra={"connectors": {"github": gh if gh is not None else _FakeIssueGitHub()}, **extra})
+
+
+def test_github_open_issue_plan_is_approval_and_reversible(tmp_path):
+    plan = GitHubOpenIssueAction().plan(_issue_ctx(tmp_path))
+    assert plan.action_id == "github-open-issue"
+    assert plan.reversible is True
+    assert plan.risk_tier.value == "approval"
+    assert "acme/api" in plan.steps[0].description
+
+
+def test_github_open_issue_execute_default_title(tmp_path):
+    gh = _FakeIssueGitHub()
+    result = GitHubOpenIssueAction().execute(_issue_ctx(tmp_path, gh=gh))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["number"] == 42
+    repo, title, _body = gh.created[0]
+    assert repo == "acme/api" and "CI failure on acme/api" in title
+
+
+def test_github_open_issue_execute_with_title_and_body(tmp_path):
+    gh = _FakeIssueGitHub()
+    ctx = _issue_ctx(tmp_path, gh=gh, title="release workflow broken", body="fixture expects removed field")
+    result = GitHubOpenIssueAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert gh.created == [("acme/api", "release workflow broken", "fixture expects removed field")]
+
+
+def test_github_open_issue_execute_fails_honestly(tmp_path):
+    result = GitHubOpenIssueAction().execute(_issue_ctx(tmp_path, gh=_FakeIssueGitHub(fail=True)))
+    assert result.status is ActionResultStatus.FAILED
+    assert "github api error" in result.summary
+
+
+def test_github_open_issue_execute_without_connector(tmp_path):
+    result = GitHubOpenIssueAction().execute(_ctx(tmp_path, resource="acme/api", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_github_open_issue_verify_ok_when_open(tmp_path):
+    gh = _FakeIssueGitHub()
+    action = GitHubOpenIssueAction()
+    ctx = _issue_ctx(tmp_path, gh=gh)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is True
+    assert gh.checked == [("acme/api", 42)]
+
+
+def test_github_open_issue_verify_not_ok_when_closed(tmp_path):
+    gh = _FakeIssueGitHub(verify_state="closed")
+    action = GitHubOpenIssueAction()
+    ctx = _issue_ctx(tmp_path, gh=gh)
+    result = action.execute(ctx)
+    verification = action.verify(ctx, result)
+    assert verification.ok is False
+
+
+# ── G3: gitlab-open-issue alert action (GitLab mirror of github-open-issue) ──
+
+from prash.actions.gitlab_alert import GitLabOpenIssueAction  # noqa: E402
+
+
+class _FakeIssueGitLab:
+    def __init__(self, fail=False, verify_state="opened"):
+        self.fail = fail
+        self.verify_state = verify_state
+        self.created = []
+        self.checked = []
+
+    def create_issue(self, project, title, body=""):
+        if self.fail:
+            raise RuntimeError("gitlab api error")
+        self.created.append((project, title, body))
+        return {"iid": 7, "web_url": f"https://gitlab.com/{project}/-/issues/7", "title": title, "state": "opened"}
+
+    def get_issue(self, project, iid):
+        self.checked.append((project, iid))
+        return {"iid": iid, "state": self.verify_state}
+
+
+def _gl_issue_ctx(tmp_path, gl=None, **extra):
+    return _ctx(tmp_path, resource="acme/api",
+                extra={"connectors": {"gitlab": gl if gl is not None else _FakeIssueGitLab()}, **extra})
+
+
+def test_gitlab_open_issue_plan_is_approval_and_reversible(tmp_path):
+    plan = GitLabOpenIssueAction().plan(_gl_issue_ctx(tmp_path))
+    assert plan.action_id == "gitlab-open-issue"
+    assert plan.reversible is True and plan.risk_tier.value == "approval"
+    assert "acme/api" in plan.steps[0].description
+
+
+def test_gitlab_open_issue_execute_default_title(tmp_path):
+    gl = _FakeIssueGitLab()
+    result = GitLabOpenIssueAction().execute(_gl_issue_ctx(tmp_path, gl=gl))
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert result.detail["iid"] == 7
+    project, title, _ = gl.created[0]
+    assert project == "acme/api" and "CI failure on acme/api" in title
+
+
+def test_gitlab_open_issue_execute_with_title_and_body(tmp_path):
+    gl = _FakeIssueGitLab()
+    ctx = _gl_issue_ctx(tmp_path, gl=gl, title="pipeline broken", body="lint stage failed")
+    result = GitLabOpenIssueAction().execute(ctx)
+    assert result.status is ActionResultStatus.SUCCEEDED
+    assert gl.created == [("acme/api", "pipeline broken", "lint stage failed")]
+
+
+def test_gitlab_open_issue_execute_fails_honestly(tmp_path):
+    result = GitLabOpenIssueAction().execute(_gl_issue_ctx(tmp_path, gl=_FakeIssueGitLab(fail=True)))
+    assert result.status is ActionResultStatus.FAILED
+    assert "gitlab api error" in result.summary
+
+
+def test_gitlab_open_issue_execute_without_connector(tmp_path):
+    result = GitLabOpenIssueAction().execute(_ctx(tmp_path, resource="acme/api", extra={"connectors": {}}))
+    assert result.status is ActionResultStatus.FAILED
+
+
+def test_gitlab_open_issue_verify_ok_when_opened(tmp_path):
+    gl = _FakeIssueGitLab()
+    action = GitLabOpenIssueAction()
+    ctx = _gl_issue_ctx(tmp_path, gl=gl)
+    result = action.execute(ctx)
+    assert action.verify(ctx, result).ok is True
+    assert gl.checked == [("acme/api", 7)]
+
+
+def test_gitlab_open_issue_verify_not_ok_when_closed(tmp_path):
+    gl = _FakeIssueGitLab(verify_state="closed")
+    action = GitLabOpenIssueAction()
+    ctx = _gl_issue_ctx(tmp_path, gl=gl)
+    result = action.execute(ctx)
+    assert action.verify(ctx, result).ok is False

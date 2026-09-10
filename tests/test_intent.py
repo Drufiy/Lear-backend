@@ -11,7 +11,15 @@ import asyncio
 import pytest
 
 from prash import repl
-from prash.intent import Clarify, Suggestion, _Context, _verb_hit, complete, resolve
+from prash.intent import (
+    Clarify,
+    Suggestion,
+    _Context,
+    _args_to_suggestion_or_clarify,
+    _verb_hit,
+    complete,
+    resolve,
+)
 from prash.repl import _is_it_phrase, _looks_like_talk
 
 
@@ -78,6 +86,66 @@ def test_open_pr_never_guesses_a_repo():
     s = resolve("open a pr", ctx(namespace="prash-demo", pod="api-2", last_target="prash-demo/api-2"))
     assert isinstance(s, Clarify)
     assert "repository" in s.question
+
+
+# ---- datadog fast-path routing (connector rewrite M2/M4) -------------------
+
+def test_intent_watch_datadog_routes_to_datadog_provider():
+    """'watch this datadog monitor' must NOT fall into the generic watch verb
+    (which polls the kubernetes namespace watcher) — it names the provider."""
+    s = resolve("watch this datadog monitor cpu-high", ctx(namespace="prash-demo"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "datadog", "--resource", "cpu-high"]
+
+
+def test_intent_watch_datadog_without_target_uses_env_default():
+    s = resolve("watch my datadog monitors", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "datadog"]
+
+
+def test_intent_datadog_stats_with_target_routes_to_investigate():
+    s = resolve("what happened on datadog monitor cpu-high", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["investigate", "cpu-high", "--provider", "datadog"]
+
+
+def test_intent_datadog_stats_without_target_asks_which_monitor():
+    s = resolve("what happened on datadog", ctx())
+    assert isinstance(s, Clarify)
+    assert "datadog" in s.question
+
+
+def test_intent_non_datadog_watch_still_routes_to_kubernetes():
+    """The datadog fast path only fires when 'datadog' is explicit — every
+    pre-existing phrasing keeps its old routing."""
+    s = resolve("please watch the cluster", ctx(namespace="prash-demo"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch"]
+
+
+def test_intent_watch_pagerduty_routes_to_pagerduty_provider():
+    s = resolve("watch the pagerduty service checkout-api", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "pagerduty", "--resource", "checkout-api"]
+
+
+def test_intent_pagerduty_incidents_routes_to_investigate():
+    s = resolve("what happened on pagerduty service checkout-api", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["investigate", "checkout-api", "--provider", "pagerduty"]
+
+
+def test_intent_pagerduty_without_target_asks_which_service():
+    s = resolve("any pagerduty incidents?", ctx())
+    assert isinstance(s, Clarify)
+    assert "pagerduty" in s.question
+
+
+def test_intent_pagerduty_watch_without_target_uses_env_default():
+    s = resolve("watch pagerduty", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "pagerduty"]
 
 
 def test_open_pr_with_repo_uses_it():
@@ -198,3 +266,107 @@ def test_run_llm_intent_sync_never_hangs_on_stuck_coroutine():
     # bridge's own timeout + join margin is _LLM_INTENT_TIMEOUT_SECONDS + 5,
     # so assert comfortably inside that.
     assert elapsed < _LLM_INTENT_TIMEOUT_SECONDS + 10
+
+
+# ---- M3: get_stats / watch / alert reachable through natural language ------
+
+@pytest.mark.parametrize("text,expected", [
+    ("what's been happening with my api pod", "stats"),
+    ("what happened to prash-demo/api", "stats"),
+    ("show me the recent events", "stats"),
+    ("show me the timeline", "stats"),
+    ("give me the stats", "stats"),
+    ("event history please", "stats"),
+])
+def test_stats_verb_detection(text, expected):
+    assert _verb_hit(text) == expected
+
+
+def test_stats_never_hijacks_an_explicit_action_verb():
+    # "diagnose what happened" is a fix, not a read — the action verb wins.
+    assert _verb_hit("diagnose what happened to my pod") == "fix"
+    assert _verb_hit("fix it and show me what happened") == "fix"
+
+
+def test_stats_resolves_target_like_fix():
+    s = resolve("what's been happening with api-7f9d",
+                ctx(namespace="prash-demo", last_target="prash-demo/api-7f9d"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["stats", "prash-demo/api-7f9d"]
+
+
+def test_stats_with_qualified_target_passes_through():
+    s = resolve("what happened to prash-demo/web-3", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["stats", "prash-demo/web-3"]
+
+
+def test_stats_with_no_target_asks():
+    c = resolve("show me the recent events", ctx())
+    assert isinstance(c, Clarify)
+
+
+def test_complete_stats_qualifies_bare_name():
+    s = complete("stats", "web-9", ctx(namespace="prash-demo"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["stats", "prash-demo/web-9"]
+
+
+def test_watch_with_target_scopes_to_its_namespace():
+    s = resolve("keep an eye on prash-demo/api-1", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--namespace", "prash-demo"]
+
+
+def test_watch_without_target_stays_bare():
+    s = resolve("watch the cluster", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch"]
+
+
+# ---- M3: LLM slow-path arg mapping (pure, no network) ---------------------
+
+def test_llm_stats_maps_to_stats_command():
+    s = _args_to_suggestion_or_clarify(
+        {"command": "stats", "resource": "i-0abc", "provider": "aws", "explanation": "recent AWS events"}
+    )
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["stats", "i-0abc", "--provider", "aws"]
+
+
+def test_llm_stats_defaults_provider_to_kubernetes():
+    s = _args_to_suggestion_or_clarify(
+        {"command": "stats", "resource": "prash-demo/api", "explanation": "events"}
+    )
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["stats", "prash-demo/api", "--provider", "kubernetes"]
+
+
+def test_llm_stats_without_resource_asks():
+    c = _args_to_suggestion_or_clarify({"command": "stats", "explanation": "events"})
+    assert isinstance(c, Clarify)
+
+
+def test_llm_watch_non_k8s_uses_provider_resource():
+    s = _args_to_suggestion_or_clarify(
+        {"command": "watch", "provider": "datadog", "resource": "checkout-latency", "explanation": "watch monitor"}
+    )
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--provider", "datadog", "--resource", "checkout-latency"]
+
+
+def test_llm_watch_k8s_scopes_to_namespace():
+    s = _args_to_suggestion_or_clarify(
+        {"command": "watch", "provider": "kubernetes", "resource": "prash-demo/api", "explanation": "watch ns"}
+    )
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["watch", "--namespace", "prash-demo"]
+
+
+def test_llm_alert_routes_through_run_action():
+    # paging an on-call responder is a gated write -> command=run + *-alert id
+    s = _args_to_suggestion_or_clarify(
+        {"command": "run", "action_id": "aws-alert", "resource": "i-0abc", "explanation": "page on-call"}
+    )
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["run", "aws-alert", "i-0abc"]

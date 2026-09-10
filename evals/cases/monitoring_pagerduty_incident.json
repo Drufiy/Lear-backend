@@ -1,0 +1,19 @@
+{
+  "id": "monitoring_pagerduty_incident",
+  "source": "verified",
+  "repo_full_name": "pagerduty/checkout",
+  "workflow_name": "pagerduty",
+  "commit_message": "(no commit — PagerDuty incident diagnosis, not a CI run)",
+  "logs": "=== INCIDENT STATE ===\nservice: checkout\nservice_id: PSVC1\noverall_state: failed\nopen_incidents: 1 (worst: triggered)\n\n=== PAGERDUTY EVENTS ===\n- [2026-09-04T11:58:00+00:00] change_event: Production deploy of checkout-service v3.1.0\n- [2026-09-04T12:00:00+00:00] incident_triggered: Incident '500s spiking' on checkout triggered (critical severity, high urgency)",
+  "current_files": {},
+  "expected": {
+    "category": "monitoring",
+    "fix_type": "manual_required",
+    "confidence": 0.7,
+    "recommended_action": "acknowledge_incident",
+    "files_changed_paths": [],
+    "problem_summary": "PagerDuty incident '500s spiking' triggered on checkout with critical severity, two minutes after the v3.1.0 production deploy",
+    "verified": true
+  },
+  "notes": "Hand-authored (connector rewrite, Phase 3 rollout — PagerDuty) — mirrors monitoring_datadog_alert.json for the PagerDuty surface: brain categorizes incident pages as 'monitoring', leaves files_changed empty, and recommends acknowledge_incident as an explicitly-labeled stopgap while the deploy-correlated 500 spike is investigated."
+}
