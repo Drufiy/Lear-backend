@@ -24,9 +24,23 @@ dependencies = [
     "boto3>=1.34",
 ]
 
+# The desktop app's local backend (prash/server.py + prash/connector_registry.py)
+# is the only code that needs these -- the core `prash` CLI never imports either
+# module, so they stay an opt-in extra rather than weight every CLI install.
+# uvicorn[standard] pulls the websockets stack that /ws/events needs at runtime.
 [project.optional-dependencies]
+desktop = [
+    "fastapi>=0.110",
+    "python-dotenv>=1.0",
+    "uvicorn[standard]>=0.27",
+]
+# dev pulls desktop because the test suite imports the desktop-server modules at
+# collection time (tests/test_desktop_api.py, test_connector_registry.py,
+# test_widget_generation.py) -- so `pip install -e ".[dev]"`, which CI already
+# runs, is enough to collect and run them with no extra CI step.
 dev = [
     "pytest>=7.0",
+    "prash-v2[desktop]",
 ]
 
 [project.scripts]
