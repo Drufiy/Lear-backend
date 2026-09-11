@@ -1,184 +1,203 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-export type ConnectorConnectionStatus = 'unconfigured' | 'connecting' | 'connected' | 'error' | 'expired';
+export type ConnectorState = 'UNCONFIGURED' | 'CONNECTING' | 'CONNECTED' | 'FAILED' | 'WATCHING';
 
-export interface UseConnectorStatusReturn {
-  status: ConnectorConnectionStatus;
-  identity: string | null;
-  maskedCredentials: Record<string, string>;
-  loading: boolean;
+export interface ConnectorResponse {
+  success: boolean;
+  status: string;
+  identity: unknown;
+  message?: string;
+  error?: string;
+  last_verified?: string;
+}
+
+interface ConnectorStatus {
+  state: ConnectorState;
+  identity: unknown;
   error: string | null;
-  connect: (credentials: Record<string, string>) => Promise<{ success: boolean; message: string; identity?: string }>;
-  disconnect: () => Promise<{ success: boolean; message: string }>;
-  checkHealth: () => Promise<void>;
+  lastVerified: string | null;
+  expired: boolean;
 }
 
-export function useConnectorStatus(connectorId: string, initialStatus?: string): UseConnectorStatusReturn {
-  const [status, setStatus] = useState<ConnectorConnectionStatus>(
-    (initialStatus as ConnectorConnectionStatus) || 'unconfigured'
-  );
-  const [identity, setIdentity] = useState<string | null>(null);
-  const [maskedCredentials, setMaskedCredentials] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+const sanitizeMessage = (value: unknown, fallback: string) => {
+  if (typeof value !== 'string') return fallback;
+  const sanitized = value.replace(/<[^>]*>/g, '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
+  return sanitized || fallback;
+};
 
-  const isMountedRef = useRef(true);
+const isExpired = (status: unknown) => typeof status === 'string' && status.toLowerCase() === 'expired';
 
-  // Check health and validate credentials without modifying .env
-  const checkHealth = useCallback(async () => {
-    if (!connectorId) return;
-    try {
-      const res = await fetch(`/api/connectors/${connectorId}/validate`);
-      if (res.ok && isMountedRef.current) {
-        const data = await res.json();
-        if (data.status === 'connected') {
-          setStatus('connected');
-          setIdentity(data.identity || null);
-          setError(null);
-        } else if (data.status === 'expired') {
-          setStatus('expired');
-          setError(data.message || 'Credentials expired or invalid');
-        } else if (data.status === 'unconfigured') {
-          setStatus('unconfigured');
-        }
-      }
-    } catch (e: any) {
-      if (isMountedRef.current) {
-        console.warn(`Health check failed for ${connectorId}:`, e);
-      }
-    }
-  }, [connectorId]);
+const stateFromStatus = (status: unknown, _configured: boolean): ConnectorState => {
+  if (typeof status !== 'string') return 'UNCONFIGURED';
+  switch (status.toLowerCase()) {
+    case 'connected':
+    case 'healthy':
+      return 'CONNECTED';
+    case 'configured':
+    case 'unverified':
+      return 'UNCONFIGURED';
+    case 'watching':
+      return 'WATCHING';
+    case 'failed':
+    case 'error':
+    case 'expired':
+      return 'FAILED';
+    default:
+      return 'UNCONFIGURED';
+  }
+};
 
-  // Initial load of connector details & masked credentials
-  useEffect(() => {
-    isMountedRef.current = true;
-    let cancel = false;
-
-    fetch(`/api/connectors/${connectorId}`)
-      .then(res => res.json())
-      .then(data => {
-        if (!cancel && data) {
-          if (data.status === 'configured') {
-            setStatus('connected');
-          } else {
-            setStatus('unconfigured');
-          }
-          setMaskedCredentials(data.masked_credentials || {});
-        }
-      })
-      .catch(err => console.error(`Error loading connector info for ${connectorId}:`, err));
-
-    return () => {
-      cancel = true;
-      isMountedRef.current = false;
-    };
-  }, [connectorId]);
-
-  // Periodic 60s health check (Phase D1 & D2)
-  useEffect(() => {
-    if (status !== 'connected') return;
-
-    const interval = setInterval(() => {
-      checkHealth();
-    }, 60000); // every 60s
-
-    return () => clearInterval(interval);
-  }, [status, checkHealth]);
-
-  // Connect action
-  const connect = useCallback(
-    async (credentials: Record<string, string>) => {
-      setLoading(true);
-      setError(null);
-      setStatus('connecting');
-
-      try {
-        const res = await fetch(`/api/connectors/${connectorId}/connect`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(credentials),
-        });
-
-        const data = await res.json();
-        if (res.ok && data.success) {
-          setStatus('connected');
-          setIdentity(data.identity || null);
-          // Refresh masked credentials
-          const resDetail = await fetch(`/api/connectors/${connectorId}`);
-          if (resDetail.ok) {
-            const detail = await resDetail.json();
-            setMaskedCredentials(detail.masked_credentials || {});
-          }
-          return { success: true, message: data.message || 'Connected successfully', identity: data.identity };
-        } else {
-          setStatus('error');
-          const errMsg = typeof data.message === 'string' && data.message
-            ? data.message
-            : (typeof data.detail === 'string' && data.detail
-                ? data.detail
-                : (data.detail && typeof data.detail === 'object' && Object.keys(data.detail).length > 0
-                    ? JSON.stringify(data.detail)
-                    : 'Authentication failed. Verify credentials.'));
-          setError(errMsg);
-          return { success: false, message: errMsg };
-        }
-      } catch (e: any) {
-        setStatus('error');
-        const errMsg = e.message || 'Network error reaching API bridge';
-        setError(errMsg);
-        return { success: false, message: errMsg };
-      } finally {
-        setLoading(false);
-      }
-    },
-    [connectorId]
-  );
-
-  // Disconnect action (Phase C4)
-  const disconnect = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const res = await fetch(`/api/connectors/${connectorId}/disconnect`, {
-        method: 'POST',
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setStatus('unconfigured');
-        setIdentity(null);
-        setMaskedCredentials({});
-        return { success: true, message: data.message || 'Disconnected successfully' };
-      } else {
-        const errMsg = typeof data.message === 'string' && data.message
-          ? data.message
-          : (typeof data.detail === 'string' && data.detail
-              ? data.detail
-              : (data.detail && typeof data.detail === 'object' && Object.keys(data.detail).length > 0
-                  ? JSON.stringify(data.detail)
-                  : 'Failed to disconnect'));
-        setError(errMsg);
-        return { success: false, message: errMsg };
-      }
-    } catch (e: any) {
-      const errMsg = e.message || 'Network error disconnecting';
-      setError(errMsg);
-      return { success: false, message: errMsg };
-    } finally {
-      setLoading(false);
-    }
-  }, [connectorId]);
-
+const readResponse = async (response: Response): Promise<ConnectorResponse> => {
+  let data: Partial<ConnectorResponse> & { message?: unknown } = {};
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error(`Request failed (${response.status})`);
+  }
   return {
-    status,
-    identity,
-    maskedCredentials,
-    loading,
-    error,
-    connect,
-    disconnect,
-    checkHealth,
+    success: Boolean(data.success),
+    status: typeof data.status === 'string' ? data.status : response.ok && data.success ? 'connected' : 'failed',
+    identity: data.identity ?? null,
+    message: typeof data.message === 'string' ? data.message : undefined,
+    error: typeof data.error === 'string' ? data.error : typeof data.message === 'string' ? data.message : undefined,
+    last_verified: data.last_verified,
   };
-}
+};
 
-export default useConnectorStatus;
+export function useConnectorStatus(connectorId: string, initialStatus: string, healthCheckInterval = 60000) {
+  const configured = initialStatus.toLowerCase() !== 'unconfigured';
+  const [status, setStatus] = useState<ConnectorStatus>({
+    state: stateFromStatus(initialStatus, configured),
+    identity: null,
+    error: isExpired(initialStatus) ? 'Credentials have expired. Reconnect to continue.' : null,
+    lastVerified: null,
+    expired: isExpired(initialStatus),
+  });
+  const requestRef = useRef<AbortController | null>(null);
+
+  const abortCurrent = useCallback(() => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    abortCurrent();
+    const nextConfigured = initialStatus.toLowerCase() !== 'unconfigured';
+    setStatus(previous => {
+      const nextState = stateFromStatus(initialStatus, nextConfigured);
+      const preserveVerified = nextConfigured
+        && nextState === 'UNCONFIGURED'
+        && (previous.state === 'CONNECTED' || previous.state === 'WATCHING');
+      if (preserveVerified) return previous;
+      return {
+        state: nextState,
+        identity: null,
+        error: isExpired(initialStatus) ? 'Credentials have expired. Reconnect to continue.' : null,
+        lastVerified: null,
+        expired: isExpired(initialStatus),
+      };
+    });
+    return abortCurrent;
+  }, [abortCurrent, connectorId, initialStatus]);
+
+  const connect = useCallback(async (credentials: Record<string, string>) => {
+    abortCurrent();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setStatus(previous => ({ ...previous, state: 'CONNECTING', error: null, expired: false }));
+    try {
+      const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials),
+        signal: controller.signal,
+      });
+      const data = await readResponse(response);
+      if (!response.ok || !data.success) {
+        setStatus({ state: 'FAILED', identity: null, error: sanitizeMessage(data.error, `Connection failed (${response.status})`), lastVerified: data.last_verified ?? null, expired: isExpired(data.status) });
+        return false;
+      }
+      setStatus({ state: stateFromStatus(data.status, true), identity: data.identity, error: null, lastVerified: data.last_verified ?? null, expired: false });
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      setStatus({ state: 'FAILED', identity: null, error: sanitizeMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.'), lastVerified: null, expired: false });
+      return false;
+    } finally {
+      if (requestRef.current === controller) requestRef.current = null;
+    }
+  }, [abortCurrent, connectorId]);
+
+  const disconnect = useCallback(async () => {
+    abortCurrent();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setStatus(previous => ({ ...previous, state: 'CONNECTING', error: null }));
+    try {
+      const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/disconnect`, { method: 'DELETE', signal: controller.signal });
+      const data = await readResponse(response);
+      if (!response.ok || !data.success) {
+        setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(data.error, `Disconnect failed (${response.status})`) }));
+        return false;
+      }
+      setStatus({ state: 'UNCONFIGURED', identity: null, error: null, lastVerified: null, expired: false });
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.') }));
+      return false;
+    } finally {
+      if (requestRef.current === controller) requestRef.current = null;
+    }
+  }, [abortCurrent, connectorId]);
+
+  const check = useCallback(async () => {
+    if (requestRef.current) return false;
+    const controller = new AbortController();
+    requestRef.current = controller;
+    try {
+      const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/check`, { method: 'POST', signal: controller.signal });
+      const data = await readResponse(response);
+      if (!response.ok || !data.success || isExpired(data.status)) {
+        setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(data.error, `Connection check failed (${response.status})`), lastVerified: data.last_verified ?? previous.lastVerified, expired: isExpired(data.status) }));
+        return false;
+      }
+      setStatus(previous => ({ ...previous, state: stateFromStatus(data.status, true), identity: data.identity ?? previous.identity, error: null, lastVerified: data.last_verified ?? previous.lastVerified, expired: false }));
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted) return false;
+      setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.'), expired: false }));
+      return false;
+    } finally {
+      if (requestRef.current === controller) requestRef.current = null;
+    }
+  }, [connectorId]);
+
+  useEffect(() => {
+    const poll = async () => {
+      if (requestRef.current) return;
+      const controller = new AbortController();
+      requestRef.current = controller;
+      try {
+        const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/status`, { signal: controller.signal });
+        const data = await readResponse(response);
+        if (!response.ok) return;
+        setStatus(previous => ({
+          state: stateFromStatus(data.status, configured),
+          identity: data.identity ?? previous.identity,
+          error: data.error ? sanitizeMessage(data.error, 'Connection unavailable') : null,
+          lastVerified: data.last_verified ?? previous.lastVerified,
+          expired: isExpired(data.status),
+        }));
+      } catch {
+        // Status polling is passive; preserve the last authoritative state on transient network errors.
+      } finally {
+        if (requestRef.current === controller) requestRef.current = null;
+      }
+    };
+    const timer = window.setInterval(poll, healthCheckInterval);
+    return () => window.clearInterval(timer);
+  }, [configured, connectorId, healthCheckInterval]);
+
+  return { ...status, connect, disconnect, check };
+}

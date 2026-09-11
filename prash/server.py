@@ -13,7 +13,11 @@ import datetime
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Set
+import shutil
+import tempfile
+import threading
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
 import dotenv
 import yaml
@@ -31,6 +35,7 @@ from prash.connector_registry import (
     is_connector_configured,
     mask_credential,
     registry_to_json,
+    safe_mask,
 )
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
 
@@ -49,15 +54,210 @@ _notifications: List[Dict[str, Any]] = []
 
 # Global in-memory activity log for Task 14
 _activity_log: List[Dict[str, Any]] = []
+_health_check_task: Optional[asyncio.Task] = None
+_connection_states: Dict[str, Dict[str, Any]] = {}
+# Connector SDKs inconsistently consult their config mapping and os.environ.
+# Serialize temporary environment projection and dotenv read-modify-replace operations.
+_auth_environment_lock = threading.RLock()
+_dotenv_lock = threading.RLock()
+
+
+def _auth_keys(connector_id: str) -> List[str]:
+    return [field.key for field in CONNECTOR_REGISTRY[connector_id].auth_fields]
+
+
+def _owned_config(connector_id: str, config: Mapping[str, Any], include_defaults: bool = True) -> Dict[str, Any]:
+    """Return only registry fields owned by one connector."""
+    owned: Dict[str, Any] = {}
+    for field in CONNECTOR_REGISTRY[connector_id].auth_fields:
+        if field.key in config:
+            owned[field.key] = config[field.key]
+        elif include_defaults and field.default:
+            owned[field.key] = field.default
+    return owned
+
+
+@contextmanager
+def _candidate_auth_environment(connector_id: str, candidate: Mapping[str, Any]) -> Iterator[None]:
+    """Expose only candidate registry values while constructing/authenticating a connector."""
+    keys = _auth_keys(connector_id)
+    with _auth_environment_lock:
+        previous = {key: os.environ.get(key) for key in keys}
+        try:
+            for key in keys:
+                value = candidate.get(key)
+                if value is None or str(value) == "":
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(value)
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+def _read_credentials() -> Dict[str, Any]:
+    with _dotenv_lock:
+        return dict(dotenv.dotenv_values(ENV_PATH)) if os.path.exists(ENV_PATH) else {}
+
+
+def _utcnow() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _safe_text(value: Any, secrets: Mapping[str, Any]) -> str:
+    text = str(value)
+    for secret in secrets.values():
+        if secret:
+            text = text.replace(str(secret), "[redacted]")
+    return text[:1000]
+
+
+def _safe_metadata(value: Any, secrets: Mapping[str, Any]) -> Any:
+    sensitive = ("token", "secret", "password", "credential", "key")
+    if isinstance(value, Mapping):
+        return {
+            str(key): "[redacted]" if any(part in str(key).lower() for part in sensitive)
+            else _safe_metadata(item, secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_metadata(item, secrets) for item in value[:50]]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _safe_text(value, secrets)
+
+
+def _connector_identity(connector: Connector, secrets: Mapping[str, Any]) -> Dict[str, Any]:
+    identity = getattr(connector, "auth_identity", None)
+    if callable(identity):
+        identity = identity()
+    if not isinstance(identity, Mapping):
+        identity = {}
+    return _safe_metadata(identity, secrets)
+
+
+def _connector_error(connector: Connector, secrets: Mapping[str, Any], fallback: str) -> str:
+    error = getattr(connector, "auth_error", None) or fallback
+    return _safe_text(error, secrets)
+
+
+def _state(connector_id: str, env_config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    config = env_config or {}
+    if connector_id in _connection_states:
+        return dict(_connection_states[connector_id])
+    status = "configured" if is_connector_configured(connector_id, config) else "unconfigured"
+    return {"status": status, "last_verified": None, "error": None, "identity": {}}
+
+
+def _set_state(connector_id: str, status: str, error: Optional[str] = None,
+               identity: Optional[Dict[str, Any]] = None, verified: bool = False) -> Dict[str, Any]:
+    previous = _connection_states.get(connector_id, {})
+    state = {
+        "status": status,
+        "last_verified": _utcnow() if verified else previous.get("last_verified"),
+        "error": error,
+        "identity": identity if identity is not None else previous.get("identity", {}),
+    }
+    _connection_states[connector_id] = state
+    return dict(state)
+
+
+def _stop_connector_watches(connector_id: str) -> None:
+    for watch_id in [wid for wid in _active_watches if wid.startswith(f"{connector_id}:")]:
+        handle = _active_watches.pop(watch_id)
+        try:
+            handle.stop()
+        except Exception as exc:
+            logger.warning(f"Error stopping watch handle {watch_id}: {exc}")
+
+
+def _persist_credentials(updates: Mapping[str, Optional[str]]) -> None:
+    with _dotenv_lock:
+        directory = os.path.dirname(os.path.abspath(ENV_PATH))
+        os.makedirs(directory, exist_ok=True)
+        fd, candidate_path = tempfile.mkstemp(prefix=".env.", dir=directory, text=True)
+        os.close(fd)
+        try:
+            if os.path.exists(ENV_PATH):
+                shutil.copyfile(ENV_PATH, candidate_path)
+            for key, value in updates.items():
+                if value is None or value == "":
+                    dotenv.unset_key(candidate_path, key)
+                else:
+                    dotenv.set_key(candidate_path, key, value)
+            os.replace(candidate_path, ENV_PATH)
+        finally:
+            if os.path.exists(candidate_path):
+                os.unlink(candidate_path)
+
+
+def _remove_credentials(keys: List[str]) -> None:
+    with _dotenv_lock:
+        if not os.path.exists(ENV_PATH):
+            return
+        directory = os.path.dirname(os.path.abspath(ENV_PATH))
+        fd, candidate_path = tempfile.mkstemp(prefix=".env.", dir=directory, text=True)
+        os.close(fd)
+        try:
+            shutil.copyfile(ENV_PATH, candidate_path)
+            for key in keys:
+                dotenv.unset_key(candidate_path, key)
+            os.replace(candidate_path, ENV_PATH)
+        finally:
+            if os.path.exists(candidate_path):
+                os.unlink(candidate_path)
+
+
+def _verify_persisted_connector(connector_id: str, automatic: bool = False) -> Dict[str, Any]:
+    env_config = _owned_config(connector_id, _read_credentials())
+    if not is_connector_configured(connector_id, env_config):
+        return _set_state(connector_id, "unconfigured", identity={})
+    current = _connection_states.get(connector_id, {})
+    if automatic and current.get("status") in {"expired", "error"}:
+        return dict(current)
+    secrets = {key: env_config.get(key) for key in _auth_keys(connector_id)}
+    try:
+        with _candidate_auth_environment(connector_id, env_config):
+            clear_connector_cache(connector_id)
+            connector = get_connector(connector_id, _owned_config(connector_id, env_config))
+            authenticated = connector.authenticate()
+            error = None if authenticated else _connector_error(connector, secrets, "Authentication failed")
+            identity = _connector_identity(connector, secrets) if authenticated else {}
+    except Exception as exc:
+        error = _safe_text(exc, secrets)
+        return _set_state(connector_id, "expired", error=error, identity={}, verified=True)
+    if not authenticated:
+        return _set_state(connector_id, "expired", error=error, identity={}, verified=True)
+    return _set_state(connector_id, "healthy", identity=identity, verified=True)
+
+
+async def _health_check_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(60)
+            env_config = _read_credentials()
+            for connector_id in discover_configured(env_config):
+                await asyncio.to_thread(_verify_persisted_connector, connector_id, True)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error(f"Error in connector health check loop: {exc}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _ws_polling_task
+    global _ws_polling_task, _health_check_task
     _ws_polling_task = asyncio.create_task(_poll_watches_loop())
+    _health_check_task = asyncio.create_task(_health_check_loop())
     yield
     if _ws_polling_task:
         _ws_polling_task.cancel()
+    if _health_check_task:
+        _health_check_task.cancel()
     for handle in _active_watches.values():
         try:
             handle.stop()
@@ -237,17 +437,22 @@ async def _poll_watches_loop():
 @app.get("/api/connectors")
 def list_connectors():
     """Returns all registered connectors with live configuration status."""
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
-    return {"connectors": registry_to_json(env_config)}
+    env_config = _read_credentials()
+    connectors = registry_to_json(env_config)
+    for connector in connectors:
+        connector.update(_state(connector["id"], env_config))
+    return {"connectors": connectors}
 
 
 @app.get("/api/connectors/{connector_id}")
 def get_connector_info(connector_id: str):
     """Returns detailed metadata for a specific connector."""
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
-    return connector_detail_to_json(connector_id, env_config)
+    detail = connector_detail_to_json(connector_id, env_config)
+    detail.update(_state(connector_id, env_config))
+    return detail
 
 
 def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[str, str]) -> str:
@@ -310,23 +515,29 @@ def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[s
 
 @app.post("/api/connectors/{connector_id}/connect")
 def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)):
-    """Authenticate and save credentials for any connector."""
+    """Authenticate candidate credentials before atomically persisting them."""
     if connector_id not in CONNECTOR_REGISTRY:
+        credentials.clear()
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
-    if not os.path.exists(ENV_PATH):
-        open(ENV_PATH, "w").close()
+    entry = CONNECTOR_REGISTRY[connector_id]
+    allowed = {field.key for field in entry.auth_fields}
+    submitted = {key: str(value) for key, value in credentials.items() if key in allowed}
+    unknown = sorted(set(credentials) - allowed)
+    supplied_values = [str(value) for value in credentials.values() if value]
+    existing = _owned_config(connector_id, _read_credentials(), include_defaults=False)
+    candidate = dict(existing)
+    candidate.update(submitted)
+    for field in entry.auth_fields:
+        if field.key not in candidate and field.default:
+            candidate[field.key] = field.default
+    secrets = {field.key: candidate.get(field.key) for field in entry.auth_fields}
+    secrets.update({f"submitted_{index}": value for index, value in enumerate(supplied_values)})
+    credentials.clear()
 
-    # Save non-empty credentials to .env
-    for k, v in credentials.items():
-        if v:
-            dotenv.set_key(ENV_PATH, k, v)
-
-    dotenv.load_dotenv(ENV_PATH, override=True)
-    clear_connector_cache(connector_id)
-
-    env_config = dotenv.dotenv_values(ENV_PATH)
-    missing = get_missing_fields(connector_id, env_config)
+    if unknown:
+        raise APIBridgeException("BAD_REQUEST", f"Unknown credential fields: {', '.join(unknown)}", 400)
+    missing = get_missing_fields(connector_id, candidate)
     if missing:
         raise APIBridgeException(
             "CONNECTOR_NOT_CONFIGURED",
@@ -336,64 +547,56 @@ def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)
         )
 
     try:
-        connector = get_connector(connector_id, env_config)
-        is_authenticated = connector.authenticate()
-        if not is_authenticated:
-            raise APIBridgeException(
-                "CONNECTOR_AUTH_FAILED",
-                f"Authentication failed for {connector_id}. Provider rejected credentials.",
-                401,
+        with _candidate_auth_environment(connector_id, candidate):
+            connector = entry.connector_class(candidate)
+            authenticated = connector.authenticate()
+            error = None if authenticated else _connector_error(
+                connector, secrets, f"Authentication failed for {entry.name}"
             )
-        entry = CONNECTOR_REGISTRY[connector_id]
-        identity = _get_provider_identity(connector_id, connector, env_config)
-        return {
-            "success": True,
-            "message": f"{entry.name} authenticated successfully",
-            "identity": identity,
-        }
-    except APIBridgeException:
-        raise
-    except Exception as e:
-        raise APIBridgeException("CONNECTOR_API_ERROR", f"Authentication error: {str(e)}", 500)
+            identity = _connector_identity(connector, secrets) if authenticated else {}
+    except Exception as exc:
+        error = _safe_text(exc, secrets)
+        raise APIBridgeException("CONNECTOR_AUTH_FAILED", error, 401)
+    if not authenticated:
+        raise APIBridgeException("CONNECTOR_AUTH_FAILED", error, 401)
 
-
-@app.post("/api/connectors/{connector_id}/disconnect")
-def disconnect_connector(connector_id: str):
-    """Disconnect a service by removing credentials from .env and halting active watches."""
-    if connector_id not in CONNECTOR_REGISTRY:
-        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
-
-    entry = CONNECTOR_REGISTRY[connector_id]
-
-    # 1. Remove all auth field keys from .env
-    if os.path.exists(ENV_PATH):
-        for field in entry.auth_fields:
-            try:
-                dotenv.unset_key(ENV_PATH, field.key)
-            except Exception as e:
-                logger.warning(f"Error unsetting key {field.key}: {e}")
-        dotenv.load_dotenv(ENV_PATH, override=True)
-
-    # 2. Stop any active watches associated with this connector
-    stopped_watches = []
-    for wid in list(_active_watches.keys()):
-        if wid.startswith(f"{connector_id}:") or wid == connector_id:
-            handle = _active_watches.pop(wid, None)
-            if handle:
-                try:
-                    handle.stop()
-                    stopped_watches.append(wid)
-                except Exception as e:
-                    logger.warning(f"Error stopping watch {wid} on disconnect: {e}")
-
-    # 3. Clear cached connector instance
+    updates = {
+        field.key: (str(candidate[field.key]) if candidate.get(field.key) else None)
+        for field in entry.auth_fields
+        if field.key in submitted or (field.key not in existing and candidate.get(field.key))
+    }
+    _persist_credentials(updates)
     clear_connector_cache(connector_id)
-
+    state = _set_state(connector_id, "healthy", identity=identity, verified=True)
+    secrets.clear()
+    submitted.clear()
     return {
         "success": True,
-        "message": f"{entry.name} disconnected successfully",
-        "stopped_watches": stopped_watches,
+        "message": f"{entry.name} authenticated successfully",
+        **state,
     }
+
+
+@app.delete("/api/connectors/{connector_id}/disconnect")
+def disconnect_connector(connector_id: str):
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+    entry = CONNECTOR_REGISTRY[connector_id]
+    _remove_credentials([field.key for field in entry.auth_fields])
+    clear_connector_cache(connector_id)
+    _stop_connector_watches(connector_id)
+    state = _set_state(connector_id, "unconfigured", identity={})
+    return {"success": True, "message": f"{entry.name} disconnected", **state}
+
+
+@app.post("/api/connectors/{connector_id}/check")
+def check_connector(connector_id: str):
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+    state = _verify_persisted_connector(connector_id)
+    success = state["status"] == "healthy"
+    message = "Connection verified" if success else (state.get("error") or "Connection check failed")
+    return {"success": success, "message": message, **state}
 
 
 @app.get("/api/connectors/{connector_id}/validate")
@@ -446,27 +649,22 @@ def get_connector_status(connector_id: str, resource: Optional[str] = Query(None
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     if not is_connector_configured(connector_id, env_config):
-        return {
-            "status": "unconfigured",
-            "detail": {"missing_fields": get_missing_fields(connector_id, env_config)},
-        }
+        state = _set_state(connector_id, "unconfigured", identity={})
+        return {**state, "detail": {"missing_fields": get_missing_fields(connector_id, env_config)}}
+
+    if not resource:
+        state = _state(connector_id, env_config)
+        return {**state, "detail": {"authenticated": state["status"] == "healthy"}}
 
     try:
-        connector = get_connector(connector_id, env_config)
-        is_auth = connector.authenticate()
-        if not is_auth:
-            return {"status": "error", "detail": {"message": "Authentication failed"}}
-
-        if resource:
-            state = connector.poll_state(resource)
-            state_val = state.state.value if hasattr(state.state, "value") else str(state.state)
-            return {"status": state_val, "detail": state.detail, "resource": resource}
-
-        return {"status": "healthy", "detail": {"authenticated": True}}
+        connector = get_connector(connector_id, _owned_config(connector_id, env_config))
+        state = connector.poll_state(resource)
+        state_val = state.state.value if hasattr(state.state, "value") else str(state.state)
+        return {"status": state_val, "detail": state.detail, "resource": resource}
     except Exception as e:
-        return {"status": "error", "detail": {"message": str(e)}}
+        return {"status": "error", "detail": {"message": _safe_text(e, env_config)}}
 
 
 @app.get("/api/connectors/{connector_id}/metrics")
@@ -479,7 +677,7 @@ def get_connector_metrics(
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     if not is_connector_configured(connector_id, env_config):
         raise APIBridgeException(
             "CONNECTOR_NOT_CONFIGURED",
@@ -489,7 +687,7 @@ def get_connector_metrics(
         )
 
     try:
-        connector = get_connector(connector_id, env_config)
+        connector = get_connector(connector_id, _owned_config(connector_id, env_config))
         target = resource or ""
         if not target:
             try:
@@ -606,7 +804,7 @@ def get_connector_resources(connector_id: str):
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     if not is_connector_configured(connector_id, env_config):
         return {"resources": []}
 
@@ -636,7 +834,7 @@ def get_connector_resources(connector_id: str):
                     })
         elif connector_id == "kubernetes":
             from prash.connectors.kubernetes import KubernetesConnector
-            k8s = KubernetesConnector(env_config)
+            k8s = KubernetesConnector(_owned_config("kubernetes", env_config))
             if k8s.authenticate():
                 # Discover pods if client is initialized
                 if hasattr(k8s, "v1") and k8s.v1:
@@ -701,8 +899,8 @@ def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
     if watch_id in _active_watches:
         raise APIBridgeException("WATCH_ALREADY_ACTIVE", f"Watch already active for {watch_id}", 409)
 
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
-    connector = get_connector(connector_id, env_config)
+    env_config = _read_credentials()
+    connector = get_connector(connector_id, _owned_config(connector_id, env_config))
 
     try:
         handle = connector.watch(target)
@@ -1040,7 +1238,7 @@ def delete_project(project_id: str):
 @app.post("/api/projects/auto-import")
 def auto_import():
     """Scans all 13 connectors dynamically from the registry and groups configured services into prash.yaml."""
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     configured_ids = discover_configured(env_config)
 
     services = [
@@ -1080,34 +1278,29 @@ def get_config():
 
     config = dotenv.dotenv_values(ENV_PATH)
 
-    def mask(val: str) -> str:
-        if not val or len(val) < 4:
-            return ""
-        return f"{val[:3]}...{val[-3:]}"
-
     services = {}
     for cid, entry in CONNECTOR_REGISTRY.items():
         if is_connector_configured(cid, config):
             services[cid] = {"status": "configured"}
 
     projects_data = _read_prash_yaml()
-    raw_masked = {k: mask(v) for k, v in config.items() if v}
+    raw_masked = {k: safe_mask(v) for k, v in config.items() if v}
 
     return {"services": services, "projects": projects_data.get("projects", []), "raw": raw_masked}
 
 
 @app.post("/api/config")
 def update_config(updates: Dict[str, str] = Body(...)):
-    """Updates the .env file with new values and clears cached connectors."""
-    if not os.path.exists(ENV_PATH):
-        open(ENV_PATH, "w").close()
-
-    for k, v in updates.items():
-        if v:
-            dotenv.set_key(ENV_PATH, k, v)
-
-    dotenv.load_dotenv(ENV_PATH, override=True)
-    clear_connector_cache()
+    """Update non-connector desktop settings; credentials require authentication."""
+    registry_keys = {field.key for entry in CONNECTOR_REGISTRY.values() for field in entry.auth_fields}
+    rejected = sorted(str(key) for key in updates if str(key) in registry_keys)
+    if rejected:
+        raise APIBridgeException(
+            "CONNECTOR_AUTH_REQUIRED",
+            f"Connector credential keys must be authenticated via /api/connectors/{{id}}/connect: {', '.join(rejected)}",
+            400,
+        )
+    _persist_credentials({str(key): str(value) for key, value in updates.items() if value})
     return {"success": True}
 
 
@@ -1183,10 +1376,10 @@ async def chat(
             cid = service_context["connector_id"]
             rid = service_context.get("resource_id", "")
             if cid in CONNECTOR_REGISTRY:
-                env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+                env_config = _read_credentials()
                 if is_connector_configured(cid, env_config):
                     try:
-                        conn = get_connector(cid, env_config)
+                        conn = get_connector(cid, _owned_config(cid, env_config))
                         if rid:
                             state = conn.poll_state(rid)
                             telemetry_context = f"[Live Telemetry: Service {cid}/{rid} is in state {state.state.value}. Detail: {json.dumps(state.detail)}]"
@@ -1360,13 +1553,13 @@ def generate_widgets(
     resource_id = payload.get("resource_id", "")
     prompt = payload.get("prompt", "")
 
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     available_metrics = []
     current_status = "unknown"
 
     if is_connector_configured(connector_id, env_config):
         try:
-            conn = get_connector(connector_id, env_config)
+            conn = get_connector(connector_id, _owned_config(connector_id, env_config))
             if resource_id:
                 try:
                     state = conn.poll_state(resource_id)
@@ -1432,12 +1625,12 @@ def get_aws_metrics_legacy():
 @app.get("/api/status")
 def get_status_legacy():
     """Legacy alias dynamically checking all configured connectors without fake pings."""
-    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    env_config = _read_credentials()
     statuses = []
     for cid in discover_configured(env_config):
         entry = CONNECTOR_REGISTRY[cid]
         try:
-            conn = get_connector(cid, env_config)
+            conn = get_connector(cid, _owned_config(cid, env_config))
             is_auth = conn.authenticate()
             statuses.append({
                 "id": cid,

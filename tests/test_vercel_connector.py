@@ -41,6 +41,16 @@ def _capture_urlopen(monkeypatch, body: bytes = b"{}"):
     return _sequenced_urlopen(monkeypatch, [body])
 
 
+def test_authenticate_exposes_user_and_team(monkeypatch):
+    body = json.dumps({"user": {"username": "ada"}, "team": {"name": "Platform"}}).encode()
+    calls = _capture_urlopen(monkeypatch, body)
+    vc = VercelConnector({"VERCEL_TOKEN": "t"})
+    assert vc.authenticate() is True
+    assert calls[0].full_url == "https://api.vercel.com/v2/user"
+    assert vc.auth_identity == {"user": "ada", "team": "Platform"}
+    assert vc.auth_error is None
+
+
 def test_redeploy_with_explicit_deployment_id(monkeypatch):
     calls = _capture_urlopen(monkeypatch, json.dumps({"id": "dpl_new", "readyState": "QUEUED"}).encode())
     vc = VercelConnector({"VERCEL_TOKEN": "t"})

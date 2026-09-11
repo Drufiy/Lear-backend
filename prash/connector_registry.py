@@ -52,7 +52,7 @@ class ConnectorRegistryEntry:
     category: str  # "infrastructure" | "cicd" | "monitoring" | "security" | "iac"
     icon: str  # lucide icon name, e.g. "cloud"
     color: str  # hex color, e.g. "#FF9900"
-    connector_class_path: str  # e.g. "prash.connectors.aws.AWSConnector"
+    connector_class_path: Any  # e.g. "prash.connectors.aws.AWSConnector"
     auth_fields: List[AuthField]
     widget_templates: List[WidgetTemplate]
     description: str = ""
@@ -63,6 +63,8 @@ class ConnectorRegistryEntry:
 
     @property
     def connector_class(self) -> Type[Connector]:
+        if isinstance(self.connector_class_path, type):
+            return self.connector_class_path
         module_path, class_name = self.connector_class_path.rsplit(".", 1)
         mod = importlib.import_module(module_path)
         return getattr(mod, class_name)
@@ -936,14 +938,27 @@ def clear_connector_cache(connector_id: Optional[str] = None) -> None:
         _active_connectors.clear()
 
 
-def mask_credential(value: Optional[str]) -> str:
-    """Safely mask credential string, revealing only first 3 and last 3 characters."""
-    if not value:
+def safe_mask(value: Any) -> str:
+    """Mask a configured value without revealing short secrets."""
+    text = str(value or "")
+    if not text:
         return ""
-    val_str = str(value).strip()
-    if len(val_str) <= 6:
-        return "***"
-    return f"{val_str[:3]}...{val_str[-3:]}"
+    if len(text) < 7:
+        return "*" * max(3, len(text))
+    return f"{text[:3]}...{text[-3:]}"
+
+
+def _masked_auth_fields(entry: ConnectorRegistryEntry, env_config: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Serialize auth schema with presence metadata, never credential values."""
+    fields = []
+    for auth_field in entry.auth_fields:
+        serialized = asdict(auth_field)
+        value = str(env_config.get(auth_field.key) or "")
+        configured = bool(value)
+        serialized["configured"] = configured
+        serialized["masked_value"] = safe_mask(value)
+        fields.append(serialized)
+    return fields
 
 
 def registry_to_json(env_config: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -955,11 +970,6 @@ def registry_to_json(env_config: Optional[Mapping[str, Any]] = None) -> List[Dic
     for cid, entry in CONNECTOR_REGISTRY.items():
         missing = get_missing_fields(cid, env_config)
         configured = is_connector_configured(cid, env_config)
-        masked = {
-            f.key: mask_credential(env_config.get(f.key))
-            for f in entry.auth_fields
-            if f.key in env_config and env_config.get(f.key)
-        }
 
         entry_dict = {
             "id": entry.id,
@@ -971,11 +981,10 @@ def registry_to_json(env_config: Optional[Mapping[str, Any]] = None) -> List[Dic
             "docs_url": entry.docs_url,
             "status": "configured" if configured else "unconfigured",
             "missing_fields": missing,
-            "masked_credentials": masked,
             "supports_watch": entry.supports_watch,
             "supports_stats": entry.supports_stats,
             "supports_execute": entry.supports_execute,
-            "auth_fields": [asdict(f) for f in entry.auth_fields],
+            "auth_fields": _masked_auth_fields(entry, env_config),
             "widget_templates": [asdict(w) for w in entry.widget_templates],
         }
         result.append(entry_dict)
@@ -996,11 +1005,6 @@ def connector_detail_to_json(
 
     missing = get_missing_fields(connector_id, env_config)
     configured = is_connector_configured(connector_id, env_config)
-    masked = {
-        f.key: mask_credential(env_config.get(f.key))
-        for f in entry.auth_fields
-        if f.key in env_config and env_config.get(f.key)
-    }
 
     return {
         "id": entry.id,
@@ -1012,10 +1016,9 @@ def connector_detail_to_json(
         "docs_url": entry.docs_url,
         "status": "configured" if configured else "unconfigured",
         "missing_fields": missing,
-        "masked_credentials": masked,
         "supports_watch": entry.supports_watch,
         "supports_stats": entry.supports_stats,
         "supports_execute": entry.supports_execute,
-        "auth_fields": [asdict(f) for f in entry.auth_fields],
+        "auth_fields": _masked_auth_fields(entry, env_config),
         "widget_templates": [asdict(w) for w in entry.widget_templates],
     }

@@ -51,7 +51,24 @@ class GitleaksConnector(Connector):
         self.binary = credentials.get("GITLEAKS_BINARY") or "gitleaks"
 
     def authenticate(self) -> bool:
-        return shutil.which(self.binary) is not None
+        binary_path = shutil.which(self.binary)
+        if not binary_path:
+            self.auth_error = f"gitleaks binary not found: {self.binary}"
+            return False
+        try:
+            result = subprocess.run(
+                [binary_path, "version"], capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                raise GitleaksError(f"gitleaks exited {result.returncode}: {result.stderr.strip()[:300]}")
+            version = (result.stdout or result.stderr).strip()
+            self.auth_identity = {"version": version} if version else {}
+            self.auth_error = None
+            return True
+        except (GitleaksError, subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
+            return False
 
     def locate(self, resource: str) -> Dict[str, Any]:
         path = os.path.abspath(os.path.expanduser(resource))

@@ -81,6 +81,8 @@ class Connector(abc.ABC):
 
     def __init__(self, credentials: Mapping[str, Any]):
         self.credentials = credentials
+        self.auth_identity: Dict[str, Any] = {}
+        self.auth_error: Optional[str] = None
 
     @abc.abstractmethod
     def authenticate(self) -> bool:

@@ -14,6 +14,7 @@ import subprocess
 
 import pytest
 
+import prash.connectors.azure as azure_mod
 from prash.connectors.azure import AzureConnector
 from prash.connectors.base import ConnectorState
 
@@ -47,7 +48,7 @@ def _patch_az(monkeypatch, *, account_ok=True, rg="my-rg", vm_json=None):
         calls.append(cmd)
         if "account" in cmd:  # az account show
             if account_ok:
-                return _completed(stdout="{}")
+                return _completed(stdout='{"id": "sub-123", "name": "Production"}')
             raise subprocess.CalledProcessError(1, cmd)
         if cmd[:3] == ["az", "vm", "list"]:
             return _completed(stdout=rg)
@@ -65,7 +66,25 @@ def test_authenticate_requires_subscription():
 
 def test_authenticate_via_cli(monkeypatch):
     _patch_az(monkeypatch, account_ok=True)
-    assert AzureConnector(_creds()).authenticate() is True
+    connector = AzureConnector(_creds())
+    assert connector.authenticate() is True
+    assert connector.auth_identity == {"subscription": "Production"}
+    assert connector.auth_error is None
+
+
+def test_explicit_service_principal_failure_does_not_fall_back_to_cli(monkeypatch):
+    monkeypatch.setattr(azure_mod.subprocess, "run", lambda *a, **k: pytest.fail("CLI fallback used"))
+    monkeypatch.setattr(azure_mod, "_HAS_AZURE", True)
+    monkeypatch.setattr(azure_mod, "ClientSecretCredential", lambda **kwargs: object(), raising=False)
+
+    class BrokenCompute:
+        def __init__(self, *args):
+            raise RuntimeError("candidate rejected")
+
+    monkeypatch.setattr(azure_mod, "ComputeManagementClient", BrokenCompute, raising=False)
+    connector = AzureConnector(_creds(AZURE_TENANT_ID="tenant", AZURE_CLIENT_ID="client", AZURE_CLIENT_SECRET="bad"))
+    assert connector.authenticate() is False
+    assert "candidate rejected" in connector.auth_error
 
 
 def test_authenticate_false_when_cli_missing(monkeypatch):

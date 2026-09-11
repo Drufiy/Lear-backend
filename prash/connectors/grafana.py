@@ -262,11 +262,16 @@ class GrafanaConnector(Connector):
 
     def authenticate(self) -> bool:
         if not self.url or not self.api_key:
+            self.auth_error = "Grafana URL and API key are required"
             return False
         try:
-            self._request("GET", "/api/org", timeout=SHORT_TIMEOUT)
+            org = self._request("GET", "/api/org", timeout=SHORT_TIMEOUT)
+            self.auth_identity = {"org": org.get("name")} if org.get("name") else {}
+            self.auth_error = None
             return True
-        except GrafanaError:
+        except GrafanaError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

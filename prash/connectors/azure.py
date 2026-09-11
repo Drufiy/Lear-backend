@@ -46,12 +46,21 @@ class AzureConnector(Connector):
             return self._authenticated
 
         if not self.subscription_id:
+            self.auth_error = "Azure subscription ID is required"
             self._authenticated = False
             return False
 
+        service_values = (self.tenant_id, self.client_id, self.client_secret)
+        explicit_service_credentials = any(service_values)
+        if explicit_service_credentials and not all(service_values):
+            self.auth_error = "Azure tenant ID, client ID, and client secret must all be supplied"
+            self._authenticated = False
+            return False
+
+        sdk_error = None
         if _HAS_AZURE:
             try:
-                if self.tenant_id and self.client_id and self.client_secret:
+                if explicit_service_credentials:
                     self._credential = ClientSecretCredential(
                         tenant_id=self.tenant_id,
                         client_id=self.client_id,
@@ -59,25 +68,43 @@ class AzureConnector(Connector):
                     )
                 else:
                     self._credential = DefaultAzureCredential()
-                
-                # Test auth
+
+                # Listing VMs is the connector's current real permission check.
                 client = ComputeManagementClient(self._credential, self.subscription_id)
-                # Just list one VM to verify access
                 next(client.virtual_machines.list_all(), None)
+                self.auth_identity = {"subscription": self.subscription_id}
+                self.auth_error = None
                 self._authenticated = True
                 return True
-            except Exception:
-                pass
+            except Exception as exc:
+                sdk_error = exc
+                if explicit_service_credentials:
+                    self.auth_identity = {}
+                    self.auth_error = str(exc)
+                    self._authenticated = False
+                    return False
 
-        # Fallback to AZ CLI
+        if explicit_service_credentials:
+            self.auth_error = "Azure SDK is required to validate service principal credentials"
+            self._authenticated = False
+            return False
+
+        # Fallback to AZ CLI only when no service principal was supplied.
         try:
-            subprocess.run(
-                ["az", "account", "show"],
+            result = subprocess.run(
+                ["az", "account", "show", "--subscription", self.subscription_id, "-o", "json"],
                 capture_output=True,
+                text=True,
                 check=True
             )
+            account = json.loads(result.stdout or "{}")
+            subscription = account.get("name") or account.get("id")
+            self.auth_identity = {"subscription": subscription} if subscription else {}
+            self.auth_error = None
             self._authenticated = True
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc if not sdk_error else sdk_error)
             self._authenticated = False
 
         return self._authenticated

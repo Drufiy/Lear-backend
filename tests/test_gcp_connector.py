@@ -11,7 +11,9 @@ the same logic; a live run is tracked in TESTING_SETUP.md.
 from __future__ import annotations
 
 import subprocess
+import types
 
+import prash.connectors.gcp as gcp_mod
 from prash.connectors.base import ConnectorState
 from prash.connectors.gcp import GCPConnector
 
@@ -58,10 +60,28 @@ def test_authenticate_requires_project():
 def test_authenticate_true_with_project_and_gcloud(monkeypatch):
     monkeypatch.setattr(
         "prash.connectors.gcp.subprocess.run",
-        lambda *a, **k: _completed(stdout="token"),
+        lambda *a, **k: _completed(stdout='{"projectId": "my-gcp-project", "name": "Production"}'),
     )
     conn = GCPConnector(_creds())
     assert conn.authenticate() is True
+    assert conn.auth_identity == {"project": "Production"}
+    assert conn.auth_error is None
+
+
+def test_explicit_service_account_failure_does_not_fall_back_to_gcloud(monkeypatch, tmp_path):
+    import pytest
+
+    credential_file = tmp_path / "account.json"
+    credential_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gcp_mod, "_HAS_GCP", True)
+    monkeypatch.setattr(gcp_mod.subprocess, "run", lambda *a, **k: pytest.fail("gcloud fallback used"))
+    fake_credentials = types.SimpleNamespace(
+        from_service_account_file=lambda path: (_ for _ in ()).throw(RuntimeError("candidate rejected"))
+    )
+    monkeypatch.setattr(gcp_mod, "service_account", types.SimpleNamespace(Credentials=fake_credentials), raising=False)
+    connector = GCPConnector(_creds(GOOGLE_APPLICATION_CREDENTIALS=str(credential_file)))
+    assert connector.authenticate() is False
+    assert "candidate rejected" in connector.auth_error
 
 
 def test_authenticate_false_when_gcloud_missing(monkeypatch):

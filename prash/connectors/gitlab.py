@@ -69,6 +69,9 @@ class GitLabConnector(Connector):
     def __init__(self, credentials: Mapping[str, Any]):
         super().__init__(credentials)
         self.token = credentials.get("GITLAB_TOKEN")
+        configured_base = str(credentials.get("GITLAB_BASE_URL") or "https://gitlab.com").strip().rstrip("/")
+        self.instance_url = configured_base.removesuffix("/api/v4")
+        self.api_url = f"{self.instance_url}/api/v4"
         self.headers = {"Accept": "application/json"}
         if self.token:
             self.headers["PRIVATE-TOKEN"] = self.token
@@ -98,7 +101,7 @@ class GitLabConnector(Connector):
         return min(2 ** attempt, _BACKOFF_CAP)
 
     def _request(self, method: str, path: str, body: Any = None) -> Any:
-        url = f"{API_URL}{path}"
+        url = f"{self.api_url}{path}"
         data = None
         headers = dict(self.headers)
         if body is not None:
@@ -129,7 +132,7 @@ class GitLabConnector(Connector):
         """Like _request, but for endpoints that return plain text (job
         traces), not JSON -- GitLab's trace endpoint is the one place in
         this connector where the response isn't a JSON document."""
-        url = f"{API_URL}{path}"
+        url = f"{self.api_url}{path}"
         req = urllib.request.Request(url, headers=self.headers, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -140,11 +143,21 @@ class GitLabConnector(Connector):
 
     def authenticate(self) -> bool:
         if not self.token:
+            self.auth_error = "GitLab token is required"
             return False
         try:
-            self._request("GET", "/user")
+            user = self._request("GET", "/user")
+            self.auth_identity = {
+                key: value for key, value in {
+                    "username": user.get("username"),
+                    "instance": self.instance_url,
+                }.items() if value
+            }
+            self.auth_error = None
             return True
-        except GitLabError:
+        except GitLabError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

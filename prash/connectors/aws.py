@@ -86,15 +86,25 @@ class AWSConnector(Connector):
             return self._authenticated
 
         if not self.access_key or not self.secret_key:
+            self.auth_error = "AWS access key ID and secret access key are required"
             self._authenticated = False
             return False
 
         try:
             session = self._get_boto_session()
             sts = session.client("sts")
-            sts.get_caller_identity()
+            identity = sts.get_caller_identity()
+            self.auth_identity = {
+                key: value for key, value in {
+                    "account": identity.get("Account"),
+                    "arn": identity.get("Arn"),
+                }.items() if value
+            }
+            self.auth_error = None
             self._authenticated = True
-        except (botocore.exceptions.BotoCoreError, botocore.exceptions.ClientError):
+        except (botocore.exceptions.BotoCoreError, botocore.exceptions.ClientError) as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             self._authenticated = False
         return self._authenticated
 

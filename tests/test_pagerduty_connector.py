@@ -53,11 +53,13 @@ def _sequenced_urlopen(monkeypatch, bodies: list[bytes]):
 
 
 def test_authenticate_sends_token_header(monkeypatch):
-    calls = _capture_urlopen(monkeypatch, b'{"abilities": []}')
+    calls = _capture_urlopen(monkeypatch, b'{"user": {"name": "Ada", "email": "ada@example.com"}}')
     pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "pdkey"})
     assert pd.authenticate() is True
     assert calls[0].get_header("Authorization") == "Token token=pdkey"
-    assert calls[0].full_url == "https://api.pagerduty.com/abilities"
+    assert calls[0].full_url == "https://api.pagerduty.com/users/me"
+    assert pd.auth_identity == {"user": "Ada", "email": "ada@example.com"}
+    assert pd.auth_error is None
 
 
 def test_authenticate_false_without_api_key():

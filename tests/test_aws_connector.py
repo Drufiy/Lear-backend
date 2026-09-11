@@ -35,6 +35,11 @@ def test_authenticate_success(mock_credentials):
         connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: sts_client})()
         
         assert connector.authenticate() is True
+        assert connector.auth_identity == {
+            "account": "123456789012",
+            "arn": "arn:aws:iam::123456789012:user/Test",
+        }
+        assert connector.auth_error is None
         connector._get_boto_session = original_get_session
 
 
@@ -54,6 +59,7 @@ def test_authenticate_failure_client_error(mock_credentials):
         connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: sts_client})()
         
         assert connector.authenticate() is False
+        assert "Auth failed" in connector.auth_error
 
 
 def test_locate_instance_by_id(mock_credentials):
