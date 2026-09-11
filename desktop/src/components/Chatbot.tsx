@@ -31,6 +31,7 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [executingActionId, setExecutingActionId] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -48,11 +49,8 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
 
     try {
       const payload: any = { message: userText };
-      if (serviceContext?.connectorId) {
-        payload.service_context = {
-          connector_id: serviceContext.connectorId,
-          resource_id: serviceContext.resourceId || '',
-        };
+      if (serviceContext) {
+        payload.service_context = serviceContext;
       }
 
       const res = await fetch('/api/chat', {
@@ -60,6 +58,8 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
+
+      if (!res.ok) throw new Error('API response failed');
       const data = await res.json();
 
       setMessages(prev => [
@@ -67,10 +67,10 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
         {
           id: Date.now() + 1,
           sender: 'agent',
-          text: data.text || 'I analyzed the telemetry and have no immediate warnings.',
-          actionRequired: data.actionRequired,
+          text: data.text || 'I analyzed the infrastructure state.',
           command: data.command,
-          executable: data.executable ?? !!data.command,
+          actionRequired: data.actionRequired,
+          executable: data.executable,
         },
       ]);
     } catch (e) {
@@ -83,20 +83,47 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
     }
   };
 
-  const handleExecuteAction = (msgId: number, command?: string[]) => {
-    // Mark as executed
-    setMessages(prev =>
-      prev.map(m => (m.id === msgId ? { ...m, executed: true } : m))
-    );
-    // Add audit feedback
-    setMessages(prev => [
-      ...prev,
-      {
-        id: Date.now(),
-        sender: 'agent',
-        text: `Command executed: \`prash ${command?.join(' ') || ''}\`. Telemetry updated.`,
-      },
-    ]);
+  const handleExecuteAction = async (msgId: number, command?: string[]) => {
+    if (!command || command.length === 0) return;
+    setExecutingActionId(msgId);
+    try {
+      const res = await fetch('/api/chat/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command,
+          action_id: command[0] || 'action',
+          service_context: serviceContext,
+        }),
+      });
+
+      const data = await res.json();
+      setMessages(prev =>
+        prev.map(m => (m.id === msgId ? { ...m, executed: true } : m))
+      );
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: Date.now(),
+          sender: 'agent',
+          text: data.success
+            ? `Execution succeeded for \`prash ${command.join(' ')}\`:\n\n${data.output || 'Action dispatched and applied to infrastructure.'}`
+            : `Execution failed for \`prash ${command.join(' ')}\`:\n\n${data.output || 'Action execution returned an error.'}`,
+        },
+      ]);
+    } catch (e: any) {
+      setMessages(prev => [
+        ...prev,
+        {
+          id: Date.now(),
+          sender: 'agent',
+          text: `Failed to dispatch command to Lear Engine: ${e?.message || String(e)}`,
+        },
+      ]);
+    } finally {
+      setExecutingActionId(null);
+    }
   };
 
   return (
@@ -179,9 +206,20 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
                         ) : (
                           <button
                             onClick={() => handleExecuteAction(msg.id, msg.command)}
-                            className="flex items-center justify-center gap-1.5 w-full py-1.5 px-3 rounded-lg bg-accent/20 hover:bg-accent/30 border border-accent/40 text-accent font-bold text-xs transition-all cursor-pointer"
+                            disabled={executingActionId === msg.id}
+                            className="flex items-center justify-center gap-1.5 w-full py-1.5 px-3 rounded-lg bg-accent/20 hover:bg-accent/30 border border-accent/40 text-accent font-bold text-xs transition-all cursor-pointer disabled:opacity-50"
                           >
-                            <Play size={12} /> Execute Action
+                            {executingActionId === msg.id ? (
+                              <>
+                                <div className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+                                <span>Executing Action...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play size={12} />
+                                <span>Execute Action</span>
+                              </>
+                            )}
                           </button>
                         )}
                       </div>

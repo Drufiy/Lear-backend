@@ -68,11 +68,11 @@ export default function Projects() {
       environments: [
         {
           name: 'Production',
-          services: [{ connector_id: 'aws', resource_id: 'i-0abc123', display_name: 'Primary EC2' }],
+          services: [],
         },
         {
           name: 'Staging',
-          services: [{ connector_id: 'aws', resource_id: 'i-0staging', display_name: 'Staging Instance' }],
+          services: [],
         },
       ],
     };
@@ -186,22 +186,28 @@ export default function Projects() {
                     </div>
 
                     <div className="space-y-1.5">
-                      {(env.services || []).map((svc, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between text-xs p-2 rounded-lg bg-background/60 border border-border-subtle"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-                            <span className="font-medium text-gray-300">
-                              {svc.display_name || svc.connector_id}
-                            </span>
-                          </div>
-                          {svc.resource_id && (
-                            <span className="text-[10px] text-gray-500 font-mono">{svc.resource_id}</span>
-                          )}
+                      {(env.services || []).length === 0 ? (
+                        <div className="py-3 text-center text-[11px] text-gray-500 font-mono">
+                          No services linked yet
                         </div>
-                      ))}
+                      ) : (
+                        (env.services || []).map((svc, idx) => (
+                          <div
+                            key={idx}
+                            className="flex items-center justify-between text-xs p-2 rounded-lg bg-background/60 border border-border-subtle"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+                              <span className="font-medium text-gray-300">
+                                {svc.display_name || svc.connector_id}
+                              </span>
+                            </div>
+                            {svc.resource_id && (
+                              <span className="text-[10px] text-gray-500 font-mono">{svc.resource_id}</span>
+                            )}
+                          </div>
+                        ))
+                      )}
                     </div>
                   </div>
                 ))}

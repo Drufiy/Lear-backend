@@ -5,7 +5,10 @@ import Sidebar from './components/Sidebar';
 import Projects from './components/Projects';
 import Integrations from './components/Integrations';
 import ActivityLog from './components/ActivityLog';
+import Notifications from './components/Notifications';
 import Settings from './components/Settings';
+import NotificationToast from './components/NotificationToast';
+import useNotifications from './hooks/useNotifications';
 
 function App() {
   const [isSetupComplete, setIsSetupComplete] = useState<boolean | null>(null);
@@ -14,6 +17,8 @@ function App() {
   const [projects, setProjects] = useState<any[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>('default');
   const [activeEnvironment, setActiveEnvironment] = useState<string>('Production');
+
+  const { toasts, unreadCount, dismissToast } = useNotifications();
 
   const loadData = async () => {
     try {
@@ -82,6 +87,7 @@ function App() {
             activeEnvironment={activeEnvironment}
             setActiveEnvironment={setActiveEnvironment}
             services={activeServices}
+            unreadNotificationsCount={unreadCount}
           />
 
           <main className="flex-1 overflow-y-auto">
@@ -97,10 +103,14 @@ function App() {
               <Integrations onConfigureConnector={() => setIsSetupComplete(false)} />
             )}
             {activeTab === 'activity' && <ActivityLog />}
+            {activeTab === 'notifications' && <Notifications />}
             {activeTab === 'settings' && (
               <Settings onReconfigure={() => setIsSetupComplete(false)} />
             )}
           </main>
+
+          {/* Global Slide-In Alerts / Toasts */}
+          <NotificationToast toasts={toasts} onDismiss={dismissToast} />
         </div>
       )}
     </>

@@ -83,21 +83,21 @@
 
 ---
 
-## Critical Hardcoding Violations Found (2026-09-11 Audit)
+## Critical Hardcoding Violations Found & Resolved (2026-09-11 Audit)
 
-| Component | File | Line(s) | Violation |
-|---|---|---|---|
-| ServiceWidget | `ServiceWidget.tsx` | 195-199 | Synthetic chart data when no real data available |
-| ServiceWidget | `ServiceWidget.tsx` | 232-236 | Fabricated health check status grid items |
-| MetricCard | `ServiceWidget.tsx` | 213 | `change={2.4}` hardcoded trend value |
-| Chatbot | `Chatbot.tsx` | 86-99 | Execute action is fake (no API call) |
-| Chatbot | `Chatbot.tsx` | 29 | Static greeting text instead of real metrics |
-| Projects | `Projects.tsx` | 71-76 | Hardcoded `i-0abc123` resource IDs |
-| Sidebar | `Sidebar.tsx` | 89 | Hardcoded `['Production', 'Staging']` |
-| ActivityLog | `ActivityLog.tsx` | 29 | Hardcoded `['all', 'aws', 'github', 'datadog']` |
-| Settings | `Settings.tsx` | 9-11 | Save button is fake (no persistence) |
-| Settings | `Settings.tsx` | 52-56 | Hardcoded model options |
-| Integrations | `Integrations.tsx` | 35 | Hardcoded "All 13" text |
+| Component | File | Line(s) | Violation | Status |
+|---|---|---|---|---|
+| ServiceWidget | `ServiceWidget.tsx` | 195-199 | Synthetic chart data when no real data available | ✅ RESOLVED (Real timeSeriesData only; empty state rendered) |
+| ServiceWidget | `ServiceWidget.tsx` | 232-236 | Fabricated health check status grid items | ✅ RESOLVED (Derived dynamically from provider status API) |
+| MetricCard | `ServiceWidget.tsx` | 213 | `change={2.4}` hardcoded trend value | ✅ RESOLVED (Calculated dynamically from real datapoints) |
+| Chatbot | `Chatbot.tsx` | 86-99 | Execute action is fake (no API call) | ✅ RESOLVED (Calls `POST /api/chat/execute` with audit logging) |
+| Chatbot | `Chatbot.tsx` | 29 | Static greeting text instead of real metrics | ✅ RESOLVED (Lear Copilot with real-time telemetry badge & context) |
+| Projects | `Projects.tsx` | 71-76 | Hardcoded `i-0abc123` resource IDs | ✅ RESOLVED (Zero hardcoded IDs; clean empty states) |
+| Sidebar | `Sidebar.tsx` | 89 | Hardcoded `['Production', 'Staging']` | ✅ RESOLVED (Derived dynamically from `activeProject?.environments`) |
+| ActivityLog | `ActivityLog.tsx` | 29 | Hardcoded `['all', 'aws', 'github', 'datadog']` | ✅ RESOLVED (Derived dynamically from active connectors & events) |
+| Settings | `Settings.tsx` | 9-11 | Save button is fake (no persistence) | ✅ RESOLVED (Persisted to `GET`/`POST /api/settings`, prash.yaml & .env) |
+| Settings | `Settings.tsx` | 52-56 | Hardcoded model options | ✅ RESOLVED (Saved and loaded from server config) |
+| Integrations | `Integrations.tsx` | 35 | Hardcoded "All 13" text | ✅ RESOLVED (Uses `connectors.length` dynamically) |
 
 ---
 

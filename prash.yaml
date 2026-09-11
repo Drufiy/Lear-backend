@@ -14,3 +14,6 @@ projects:
       resource_id: ''
   id: default
   name: Default Project
+settings:
+  model: kimi-k2.6
+  permission_mode: auto-safe

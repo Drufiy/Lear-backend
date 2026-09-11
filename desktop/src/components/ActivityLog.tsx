@@ -1,10 +1,33 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Activity, Filter, Clock } from 'lucide-react';
 import useWatcher from '../hooks/useWatcher';
 
 export default function ActivityLog() {
   const { events } = useWatcher();
   const [filter, setFilter] = useState<string>('all');
+  const [configuredConnectors, setConfiguredConnectors] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetch('/api/connectors')
+      .then(res => res.json())
+      .then(data => {
+        if (data.connectors) {
+          const configured = data.connectors
+            .filter((c: any) => c.status === 'configured')
+            .map((c: any) => c.id);
+          setConfiguredConnectors(configured);
+        }
+      })
+      .catch(console.error);
+  }, []);
+
+  const availableConnectors = Array.from(
+    new Set<string>([
+      ...configuredConnectors,
+      ...events.map(ev => ev.connector).filter((c): c is string => Boolean(c)),
+    ])
+  );
+  const filterOptions: string[] = ['all', ...availableConnectors];
 
   const filteredEvents = events.filter(ev => {
     if (filter === 'all') return true;
@@ -26,7 +49,7 @@ export default function ActivityLog() {
           <span className="text-xs text-gray-500 font-mono flex items-center gap-1">
             <Filter size={12} /> Filter:
           </span>
-          {['all', 'aws', 'github', 'datadog'].map(f => (
+          {filterOptions.map(f => (
             <button
               key={f}
               onClick={() => setFilter(f)}

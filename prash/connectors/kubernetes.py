@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterator
+from datetime import datetime, timezone, timedelta
+from typing import Iterator, Optional
 
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
@@ -212,10 +212,15 @@ class KubernetesConnector(Connector):
                     raw=pod.to_dict()
                 )
 
-    def get_stats(self, target: str, since: datetime) -> list[ConnectorEvent]:
+    def get_stats(self, target: str, since: Optional[datetime] = None) -> list[ConnectorEvent]:
         if not self.core_v1:
             self.authenticate()
             
+        if since is None:
+            since = datetime.now(timezone.utc) - timedelta(hours=1)
+        elif since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+
         target_info = self.locate(target)
         
         kwargs = {"namespace": target_info["namespace"]}
@@ -239,13 +244,16 @@ class KubernetesConnector(Connector):
                 ts = ts.replace(tzinfo=timezone.utc)
                 
             if ts >= since:
+                raw_dict = e.to_dict() if hasattr(e, "to_dict") else {}
+                raw_dict["value"] = float(getattr(e, "count", 1) or 1)
+                raw_dict["unit"] = "events"
                 normalized.append(
                     ConnectorEvent(
                         timestamp=ts,
                         connector="kubernetes",
                         event_type=e.reason or "unknown",
                         summary=f"{e.reason}: {e.message}",
-                        raw=e.to_dict()
+                        raw=raw_dict
                     )
                 )
         return sorted(normalized, key=lambda x: x["timestamp"])
