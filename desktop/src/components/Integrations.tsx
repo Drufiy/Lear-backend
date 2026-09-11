@@ -1,23 +1,14 @@
-import { useState, useEffect } from 'react';
-import { Cloud, ExternalLink, Loader2 } from 'lucide-react';
-
-interface Connector {
-  id: string;
-  name: string;
-  category: string;
-  icon: string;
-  color: string;
-  description: string;
-  status: 'configured' | 'unconfigured';
-  docs_url?: string;
-  auth_fields: any[];
-}
+import { useState, useEffect, useCallback } from 'react';
+import { Cloud, ExternalLink, Loader2, X, Plus } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import ConnectorForm, { ConnectorModel } from './ConnectorForm';
 
 export default function Integrations({ onConfigureConnector }: { onConfigureConnector?: (connectorId: string) => void }) {
-  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorModel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeConnector, setActiveConnector] = useState<ConnectorModel | null>(null);
 
-  useEffect(() => {
+  const loadConnectors = useCallback(() => {
     fetch('/api/connectors')
       .then(res => res.json())
       .then(data => setConnectors(data.connectors || []))
@@ -25,15 +16,36 @@ export default function Integrations({ onConfigureConnector }: { onConfigureConn
       .finally(() => setLoading(false));
   }, []);
 
-  const categories = Array.from(new Set(connectors.map(c => c.category)));
+  useEffect(() => {
+    loadConnectors();
+  }, [loadConnectors]);
+
+  const handleConfigure = (connector: ConnectorModel) => {
+    if (onConfigureConnector) {
+      onConfigureConnector(connector.id);
+    }
+    setActiveConnector(connector);
+  };
+
+  const handleConnectSuccess = () => {
+    loadConnectors();
+  };
+
+  const handleDisconnectSuccess = () => {
+    loadConnectors();
+  };
+
+  const categories = Array.from(new Set(connectors.map(c => c.category || 'infrastructure')));
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Connected Integrations</h1>
-        <p className="text-sm text-gray-400">
-          All 13 available providers supported by the Lear Intelligence Platform.
-        </p>
+    <div className="p-8 max-w-7xl mx-auto relative">
+      <div className="flex flex-wrap justify-between items-center gap-4 mb-8">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Connected Integrations</h1>
+          <p className="text-sm text-gray-400">
+            Manage live authentication credentials and provider connections across all {connectors.length} supported services.
+          </p>
+        </div>
       </div>
 
       {loading ? (
@@ -94,14 +106,19 @@ export default function Integrations({ onConfigureConnector }: { onConfigureConn
                             <span />
                           )}
 
-                          {onConfigureConnector && (
-                            <button
-                              onClick={() => onConfigureConnector(item.id)}
-                              className="px-3 py-1.5 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-medium text-gray-200 transition-all cursor-pointer"
-                            >
-                              {isConfigured ? 'Reconfigure' : 'Connect'}
-                            </button>
-                          )}
+                          <button
+                            onClick={() => handleConfigure(item)}
+                            className="px-3.5 py-1.5 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-medium text-gray-200 transition-all cursor-pointer flex items-center gap-1.5"
+                          >
+                            {isConfigured ? (
+                              'Reconfigure'
+                            ) : (
+                              <>
+                                <Plus size={13} />
+                                Connect
+                              </>
+                            )}
+                          </button>
                         </div>
                       </div>
                     );
@@ -112,6 +129,40 @@ export default function Integrations({ onConfigureConnector }: { onConfigureConn
           })}
         </div>
       )}
+
+      {/* Inline Connection Modal */}
+      <AnimatePresence>
+        {activeConnector && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/80 backdrop-blur-md">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full max-w-2xl relative"
+            >
+              <button
+                onClick={() => setActiveConnector(null)}
+                className="absolute top-4 right-4 z-20 p-2 rounded-lg bg-surface hover:bg-surface-elevated text-gray-400 hover:text-white transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+              <ConnectorForm
+                connector={activeConnector}
+                inline
+                onSuccess={() => {
+                  handleConnectSuccess();
+                  setActiveConnector(null);
+                }}
+                onDisconnect={() => {
+                  handleDisconnectSuccess();
+                  setActiveConnector(null);
+                }}
+                onCancel={() => setActiveConnector(null)}
+              />
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

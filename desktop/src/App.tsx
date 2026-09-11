@@ -79,9 +79,7 @@ function AppContent() {
               />
             )}
             {activeTab === 'projects' && <Projects />}
-            {activeTab === 'integrations' && (
-              <Integrations onConfigureConnector={() => setIsSetupComplete(false)} />
-            )}
+            {activeTab === 'integrations' && <Integrations />}
             {activeTab === 'activity' && <ActivityLog />}
             {activeTab === 'notifications' && <Notifications />}
             {activeTab === 'settings' && (

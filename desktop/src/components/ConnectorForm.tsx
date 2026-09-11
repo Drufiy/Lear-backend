@@ -31,6 +31,7 @@ export interface ConnectorModel {
   color: string;
   description: string;
   status: 'configured' | 'unconfigured' | string;
+  docs_url?: string;
   auth_fields: AuthField[];
   masked_credentials?: Record<string, string>;
 }
