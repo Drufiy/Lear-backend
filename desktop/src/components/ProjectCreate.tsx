@@ -162,7 +162,10 @@ export const ProjectCreate: React.FC<ProjectCreateProps> = ({ isOpen, onClose, o
 
       if (!res.ok) {
         const errData = await res.json();
-        throw new Error(errData.detail || 'Failed to create project');
+        const msg = typeof errData.message === 'string' && errData.message
+          ? errData.message
+          : (typeof errData.detail === 'string' && errData.detail ? errData.detail : 'Failed to create project');
+        throw new Error(msg);
       }
 
       const data = await res.json();

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Plus, Sparkles, Server } from 'lucide-react';
 import { WatcherPanel } from './WatcherPanel';
 import ServiceWidget from './ServiceWidget';
+import ErrorBoundary from './ErrorBoundary';
 import Chatbot from './Chatbot';
 import useWatcher from '../hooks/useWatcher';
 
@@ -110,13 +111,18 @@ export default function Dashboard({
       ) : (
         <div className="space-y-6">
           {services.map((svc: any, index: number) => (
-            <ServiceWidget
+            <ErrorBoundary
               key={`${svc.connector_id}-${svc.resource_id || index}`}
-              connectorId={svc.connector_id}
-              resourceId={svc.resource_id}
-              displayName={svc.display_name}
-              onOpenChat={handleOpenChatForService}
-            />
+              fallbackTitle={`${svc.display_name || svc.connector_id} Widget Error`}
+              fallbackMessage="Unable to render service widget. Check connection and logs."
+            >
+              <ServiceWidget
+                connectorId={svc.connector_id}
+                resourceId={svc.resource_id}
+                displayName={svc.display_name}
+                onOpenChat={handleOpenChatForService}
+              />
+            </ErrorBoundary>
           ))}
         </div>
       )}

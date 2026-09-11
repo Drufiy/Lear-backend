@@ -112,7 +112,13 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
           return { success: true, message: data.message || 'Connected successfully', identity: data.identity };
         } else {
           setStatus('error');
-          const errMsg = data.detail || data.message || 'Authentication failed. Verify credentials.';
+          const errMsg = typeof data.message === 'string' && data.message
+            ? data.message
+            : (typeof data.detail === 'string' && data.detail
+                ? data.detail
+                : (data.detail && typeof data.detail === 'object' && Object.keys(data.detail).length > 0
+                    ? JSON.stringify(data.detail)
+                    : 'Authentication failed. Verify credentials.'));
           setError(errMsg);
           return { success: false, message: errMsg };
         }
@@ -144,7 +150,13 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
         setMaskedCredentials({});
         return { success: true, message: data.message || 'Disconnected successfully' };
       } else {
-        const errMsg = data.detail || data.message || 'Failed to disconnect';
+        const errMsg = typeof data.message === 'string' && data.message
+          ? data.message
+          : (typeof data.detail === 'string' && data.detail
+              ? data.detail
+              : (data.detail && typeof data.detail === 'object' && Object.keys(data.detail).length > 0
+                  ? JSON.stringify(data.detail)
+                  : 'Failed to disconnect'));
         setError(errMsg);
         return { success: false, message: errMsg };
       }

@@ -490,7 +490,19 @@ def get_connector_metrics(
             except Exception:
                 pass
 
-        events = connector.get_stats(target=target)
+        events = []
+        try:
+            events = connector.get_stats(target=target)
+        except TypeError:
+            try:
+                events = connector.get_stats(resource=target)
+            except TypeError:
+                try:
+                    events = connector.get_stats(target)
+                except Exception:
+                    events = []
+        except ValueError:
+            events = []
 
         # Normalize metrics from real events
         normalized_metrics = []

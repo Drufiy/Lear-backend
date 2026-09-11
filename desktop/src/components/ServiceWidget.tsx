@@ -104,7 +104,12 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
         if (errData.code === 'CONNECTOR_NOT_CONFIGURED') {
           setStatus('unconfigured');
         } else {
-          setError(errData.detail || `Failed to fetch metrics (${resMetrics.status})`);
+          const msg = typeof errData.message === 'string' && errData.message
+            ? errData.message
+            : (typeof errData.detail === 'string' && errData.detail
+                ? errData.detail
+                : `Failed to fetch metrics (${resMetrics.status})`);
+          setError(msg);
         }
       }
 
@@ -120,7 +125,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
       }
     } catch (e: any) {
       console.error('Error fetching telemetry:', e);
-      setError(e?.message || 'Network error fetching service telemetry');
+      setError(typeof e?.message === 'string' ? e.message : 'Network error fetching service telemetry');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -475,7 +480,9 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
             <AlertCircle size={18} className="shrink-0 text-rose-400" />
             <div>
               <p className="font-semibold">Telemetry Polling Failed</p>
-              <p className="text-gray-400 text-[11px] mt-0.5">{error}</p>
+              <p className="text-gray-400 text-[11px] mt-0.5">
+                {typeof error === 'string' ? error : JSON.stringify(error)}
+              </p>
             </div>
           </div>
           <button

@@ -9,6 +9,7 @@ import Notifications from './components/Notifications';
 import Settings from './components/Settings';
 import NotificationToast from './components/NotificationToast';
 import Chatbot from './components/Chatbot';
+import ErrorBoundary from './components/ErrorBoundary';
 import { LearProvider, useLear } from './context/LearContext';
 
 function AppContent() {
@@ -71,20 +72,22 @@ function AppContent() {
           <Sidebar />
 
           <main className="flex-1 overflow-y-auto">
-            {activeTab === 'dashboard' && (
-              <Dashboard
-                activeProject={activeProject}
-                activeEnvironment={activeEnvironment}
-                onOpenWizard={() => setIsSetupComplete(false)}
-              />
-            )}
-            {activeTab === 'projects' && <Projects />}
-            {activeTab === 'integrations' && <Integrations />}
-            {activeTab === 'activity' && <ActivityLog />}
-            {activeTab === 'notifications' && <Notifications />}
-            {activeTab === 'settings' && (
-              <Settings onReconfigure={() => setIsSetupComplete(false)} />
-            )}
+            <ErrorBoundary fallbackTitle="View Error" fallbackMessage="There was a problem rendering this section.">
+              {activeTab === 'dashboard' && (
+                <Dashboard
+                  activeProject={activeProject}
+                  activeEnvironment={activeEnvironment}
+                  onOpenWizard={() => setIsSetupComplete(false)}
+                />
+              )}
+              {activeTab === 'projects' && <Projects />}
+              {activeTab === 'integrations' && <Integrations />}
+              {activeTab === 'activity' && <ActivityLog />}
+              {activeTab === 'notifications' && <Notifications />}
+              {activeTab === 'settings' && (
+                <Settings onReconfigure={() => setIsSetupComplete(false)} />
+              )}
+            </ErrorBoundary>
           </main>
 
           {/* Global Slide-In Alerts / Toasts */}
@@ -104,9 +107,11 @@ function AppContent() {
 
 function App() {
   return (
-    <LearProvider>
-      <AppContent />
-    </LearProvider>
+    <ErrorBoundary fallbackTitle="Lear Application Error" fallbackMessage="A critical error occurred while loading the application.">
+      <LearProvider>
+        <AppContent />
+      </LearProvider>
+    </ErrorBoundary>
   );
 }
 

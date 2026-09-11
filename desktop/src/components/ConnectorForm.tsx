@@ -251,7 +251,7 @@ export const ConnectorForm: React.FC<ConnectorFormProps> = ({
                 {(feedback?.success ?? !error) ? 'Authenticated' : 'Connection Error'}
               </span>
               <span className="text-[11px] mt-0.5 block">
-                {feedback?.message || error}
+                {typeof (feedback?.message || error) === 'string' ? (feedback?.message || error) : JSON.stringify(feedback?.message || error)}
               </span>
             </div>
           </div>

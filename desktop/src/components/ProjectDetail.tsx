@@ -211,7 +211,10 @@ export const ProjectDetail: React.FC<ProjectDetailProps> = ({
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.detail || 'Failed to update project');
+        const msg = typeof err.message === 'string' && err.message
+          ? err.message
+          : (typeof err.detail === 'string' && err.detail ? err.detail : 'Failed to update project');
+        throw new Error(msg);
       }
 
       const data = await res.json();
@@ -578,7 +581,7 @@ export const ProjectDetail: React.FC<ProjectDetailProps> = ({
                     {/* Status detail message if any */}
                     {statusInfo?.detail && (
                       <p className="text-[11px] text-gray-400 mb-4 line-clamp-2">
-                        {statusInfo.detail}
+                        {typeof statusInfo.detail === 'string' ? statusInfo.detail : JSON.stringify(statusInfo.detail)}
                       </p>
                     )}
                   </div>
