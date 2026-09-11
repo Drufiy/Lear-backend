@@ -26,10 +26,11 @@ def _utc_now() -> str:
 
 class AuditLog:
     def __init__(self, path: Optional[Path] = None):
-        self.path = path or Path(os.environ.get("PRASH_AUDIT_LOG_PATH", ".prash/audit.log")).expanduser()
+        self.path = (path or Path(os.environ.get("PRASH_AUDIT_LOG_PATH", ".prash/audit.log"))).expanduser().resolve()
 
     def _open_append(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.parent.exists():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         return self.path.open("a", encoding="utf-8")
 
     def append(

@@ -1,112 +1,45 @@
-# Feature 13 — Activity & Event Log
+# Feature 13 — Activity & Event Log 🟡 PARTIALLY DONE
 
 **Priority:** P1 — audit trail UI  
-**Owner:** TBD  
-**Depends on:** `09_WATCHER_STATUS.md`, `01_BACKEND_API_BRIDGE.md`  
-**Target file:** `desktop/src/components/ActivityLog.tsx` (new)  
-**Test file:** `desktop/src/__tests__/ActivityLog.test.tsx` (new)
+**Status:** 🟡 **PARTIAL** — basic event list exists with hardcoded filter buttons  
+**Depends on:** `09_WATCHER_STATUS.md` 🟡, `01_BACKEND_API_BRIDGE.md` ✅  
+**Blocks:** Nothing
 
 ---
 
-## Product Spec
+## What's Done
 
-The Activity Log is a chronological feed of everything Lear has observed and done across all services. It combines connector events, watcher detections, AI diagnoses, and action executions into one unified timeline.
+- [x] **B1. `ActivityLog.tsx`** — renders event list
+- [x] **B3. Event rendering** — icon, connector badge, event_type, summary, timestamp
+- [x] Events sourced from `useWatcher()` hook (line 6) — real WebSocket events
+- [x] Empty state — "No activity events recorded yet" (lines 47-51)
+- [x] Basic filter by connector name (lines 9-12)
+- [x] Timestamp formatting (line 79)
 
-### Layout
+## What's Remaining
 
-```
-┌────────────────────────────────────────────────────────────┐
-│  Activity Log                                              │
-│                                                            │
-│  Filter: [All ▾] [Last 24h ▾] [All Services ▾]  [Search]  │
-│                                                            │
-│  TODAY                                                     │
-│  ┌────────────────────────────────────────────────────┐    │
-│  │ 21:03  ☁ AWS EC2     CPU spike: 94.2% on i-0abc   │    │
-│  │ 21:01  🤖 Lear AI     Diagnosed: traffic spike      │    │
-│  │ 21:01  ⚡ Action      Recommended: restart instance  │    │
-│  │ 20:45  ⎈ K8s          Pod api-7f9d restarted (OOM)  │    │
-│  │ 20:30  🔀 GitHub      CI passed on myorg/myrepo     │    │
-│  │ 19:15  ☁ AWS EC2     Watch started on i-0abc123     │    │
-│  └────────────────────────────────────────────────────┘    │
-│                                                            │
-│  YESTERDAY                                                 │
-│  ┌────────────────────────────────────────────────────┐    │
-│  │ 23:45  ☁ AWS EC2     Instance started               │    │
-│  │ 18:30  🔀 GitHub      CI failed on myorg/myrepo     │    │
-│  │ 18:25  🤖 Lear AI     Diagnosed: missing env var     │    │
-│  └────────────────────────────────────────────────────┘    │
-└────────────────────────────────────────────────────────────┘
-```
+### 🔴 Critical Fix
+- [ ] **FIX: Hardcoded filter buttons** — Line 29: `{['all', 'aws', 'github', 'datadog'].map(...)}` — filters are hardcoded connector names instead of derived from `events` or from `/api/connectors`. If the user has Kubernetes and GitLab connected, they can't filter by those.
 
-### Event Sources
-
-| Source | Event Types | Icon |
-|---|---|---|
-| Connector events | Metric spikes, state changes, deploys, alerts | Connector icon |
-| Watcher | Watch started/stopped, status transitions | 👁 |
-| Lear AI | Diagnoses, recommendations | 🤖 |
-| Actions | Action executed, result (success/failure) | ⚡ |
-| Audit log | Permission grants, configuration changes | 🔒 |
-
-### Filters
-
-- **Type**: All / Events / Diagnoses / Actions / Watches
-- **Time**: Last 1h / 6h / 24h / 7d / 30d / Custom range
-- **Service**: All / per-connector filter
-- **Severity**: All / Critical / Warning / Info
-- **Search**: Free-text search across event summaries
-
----
-
-## Detailed Task List
-
-### Phase A — Backend
-
-- [ ] **A1. Create `GET /api/activity`** — aggregate events from:
-  - Active watch handles (poll recent events)
-  - Audit log (`prash/audit.py`)
-  - Connector `get_stats()` for configured services
-- [ ] **A2. Pagination** — offset + limit for large event sets
+### Phase A — Backend (NOT STARTED)
+- [ ] **A1. `GET /api/activity`** — backend activity endpoint (current implementation uses client-side watcher events only, missing audit log entries, AI diagnosis records, action executions)
+- [ ] **A2. Pagination** — offset + limit
 - [ ] **A3. Filtering** — query params for type, time range, connector, severity
-- [ ] **A4. Search** — basic text search across event summaries
+- [ ] **A4. Search** — text search across event summaries
 
-### Phase B — Frontend
-
-- [ ] **B1. Create ActivityLog.tsx** — renders the event timeline
+### Phase B — Frontend (remaining)
 - [ ] **B2. Event grouping** — group by day (TODAY, YESTERDAY, date)
-- [ ] **B3. Event rendering** — icon, timestamp, connector label, summary
-- [ ] **B4. Filter bar** — dropdowns for type, time, service, severity
+- [ ] **B4. Filter bar** — dynamic dropdowns for type, time range, service (from API), severity
 - [ ] **B5. Search input** — debounced search
 - [ ] **B6. Infinite scroll** — load more events on scroll
 - [ ] **B7. Click event** — navigate to the service that generated it
 
 ---
 
-## Testing Methodology
+## Defects
 
-### Anti-Hardcoding Test Suite
+> [!CAUTION]
+> **HARDCODING VIOLATION**: Filter buttons `['all', 'aws', 'github', 'datadog']` are a hardcoded array. Must derive from unique `ev.connector` values in the event stream, or from connected connectors via `/api/connectors`.
 
-```
-test_NO_HARDCODED_EVENTS — Activity feed shows ONLY events from the 
-    API, never mock/demo events.
-
-test_NO_HARDCODED_TIMESTAMPS — All timestamps come from event data, 
-    not generated by the frontend.
-
-test_EMPTY_STATE — With zero events, show "No activity yet" — not 
-    demo data.
-
-test_FILTERS_AFFECT_API — Filter changes trigger new API calls with 
-    query params, not client-side filtering of hardcoded data.
-```
-
----
-
-## Definition of Done
-
-- [ ] Activity log shows REAL events from all connectors
-- [ ] Filters work via API query params
-- [ ] Events grouped by day, sorted chronologically
-- [ ] Search works across event summaries
-- [ ] Zero mock/demo events
+> [!WARNING]
+> **Events are client-side only**: `ActivityLog` uses `useWatcher()` which provides only WebSocket events received during the current session. Historical events, AI diagnoses, and action executions are not included. The spec requires a backend `GET /api/activity` endpoint that aggregates from watch handles, audit log, connector stats, and AI diagnosis history.

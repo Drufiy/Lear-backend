@@ -44,6 +44,7 @@ dotenv.load_dotenv(ENV_PATH, override=True)
 _active_watches: Dict[str, WatchHandle] = {}
 _ws_clients: Set[WebSocket] = set()
 _ws_polling_task: Optional[asyncio.Task] = None
+_notifications: List[Dict[str, Any]] = []
 
 
 @asynccontextmanager
@@ -144,6 +145,21 @@ async def _poll_watches_loop():
                     logger.error(f"Error polling watch {watch_id}: {e}")
 
             if events_to_broadcast:
+                for item in events_to_broadcast:
+                    etype = (item.get("event_type") or "").lower()
+                    sev = "error" if "fail" in etype or "error" in etype or "crash" in etype else ("warning" if "spike" in etype or "alarm" in etype or "warn" in etype else "info")
+                    _notifications.insert(0, {
+                        "id": f"notif_{int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)}_{item.get('connector')}",
+                        "title": item.get("summary") or f"{item.get('connector')} update",
+                        "message": f"{item.get('event_type')} on {item.get('watch_id')}",
+                        "connector": item.get("connector"),
+                        "severity": sev,
+                        "timestamp": item.get("timestamp"),
+                        "read": False,
+                    })
+                if len(_notifications) > 100:
+                    del _notifications[100:]
+
                 payload = json.dumps({"events": events_to_broadcast})
                 for ws in list(_ws_clients):
                     try:
@@ -272,14 +288,46 @@ def get_connector_metrics(
     try:
         connector = get_connector(connector_id, env_config)
         target = resource or ""
+        if not target:
+            try:
+                res_meta = get_connector_resources(connector_id)
+                res_list = res_meta.get("resources", []) if isinstance(res_meta, dict) else []
+                if res_list:
+                    target = res_list[0].get("id", "")
+            except Exception:
+                pass
+
         events = connector.get_stats(target=target)
 
         # Normalize metrics from real events
         normalized_metrics = []
         for ev in events:
             raw = ev.get("raw", {})
-            val = raw.get("value", raw.get("val", raw.get("avg", 0.0)))
-            unit = raw.get("unit", "")
+            val = raw.get("value", raw.get("val", raw.get("avg", None))) if isinstance(raw, dict) else None
+            unit = raw.get("unit", "") if isinstance(raw, dict) else ""
+
+            if val is None and isinstance(raw, dict):
+                # Check for nested stats (e.g. Datadog / monitoring connectors)
+                if isinstance(raw.get("stats"), dict):
+                    st = raw["stats"]
+                    val = st.get("max", st.get("mean", st.get("value", st.get("points"))))
+                # Check for standard telemetry fields
+                if val is None:
+                    for k in ("metric_value", "data_point", "count", "latency", "points", "total", "rate"):
+                        if k in raw and isinstance(raw[k], (int, float)):
+                            val = raw[k]
+                            if not unit:
+                                unit = "ms" if "latency" in k else ("count" if "count" in k or "total" in k else "")
+                            break
+            # Fallback for event-based connectors: count each event as 1.0 signal
+            if val is None and ev.get("event_type"):
+                val = 1.0
+                if not unit:
+                    unit = "event"
+
+            if val is None:
+                continue
+
             ts = ev.get("timestamp")
             ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
             normalized_metrics.append({
@@ -288,6 +336,40 @@ def get_connector_metrics(
                 "unit": unit,
                 "timestamp": ts_str,
             })
+
+        # If get_stats returned events without numeric metrics, inspect poll_state
+        if not normalized_metrics:
+            try:
+                state_obj = connector.poll_state(target)
+                if state_obj and hasattr(state_obj, "detail") and isinstance(state_obj.detail, dict):
+                    now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    for k, v in state_obj.detail.items():
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            unit_str = "%" if any(x in k.lower() for x in ("cpu", "percent", "util", "memory", "ratio")) else ""
+                            normalized_metrics.append({
+                                "name": k,
+                                "value": float(v),
+                                "unit": unit_str,
+                                "timestamp": now_ts,
+                            })
+                    # Inspect connector-specific structures if still empty
+                    if not normalized_metrics:
+                        if "runs_by_workflow" in state_obj.detail and isinstance(state_obj.detail["runs_by_workflow"], dict):
+                            normalized_metrics.append({
+                                "name": "active_workflows",
+                                "value": float(len(state_obj.detail["runs_by_workflow"])),
+                                "unit": "workflows",
+                                "timestamp": now_ts,
+                            })
+                        if "incidents" in state_obj.detail and isinstance(state_obj.detail["incidents"], list):
+                            normalized_metrics.append({
+                                "name": "active_incidents",
+                                "value": float(len(state_obj.detail["incidents"])),
+                                "unit": "incidents",
+                                "timestamp": now_ts,
+                            })
+            except Exception:
+                pass
 
         return {
             "metrics": normalized_metrics,
@@ -615,6 +697,57 @@ def update_config(updates: Dict[str, str] = Body(...)):
 
 
 # ---------------------------------------------------------------------------
+# Platform Settings
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings")
+def get_settings():
+    """Returns current AI model, permission mode, and available models."""
+    yaml_data = _read_prash_yaml()
+    settings = yaml_data.get("settings", {})
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+
+    current_model = settings.get("model") or env_config.get("PRIMARY_MODEL") or "deepseek-v4-flash"
+    current_perm = settings.get("permission_mode") or env_config.get("PRASH_PERMISSION_MODE") or "ask"
+
+    available_models = [
+        {"id": "deepseek-v4-flash", "name": "DeepSeek Flash", "desc": "Ultra-fast intent resolution & diagnostics"},
+        {"id": "kimi-k2.6", "name": "Kimi K2.6", "desc": "Deep technical reasoning & large log contexts"},
+        {"id": "gemini-1.5-pro", "name": "Gemini Pro", "desc": "High capability multi-modal analysis"},
+    ]
+    return {
+        "model": current_model,
+        "permission_mode": current_perm,
+        "available_models": available_models,
+    }
+
+
+@app.post("/api/settings")
+def save_settings(payload: Dict[str, Any] = Body(...)):
+    """Persists model and permission mode to prash.yaml and .env."""
+    yaml_data = _read_prash_yaml()
+    if "settings" not in yaml_data or not isinstance(yaml_data["settings"], dict):
+        yaml_data["settings"] = {}
+
+    model = payload.get("model")
+    permission_mode = payload.get("permission_mode")
+
+    if not os.path.exists(ENV_PATH):
+        open(ENV_PATH, "w").close()
+
+    if model:
+        yaml_data["settings"]["model"] = model
+        dotenv.set_key(ENV_PATH, "PRIMARY_MODEL", model)
+    if permission_mode:
+        yaml_data["settings"]["permission_mode"] = permission_mode
+        dotenv.set_key(ENV_PATH, "PRASH_PERMISSION_MODE", permission_mode)
+
+    _write_prash_yaml(yaml_data)
+    dotenv.load_dotenv(ENV_PATH, override=True)
+    return {"success": True, "settings": yaml_data["settings"]}
+
+
+# ---------------------------------------------------------------------------
 # Enhanced AI Chat with Live Telemetry Injection
 # ---------------------------------------------------------------------------
 
@@ -682,6 +815,117 @@ async def chat(
             "actionRequired": False,
             "executable": False,
         }
+
+
+@app.post("/api/chat/execute")
+def execute_chat_action(payload: Dict[str, Any] = Body(...)):
+    """Executes an action generated from intent resolution or chat copilot."""
+    command = payload.get("command", [])
+    action_id = payload.get("action_id", "")
+
+    if not command and not action_id:
+        raise APIBridgeException("BAD_REQUEST", "Command or action_id is required", 400)
+
+    cmd_str = " ".join(command) if isinstance(command, list) else str(command)
+    logger.info(f"Executing chat action: {cmd_str}")
+
+    try:
+        from prash.audit import AuditLog
+        from io import StringIO
+        import sys
+
+        argv = command if isinstance(command, list) else command.split()
+
+        from prash import cli
+        parser = cli.build_parser()
+
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        capture_out = StringIO()
+        sys.stdout = capture_out
+        sys.stderr = capture_out
+
+        ret_code = 0
+        try:
+            parsed_args = parser.parse_args(argv)
+            ret_code = parsed_args.func(parsed_args)
+            if ret_code is None:
+                ret_code = 0
+        except SystemExit as se:
+            ret_code = se.code if isinstance(se.code, int) else 0
+        except Exception as exec_err:
+            ret_code = 1
+            capture_out.write(f"\nExecution error: {str(exec_err)}")
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+        output_text = capture_out.getvalue().strip()
+        if not output_text:
+            output_text = f"Action '{cmd_str}' completed successfully (exit code: {ret_code})."
+
+        # Record to audit log
+        try:
+            from prash.actions.contract import ActionResult, ActionResultStatus, Decision, RiskTier
+            from prash.permissions import PermissionMode
+            audit = AuditLog()
+            status_enum = ActionResultStatus.SUCCEEDED if ret_code == 0 else ActionResultStatus.FAILED
+            result = ActionResult(status=status_enum, summary=output_text[:200])
+            audit.append(
+                action_id=action_id or (argv[0] if argv else "chat_action"),
+                risk_tier=RiskTier.SAFE,
+                mode=PermissionMode.ASK,
+                decision=Decision.ALLOW if ret_code == 0 else Decision.REFUSE,
+                result=result,
+                environment="staging",
+                actor="chat_copilot",
+                extra={"argv": argv, "exit_code": ret_code, "output": output_text[:500]},
+            )
+        except Exception as ae:
+            logger.warning(f"Audit log recording error: {ae}")
+
+        return {
+            "success": ret_code == 0,
+            "exit_code": ret_code,
+            "command": argv,
+            "output": output_text,
+        }
+    except Exception as e:
+        logger.error(f"Error executing chat command {cmd_str}: {e}")
+        return {
+            "success": False,
+            "exit_code": 1,
+            "command": argv if 'argv' in locals() else [cmd_str],
+            "output": f"Execution error: {str(e)}",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Notification System
+# ---------------------------------------------------------------------------
+
+@app.get("/api/notifications")
+def get_notifications():
+    """Returns in-memory notification queue and watch updates."""
+    return {"notifications": _notifications}
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str):
+    """Mark a notification as read."""
+    for n in _notifications:
+        if n.get("id") == notification_id:
+            n["read"] = True
+            return {"success": True}
+    return {"success": True}
+
+
+@app.delete("/api/notifications")
+def clear_notifications():
+    """Clear all notifications."""
+    global _notifications
+    _notifications = []
+    return {"success": True}
 
 
 # ---------------------------------------------------------------------------

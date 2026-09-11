@@ -5,7 +5,7 @@ import MetricGauge from './widgets/MetricGauge';
 import MetricLineChart, { TimeSeriesPoint } from './widgets/MetricLineChart';
 import MetricCard from './widgets/MetricCard';
 import EventTimeline, { TimelineEvent } from './widgets/EventTimeline';
-import StatusGrid from './widgets/StatusGrid';
+import StatusGrid, { StatusItem } from './widgets/StatusGrid';
 
 export interface ServiceWidgetProps {
   connectorId: string;
@@ -25,12 +25,13 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
   const [metrics, setMetrics] = useState<any[]>([]);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [status, setStatus] = useState<string>('healthy');
+  const [statusData, setStatusData] = useState<any>(null);
   const [customLayout, setCustomLayout] = useState<any[] | null>(null);
   const [connectorInfo, setConnectorInfo] = useState<any>(null);
 
   const fetchTelemetry = async () => {
     try {
-      // 1. Fetch connector info
+      // 1. Fetch connector info (includes widget_templates from registry)
       const resInfo = await fetch(`/api/connectors/${connectorId}`);
       if (resInfo.ok) {
         const info = await resInfo.json();
@@ -56,6 +57,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
       if (resStatus.ok) {
         const sData = await resStatus.json();
         setStatus(sData.status || 'healthy');
+        setStatusData(sData);
       }
     } catch (e) {
       console.error('Error fetching telemetry:', e);
@@ -89,15 +91,58 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
     }
   };
 
-  // Find primary numeric metric for gauge (e.g. CPU)
-  const cpuMetric = metrics.find(m => m.name.toLowerCase().includes('cpu'));
-  const cpuVal = cpuMetric ? cpuMetric.value : 0;
-
-  // Build time series points from events or metrics
+  // Build real time series points from metrics (no synthetic fallbacks)
   const timeSeriesData: TimeSeriesPoint[] = metrics.map(m => ({
     timestamp: m.timestamp || new Date().toISOString(),
     value: typeof m.value === 'number' ? m.value : 0,
   }));
+
+  // Build authentic status check items from live status response
+  const statusItems: StatusItem[] = [];
+  if (statusData) {
+    statusItems.push({
+      id: `${connectorId}_auth`,
+      name: `${connectorInfo?.name || connectorId.toUpperCase()} Provider`,
+      status: status === 'healthy' || status === 'running' || status === 'stable' ? 'healthy' : (status === 'unconfigured' ? 'warning' : 'error'),
+      detail: statusData.detail?.message || (statusData.detail?.authenticated ? 'Authenticated' : status),
+    });
+
+    if (resourceId) {
+      statusItems.push({
+        id: `${connectorId}_resource`,
+        name: `Resource: ${resourceId}`,
+        status: status === 'healthy' || status === 'running' ? 'healthy' : (status === 'stopped' ? 'warning' : 'error'),
+        detail: typeof statusData.detail === 'string' ? statusData.detail : (statusData.detail?.state || status),
+      });
+    }
+
+    if (statusData.detail && typeof statusData.detail === 'object') {
+      for (const [k, v] of Object.entries(statusData.detail)) {
+        if (!['authenticated', 'message', 'state'].includes(k) && typeof v !== 'object') {
+          const sVal = String(v).toLowerCase();
+          const isGood = sVal === 'ok' || sVal === 'true' || sVal === 'passed' || sVal === 'healthy';
+          statusItems.push({
+            id: `chk_${k}`,
+            name: k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+            status: isGood ? 'healthy' : 'warning',
+            detail: String(v),
+          });
+        }
+      }
+    }
+  }
+
+  // Active widgets: customLayout (AI generated) OR widget_templates from registry
+  const activeWidgets = customLayout && customLayout.length > 0
+    ? customLayout
+    : (connectorInfo?.widget_templates && connectorInfo.widget_templates.length > 0
+        ? connectorInfo.widget_templates
+        : [
+            { id: 'gauge', type: 'gauge', label: 'Utilization', metric_keys: ['cpu', 'utilization'] },
+            { id: 'chart', type: 'line_chart', label: 'Telemetry Trend', metric_keys: ['metric'] },
+            { id: 'timeline', type: 'event_timeline', label: 'Alarms & Watcher Events' },
+            { id: 'status', type: 'status_grid', label: 'System Verification' },
+          ]);
 
   return (
     <motion.div
@@ -180,63 +225,118 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {/* 1. Primary Radial Gauge */}
-            <div className="glass-panel rounded-xl flex items-center justify-center">
-              <MetricGauge
-                value={cpuVal}
-                label={cpuMetric?.name || 'Utilization'}
-                unit={cpuMetric?.unit || '%'}
-              />
-            </div>
+            {activeWidgets.map((widget: any, idx: number) => {
+              const wType = widget.type || 'metric_card';
+              const keys: string[] = widget.metric_keys || [];
 
-            {/* 2. Timeseries Line Chart */}
-            <div className="glass-panel rounded-xl lg:col-span-2">
-              <MetricLineChart
-                data={timeSeriesData.length > 0 ? timeSeriesData : [
-                  { timestamp: new Date(Date.now() - 600000).toISOString(), value: cpuVal * 0.8 },
-                  { timestamp: new Date(Date.now() - 300000).toISOString(), value: cpuVal * 1.1 },
-                  { timestamp: new Date().toISOString(), value: cpuVal },
-                ]}
-                label="Telemetry Trend"
-                unit={cpuMetric?.unit || '%'}
-                color={connectorInfo?.color || '#10B981'}
-              />
-            </div>
+              // Find matching metric from live stream
+              const matchedMetric = metrics.find(m =>
+                keys.some(k => (m.name || '').toLowerCase().includes(k.toLowerCase()))
+              ) || (keys.length === 0 ? metrics[0] : null);
 
-            {/* 3. Metric KPI Cards */}
-            <div className="glass-panel rounded-xl flex flex-col justify-center gap-3 p-4">
-              <MetricCard
-                label="Current Sample"
-                value={cpuVal.toFixed(1)}
-                unit={cpuMetric?.unit || '%'}
-                change={2.4}
-              />
-              <MetricCard
-                label="Events Logged"
-                value={events.length}
-                unit="events"
-              />
-            </div>
+              const metricVal = matchedMetric && typeof matchedMetric.value === 'number' ? matchedMetric.value : 0;
+              const unit = widget.unit || matchedMetric?.unit || '';
 
-            {/* 4. Event & Alarm Timeline */}
-            <div className="glass-panel rounded-xl lg:col-span-2">
-              <EventTimeline
-                events={events}
-                label="Alarms & Watcher Events"
-              />
-            </div>
+              // Filter matching timeseries points
+              const matchedPoints: TimeSeriesPoint[] = metrics
+                .filter(m => keys.length === 0 || keys.some(k => (m.name || '').toLowerCase().includes(k.toLowerCase())))
+                .map(m => ({
+                  timestamp: m.timestamp || new Date().toISOString(),
+                  value: typeof m.value === 'number' ? m.value : 0,
+                }));
 
-            {/* 5. Health Checks Status Grid */}
-            <div className="glass-panel rounded-xl lg:col-span-3">
-              <StatusGrid
-                items={[
-                  { id: 'sts_auth', name: 'Provider Authentication', status: status === 'healthy' ? 'healthy' : 'error' },
-                  { id: 'metrics_poll', name: 'Telemetry Streaming', status: metrics.length > 0 ? 'healthy' : 'warning' },
-                  { id: 'watcher_sync', name: 'Watcher Pulse', status: 'healthy', detail: 'WebSocket sync active' },
-                ]}
-                label="System Verification"
-              />
-            </div>
+              // 1. Radial Gauge
+              if (wType === 'gauge') {
+                return (
+                  <div key={widget.id || idx} className="glass-panel rounded-xl flex items-center justify-center p-4">
+                    <MetricGauge
+                      value={metricVal}
+                      label={widget.label || matchedMetric?.name || 'Utilization'}
+                      unit={unit || '%'}
+                    />
+                  </div>
+                );
+              }
+
+              // 2. Timeseries Line Chart (pure live data, no synthetic fallback)
+              if (wType === 'line_chart') {
+                const chartData = matchedPoints.length > 0 ? matchedPoints : timeSeriesData;
+                return (
+                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2">
+                    <MetricLineChart
+                      data={chartData}
+                      label={widget.label || 'Telemetry Trend'}
+                      unit={unit}
+                      color={connectorInfo?.color || '#10B981'}
+                    />
+                  </div>
+                );
+              }
+
+              // 3. Metric KPI Card (real change computed from consecutive points, no hardcoded change={2.4})
+              if (wType === 'metric_card') {
+                const historyVals = matchedPoints.map(p => p.value);
+                let trendChange: number | undefined = undefined;
+                if (historyVals.length >= 2) {
+                  const last = historyVals[historyVals.length - 1];
+                  const prev = historyVals[historyVals.length - 2];
+                  if (prev !== 0) {
+                    trendChange = ((last - prev) / Math.abs(prev)) * 100;
+                  }
+                }
+
+                return (
+                  <div key={widget.id || idx} className="glass-panel rounded-xl flex flex-col justify-center gap-3 p-4">
+                    <MetricCard
+                      label={widget.label || matchedMetric?.name || 'Metric'}
+                      value={matchedMetric ? metricVal.toFixed(1) : '—'}
+                      unit={unit}
+                      change={trendChange}
+                      history={historyVals.length >= 2 ? historyVals : undefined}
+                    />
+                  </div>
+                );
+              }
+
+              // 4. Event & Alarm Timeline
+              if (wType === 'event_timeline') {
+                const matchedEvents = events.filter(ev =>
+                  keys.length === 0 || keys.some(k => (ev.event_type || '').toLowerCase().includes(k.toLowerCase()))
+                );
+                return (
+                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2">
+                    <EventTimeline
+                      events={matchedEvents.length > 0 ? matchedEvents : events}
+                      label={widget.label || 'Alarms & Watcher Events'}
+                    />
+                  </div>
+                );
+              }
+
+              // 5. Health Checks Status Grid (pure authentic status checks from provider)
+              if (wType === 'status_grid') {
+                return (
+                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-3">
+                    <StatusGrid
+                      items={statusItems}
+                      label={widget.label || 'System Verification'}
+                    />
+                  </div>
+                );
+              }
+
+              // Fallback for bar_chart or custom widget types
+              return (
+                <div key={widget.id || idx} className="glass-panel rounded-xl p-4 flex flex-col justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-gray-400 block mb-2">{widget.label}</span>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-bold text-white">{matchedMetric ? metricVal.toFixed(1) : '—'}</span>
+                    <span className="text-xs text-gray-400">{unit}</span>
+                  </div>
+                  {widget.description && <p className="text-[11px] text-gray-500 mt-2">{widget.description}</p>}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

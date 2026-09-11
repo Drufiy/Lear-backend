@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Home, FolderGit2, Blocks, Bell, Settings, ChevronDown, Sparkles } from 'lucide-react';
+import { Home, FolderGit2, Blocks, Bell, Settings, ChevronDown, Sparkles, Activity } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 interface SidebarProps {
@@ -12,6 +12,7 @@ interface SidebarProps {
   setActiveEnvironment: (env: string) => void;
   watcherState?: string;
   services?: any[];
+  unreadNotificationsCount?: number;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -24,14 +25,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setActiveEnvironment,
   watcherState = 'ACTIVE',
   services = [],
+  unreadNotificationsCount = 0,
 }) => {
   const [showProjectsDropdown, setShowProjectsDropdown] = useState(false);
+
+  const environments: string[] = (activeProject?.environments && activeProject.environments.length > 0)
+    ? activeProject.environments.map((e: any) => typeof e === 'string' ? e : e.name)
+    : ['Production'];
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Home },
     { id: 'projects', label: 'Projects', icon: FolderGit2 },
     { id: 'integrations', label: 'Integrations', icon: Blocks },
-    { id: 'activity', label: 'Activity Log', icon: Bell },
+    { id: 'activity', label: 'Activity Log', icon: Activity },
+    { id: 'notifications', label: 'Notifications', icon: Bell, badge: unreadNotificationsCount },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
@@ -84,14 +91,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           )}
 
-          {/* Environment Switcher */}
+          {/* Environment Switcher (Derived from active project) */}
           <div className="flex gap-1 mt-2.5 p-0.5 rounded-lg bg-background border border-border-subtle text-[11px] font-medium">
-            {['Production', 'Staging'].map(env => (
+            {environments.map(env => (
               <button
                 key={env}
                 onClick={() => setActiveEnvironment(env)}
                 className={`flex-1 py-1 rounded-md text-center transition-all cursor-pointer ${
-                  activeEnvironment === env
+                  activeEnvironment.toLowerCase() === env.toLowerCase()
                     ? 'bg-surface-elevated text-accent font-semibold shadow'
                     : 'text-gray-500 hover:text-gray-300'
                 }`}
@@ -122,7 +129,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
               }`}
             >
               <Icon size={16} className={isActive ? 'text-accent' : 'text-gray-500'} />
-              <span>{item.label}</span>
+              <span className="flex-1 text-left">{item.label}</span>
+              {item.badge !== undefined && item.badge > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-accent/20 text-accent text-[10px] font-mono font-bold">
+                  {item.badge}
+                </span>
+              )}
               {isActive && (
                 <motion.div
                   layoutId="sidebar-active"

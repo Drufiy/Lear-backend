@@ -1,14 +1,51 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Shield, Cpu, Save } from 'lucide-react';
 
 export default function Settings({ onReconfigure }: { onReconfigure?: () => void }) {
   const [model, setModel] = useState('deepseek-v4-flash');
   const [permissionMode, setPermissionMode] = useState('ask');
+  const [availableModels, setAvailableModels] = useState<any[]>([
+    { id: 'deepseek-v4-flash', name: 'DeepSeek Flash', desc: 'Ultra-fast intent resolution & diagnostics' },
+    { id: 'kimi-k2.6', name: 'Kimi K2.6', desc: 'Deep technical reasoning & large log contexts' },
+    { id: 'gemini-1.5-pro', name: 'Gemini Pro', desc: 'High capability multi-modal analysis' },
+  ]);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  useEffect(() => {
+    fetch('/api/settings')
+      .then(res => res.json())
+      .then(data => {
+        if (data.model) setModel(data.model);
+        if (data.permission_mode) setPermissionMode(data.permission_mode);
+        if (data.available_models && Array.isArray(data.available_models)) {
+          setAvailableModels(data.available_models);
+        }
+      })
+      .catch(console.error);
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, permission_mode: permissionMode }),
+      });
+      if (res.ok) {
+        setSaved(true);
+        setTimeout(() => setSaved(false), 3000);
+      } else {
+        setError('Failed to persist settings.');
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Error saving settings.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -49,11 +86,7 @@ export default function Settings({ onReconfigure }: { onReconfigure?: () => void
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-          {[
-            { id: 'deepseek-v4-flash', name: 'DeepSeek Flash', desc: 'Ultra-fast intent resolution & diagnostics' },
-            { id: 'kimi-k2.6', name: 'Kimi K2.6', desc: 'Deep technical reasoning & large log contexts' },
-            { id: 'gemini-1.5-pro', name: 'Gemini Pro', desc: 'High capability multi-modal analysis' },
-          ].map(m => (
+          {availableModels.map(m => (
             <button
               key={m.id}
               onClick={() => setModel(m.id)}
@@ -111,13 +144,24 @@ export default function Settings({ onReconfigure }: { onReconfigure?: () => void
       </section>
 
       {/* Save Button */}
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-4">
+        {error && <span className="text-xs text-rose-400 font-medium">{error}</span>}
         <button
           onClick={handleSave}
-          className="flex items-center gap-2 px-6 py-2.5 bg-accent hover:bg-accent-light text-gray-950 font-bold text-xs rounded-xl shadow-lg transition-all cursor-pointer"
+          disabled={saving}
+          className="flex items-center gap-2 px-6 py-2.5 bg-accent hover:bg-accent-light text-gray-950 font-bold text-xs rounded-xl shadow-lg transition-all cursor-pointer disabled:opacity-50"
         >
-          <Save size={16} />
-          {saved ? 'Preferences Saved!' : 'Save Settings'}
+          {saving ? (
+            <>
+              <div className="w-3.5 h-3.5 rounded-full border-2 border-gray-950 border-t-transparent animate-spin" />
+              <span>Saving...</span>
+            </>
+          ) : (
+            <>
+              <Save size={16} />
+              <span>{saved ? 'Preferences Saved!' : 'Save Settings'}</span>
+            </>
+          )}
         </button>
       </div>
     </div>

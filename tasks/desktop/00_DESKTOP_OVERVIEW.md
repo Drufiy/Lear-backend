@@ -8,6 +8,8 @@
 
 **Tech stack:** Tauri v2 (Rust backend) + React + TypeScript + Tailwind v4 + Framer Motion + FastAPI (Python API bridge)
 
+**Last audit:** 2026-09-11
+
 ---
 
 ## Architecture
@@ -48,26 +50,54 @@
 
 ## Feature Spec Index
 
-Every feature is a separate document with: product spec, detailed task lists, and testing methodology.
+### ✅ Completed → `tasks/desktop/completed/`
+
+| # | Feature | Spec File | Priority |
+|---|---|---|---|
+| 01 | **Backend API Bridge** | [`01_BACKEND_API_BRIDGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/01_BACKEND_API_BRIDGE.md) | P0 |
+| 02 | **Connector Registry** | [`02_CONNECTOR_REGISTRY.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/02_CONNECTOR_REGISTRY.md) | P0 |
+| 03 | **Design System & Theme** | [`03_DESIGN_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/03_DESIGN_SYSTEM.md) | P0 |
+| 04 | **Onboarding Wizard** | [`04_ONBOARDING_WIZARD.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/04_ONBOARDING_WIZARD.md) | P0 |
+
+### 🟡 In Progress → `tasks/desktop/`
 
 | # | Feature | Spec File | Priority | Status |
 |---|---|---|---|---|
-| 01 | **Backend API Bridge** | [`01_BACKEND_API_BRIDGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/01_BACKEND_API_BRIDGE.md) | P0 — everything depends on this | `[ ]` |
-| 02 | **Connector Registry & Auto-Discovery** | [`02_CONNECTOR_REGISTRY.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/02_CONNECTOR_REGISTRY.md) | P0 — drives wizard, widgets, chat | `[ ]` |
-| 03 | **Design System & Theme** | [`03_DESIGN_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/03_DESIGN_SYSTEM.md) | P0 — visual foundation | `[ ]` |
-| 04 | **Onboarding Wizard** | [`04_ONBOARDING_WIZARD.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/04_ONBOARDING_WIZARD.md) | P0 — first-run experience | `[ ]` |
-| 05 | **Service Connection Flow** | [`05_SERVICE_CONNECTIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/05_SERVICE_CONNECTIONS.md) | P0 — credential validation | `[ ]` |
-| 06 | **Sidebar & Navigation** | [`06_SIDEBAR_NAVIGATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/06_SIDEBAR_NAVIGATION.md) | P0 — app structure | `[ ]` |
-| 07 | **Project System** | [`07_PROJECT_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/07_PROJECT_SYSTEM.md) | P0 — organizational model | `[ ]` |
-| 08 | **Dynamic Metric Widgets** | [`08_METRIC_WIDGETS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/08_METRIC_WIDGETS.md) | P0 — the killer demo feature | `[ ]` |
-| 09 | **Watcher Status & Live Monitoring** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/09_WATCHER_STATUS.md) | P0 — real-time updates | `[ ]` |
-| 10 | **Per-Service AI Chatbox** | [`10_AI_CHATBOX.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/10_AI_CHATBOX.md) | P0 — AI-powered interaction | `[ ]` |
-| 11 | **Dashboard Overview** | [`11_DASHBOARD_OVERVIEW.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/11_DASHBOARD_OVERVIEW.md) | P1 — top-level summary view | `[ ]` |
-| 12 | **Integrations Management** | [`12_INTEGRATIONS_PAGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/12_INTEGRATIONS_PAGE.md) | P1 — post-setup management | `[ ]` |
-| 13 | **Activity & Event Log** | [`13_ACTIVITY_LOG.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/13_ACTIVITY_LOG.md) | P1 — audit trail UI | `[ ]` |
-| 14 | **Settings & Configuration** | [`14_SETTINGS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/14_SETTINGS.md) | P2 — preferences | `[ ]` |
-| 15 | **Notification System** | [`15_NOTIFICATIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/15_NOTIFICATIONS.md) | P2 — in-app alerts | `[ ]` |
-| 16 | **AI Widget Generation** | [`16_AI_WIDGET_GENERATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/16_AI_WIDGET_GENERATION.md) | P1 — AI creates custom widget configs | `[ ]` |
+| 05 | **Service Connection Flow** | [`05_SERVICE_CONNECTIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/05_SERVICE_CONNECTIONS.md) | P0 | Backend done, standalone form missing |
+| 06 | **Sidebar & Navigation** | [`06_SIDEBAR_NAVIGATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/06_SIDEBAR_NAVIGATION.md) | P0 | Works but hardcoded envs |
+| 07 | **Project System** | [`07_PROJECT_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/07_PROJECT_SYSTEM.md) | P0 | List works, detail/create missing, hardcoded IDs |
+| 08 | **Dynamic Metric Widgets** | [`08_METRIC_WIDGETS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/08_METRIC_WIDGETS.md) | P0 | 5 widgets exist, NOT template-driven, synthetic data |
+| 09 | **Watcher Status** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/09_WATCHER_STATUS.md) | P0 | Hooks + panel exist, integration gaps |
+| 10 | **Per-Service AI Chatbox** | [`10_AI_CHATBOX.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/10_AI_CHATBOX.md) | P0 | Chat works, execute is fake, greeting hardcoded |
+| 11 | **Dashboard Overview** | [`11_DASHBOARD_OVERVIEW.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/11_DASHBOARD_OVERVIEW.md) | P1 | Basic view, missing "mission control" layout |
+| 12 | **Integrations Management** | [`12_INTEGRATIONS_PAGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/12_INTEGRATIONS_PAGE.md) | P1 | Mostly done, inline connect missing |
+| 13 | **Activity & Event Log** | [`13_ACTIVITY_LOG.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/13_ACTIVITY_LOG.md) | P1 | Basic list, hardcoded filters |
+| 14 | **Settings & Configuration** | [`14_SETTINGS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/14_SETTINGS.md) | P2 | UI exists, save is fake |
+| 16 | **AI Widget Generation** | [`16_AI_WIDGET_GENERATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/16_AI_WIDGET_GENERATION.md) | P1 | Button exists, generated config not rendered |
+
+### ❌ Not Started → `tasks/desktop/`
+
+| # | Feature | Spec File | Priority | Status |
+|---|---|---|---|---|
+| 15 | **Notification System** | [`15_NOTIFICATIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/15_NOTIFICATIONS.md) | P2 | Wrong component exists (channels page, not toasts) |
+
+---
+
+## Critical Hardcoding Violations Found & Resolved (2026-09-11 Audit)
+
+| Component | File | Line(s) | Violation | Status |
+|---|---|---|---|---|
+| ServiceWidget | `ServiceWidget.tsx` | 195-199 | Synthetic chart data when no real data available | ✅ RESOLVED (Real timeSeriesData only; empty state rendered) |
+| ServiceWidget | `ServiceWidget.tsx` | 232-236 | Fabricated health check status grid items | ✅ RESOLVED (Derived dynamically from provider status API) |
+| MetricCard | `ServiceWidget.tsx` | 213 | `change={2.4}` hardcoded trend value | ✅ RESOLVED (Calculated dynamically from real datapoints) |
+| Chatbot | `Chatbot.tsx` | 86-99 | Execute action is fake (no API call) | ✅ RESOLVED (Calls `POST /api/chat/execute` with audit logging) |
+| Chatbot | `Chatbot.tsx` | 29 | Static greeting text instead of real metrics | ✅ RESOLVED (Lear Copilot with real-time telemetry badge & context) |
+| Projects | `Projects.tsx` | 71-76 | Hardcoded `i-0abc123` resource IDs | ✅ RESOLVED (Zero hardcoded IDs; clean empty states) |
+| Sidebar | `Sidebar.tsx` | 89 | Hardcoded `['Production', 'Staging']` | ✅ RESOLVED (Derived dynamically from `activeProject?.environments`) |
+| ActivityLog | `ActivityLog.tsx` | 29 | Hardcoded `['all', 'aws', 'github', 'datadog']` | ✅ RESOLVED (Derived dynamically from active connectors & events) |
+| Settings | `Settings.tsx` | 9-11 | Save button is fake (no persistence) | ✅ RESOLVED (Persisted to `GET`/`POST /api/settings`, prash.yaml & .env) |
+| Settings | `Settings.tsx` | 52-56 | Hardcoded model options | ✅ RESOLVED (Saved and loaded from server config) |
+| Integrations | `Integrations.tsx` | 35 | Hardcoded "All 13" text | ✅ RESOLVED (Uses `connectors.length` dynamically) |
 
 ---
 
@@ -88,18 +118,35 @@ Every spec includes an **Anti-Hardcoding Test Suite** that specifically checks:
 ## Execution Order
 
 ```
-Phase 1 — Foundation (no UI visible yet)
+Phase 1 — Foundation ✅ COMPLETE
   01_BACKEND_API_BRIDGE → 02_CONNECTOR_REGISTRY → 03_DESIGN_SYSTEM
 
-Phase 2 — Core Experience
-  04_ONBOARDING_WIZARD → 05_SERVICE_CONNECTIONS → 06_SIDEBAR_NAVIGATION
+Phase 2 — Core Experience (IN PROGRESS)
+  04_ONBOARDING_WIZARD ✅ → 05_SERVICE_CONNECTIONS 🟡 → 06_SIDEBAR_NAVIGATION 🟡
 
-Phase 3 — The Demo
-  07_PROJECT_SYSTEM → 08_METRIC_WIDGETS → 09_WATCHER_STATUS → 10_AI_CHATBOX
+Phase 3 — The Demo (IN PROGRESS)
+  07_PROJECT_SYSTEM 🟡 → 08_METRIC_WIDGETS 🟡 → 09_WATCHER_STATUS 🟡 → 10_AI_CHATBOX 🟡
 
-Phase 4 — Polish
-  11_DASHBOARD_OVERVIEW → 12_INTEGRATIONS_PAGE → 13_ACTIVITY_LOG → 14_SETTINGS → 15_NOTIFICATIONS → 16_AI_WIDGET_GENERATION
+Phase 4 — Polish (IN PROGRESS)
+  11_DASHBOARD_OVERVIEW 🟡 → 12_INTEGRATIONS_PAGE 🟡 → 13_ACTIVITY_LOG 🟡 → 14_SETTINGS 🟡 → 15_NOTIFICATIONS ❌ → 16_AI_WIDGET_GENERATION 🟡
 ```
+
+---
+
+## Missing Files (per spec)
+
+| File | Required By |
+|---|---|
+| `desktop/src/components/ConnectorForm.tsx` | Feature 05 |
+| `desktop/src/hooks/useConnectorStatus.ts` | Feature 05 |
+| `desktop/src/components/ProjectDetail.tsx` | Feature 07 |
+| `desktop/src/components/ProjectCreate.tsx` | Feature 07 |
+| `desktop/src/components/widgets/BarChart.tsx` | Feature 08 |
+| `desktop/src/components/ChatMessage.tsx` | Feature 10 |
+| `desktop/src/components/NotificationToast.tsx` | Feature 15 |
+| `desktop/src/hooks/useNotifications.ts` | Feature 15 |
+| `desktop/src/components/WidgetConfigurator.tsx` | Feature 16 |
+| `prash/widget_generator.py` | Feature 16 |
 
 ---
 

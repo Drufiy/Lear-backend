@@ -107,7 +107,18 @@ class AWSConnector(Connector):
         ec2 = session.client("ec2")
 
         try:
-            if resource.startswith("i-"):
+            if not resource:
+                resp = ec2.describe_instances()
+                for res in resp.get("Reservations", []):
+                    for inst in res.get("Instances", []):
+                        if inst.get("State", {}).get("Name") not in ("shutting-down", "terminated"):
+                            return {
+                                "instance_id": inst["InstanceId"],
+                                "instance_type": inst["InstanceType"],
+                                "state": inst["State"]["Name"],
+                            }
+                return {}
+            elif resource.startswith("i-"):
                 resp = ec2.describe_instances(InstanceIds=[resource])
             else:
                 resp = ec2.describe_instances(Filters=[{"Name": "tag:Name", "Values": [resource]}])
@@ -383,200 +394,6 @@ class AWSConnector(Connector):
                 LookupAttributes=[{"AttributeKey": "ResourceName", "AttributeValue": instance_id}],
                 StartTime=since,
             )
-            return ResourceState(resource, state, detail)
-            
-        except botocore.exceptions.ClientError as e:
-            return ResourceState(resource, ConnectorState.UNKNOWN, {"error": str(e)})
-
-    def _marker_present(self, instance_id: str, pem_path: str | None = None) -> bool:
-        """Return True if the prash test fixture's break marker exists on the
-        instance. Uses SSM first; falls back to SSH when pem_path is given
-        (the exact fallback execute-aws exercises). Never raises.
-        """
-        session = self._get_boto_session()
-        ssm = session.client("ssm")
-        cmd = "test -f /tmp/prash-test-fixture-break && echo PRESENT || echo ABSENT"
-        try:
-            resp = ssm.send_command(
-                InstanceIds=[instance_id],
-                DocumentName="AWS-RunShellScript",
-                Parameters={"commands": [cmd]},
-                TimeoutSeconds=30,
-            )
-            command_id = resp["Command"]["CommandId"]
-            # Poll until the invocation finishes -- a single immediate read can
-            # catch it still Pending/InProgress and wrongly report ABSENT.
-            for _ in range(15):
-                time.sleep(2)
-                inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
-                if inv.get("Status") not in ("Pending", "InProgress"):
-                    return "PRESENT" in inv.get("StandardOutputContent", "")
-            return False
-        except Exception:  # noqa: BLE001 — SSM unavailable; fall through to SSH if we have a pem
-            pass
-
-        if not pem_path or not os.path.exists(pem_path):
-            return False
-
-        try:
-            ec2 = session.client("ec2")
-            inst = ec2.describe_instances(InstanceIds=[instance_id])
-            public_ip = inst["Reservations"][0]["Instances"][0]["PublicIpAddress"]
-        except (KeyError, IndexError):
-            return False
-
-        try:
-            result = subprocess.run(
-                ["ssh", "-i", pem_path,
-                 "-o", "StrictHostKeyChecking=no",
-                 "-o", "ConnectTimeout=10",
-                 f"ubuntu@{public_ip}", cmd],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            return "PRESENT" in result.stdout
-        except Exception:  # noqa: BLE001 — same honesty rule as the SSM path
-            return False
-
-    def fetch_logs(self, resource: str, **kwargs: Any) -> list[str]:
-        """Fetch EC2 console output."""
-        if not self.authenticate():
-            return []
-
-        instance_info = self.locate(resource)
-        if not instance_info:
-            return []
-            
-        session = self._get_boto_session()
-        ec2 = session.client("ec2")
-
-        try:
-            resp = ec2.get_console_output(InstanceId=instance_info["instance_id"])
-            output = resp.get("Output")
-            if not output:
-                return []
-                
-            try:
-                import binascii
-                # Some boto3 versions/mocks automatically decode the base64 string
-                decoded = base64.b64decode(output).decode("utf-8", errors="replace")
-            except (binascii.Error, ValueError):
-                decoded = output
-            return decoded.splitlines()
-        except botocore.exceptions.ClientError:
-            return []
-
-    def execute_command(self, resource: str, command: str, **kwargs: Any) -> Dict[str, Any]:
-        """
-        Execute a command on an EC2 instance.
-        Attempts AWS Systems Manager (SSM) first.
-        If SSM fails, it attempts native SSH if 'pem_path' is provided in kwargs.
-        If SSM fails and 'pem_path' is absent, raises SSMFailedNeedsSSH.
-        """
-        if not self.authenticate():
-            return {"error": "unauthenticated"}
-
-        instance_info = self.locate(resource)
-        if not instance_info:
-            return {"error": f"Instance {resource} not found"}
-
-        instance_id = instance_info["instance_id"]
-        session = self._get_boto_session()
-        ssm = session.client("ssm")
-
-        try:
-            ssm_resp = ssm.send_command(
-                InstanceIds=[instance_id],
-                DocumentName="AWS-RunShellScript",
-                Parameters={'commands': [command]},
-                TimeoutSeconds=30
-            )
-            command_id = ssm_resp['Command']['CommandId']
-            # Wait a few seconds for command to start outputting
-            time.sleep(2)
-            out_resp = ssm.get_command_invocation(
-                CommandId=command_id,
-                InstanceId=instance_id,
-            )
-            return {
-                "source": "ssm",
-                "status": out_resp.get("Status"),
-                "stdout": out_resp.get("StandardOutputContent", ""),
-                "stderr": out_resp.get("StandardErrorContent", "")
-            }
-        except Exception as e:
-            # SSM failed. Check if we should fallback to SSH
-            pem_path = kwargs.get("pem_path")
-            if not pem_path:
-                raise SSMFailedNeedsSSH(f"SSM execution failed: {e}. A PEM file is required for SSH fallback.")
-
-            if not os.path.exists(pem_path):
-                return {"error": f"PEM file not found at {pem_path}"}
-
-            ec2 = session.client("ec2")
-            inst_info = ec2.describe_instances(InstanceIds=[instance_id])
-            try:
-                public_ip = inst_info["Reservations"][0]["Instances"][0]["PublicIpAddress"]
-            except KeyError:
-                return {"error": "Instance does not have a Public IP address assigned for SSH."}
-
-            # Attempt native SSH
-            ssh_cmd = [
-                "ssh",
-                "-i", pem_path,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=10",
-                f"ubuntu@{public_ip}",
-                command
-            ]
-            
-            try:
-                result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=True)
-                return {
-                    "source": "ssh",
-                    "status": "Success",
-                    "stdout": result.stdout,
-                    "stderr": result.stderr
-                }
-            except subprocess.CalledProcessError as err:
-                return {
-                    "source": "ssh",
-                    "status": "Failed",
-                    "stdout": err.stdout,
-                    "stderr": err.stderr,
-                    "exit_code": err.returncode
-                }
-
-    def watch(self, target: str) -> WatchHandle:
-        """Begin monitoring `target`; the handle feeds the shared watcher loop."""
-        if not self.authenticate():
-            raise RuntimeError("unauthenticated")
-        return AWSWatchHandle(self, target)
-
-    def get_stats(self, target: str, since: datetime.datetime | None = None) -> list[ConnectorEvent]:
-        """Return a time series of normalized events for `target`, optionally since a time."""
-        if not self.authenticate():
-            return []
-
-        instance_info = self.locate(target)
-        if not instance_info:
-            return []
-
-        instance_id = instance_info["instance_id"]
-        session = self._get_boto_session()
-        
-        events: list[ConnectorEvent] = []
-        if since is None:
-            since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
-            
-        try:
-            cloudtrail = session.client("cloudtrail")
-            ct_resp = cloudtrail.lookup_events(
-                LookupAttributes=[{"AttributeKey": "ResourceName", "AttributeValue": instance_id}],
-                StartTime=since,
-            )
             for event in ct_resp.get("Events", []):
                 events.append(ConnectorEvent(
                     timestamp=event.get("EventTime"),
@@ -613,14 +430,24 @@ class AWSConnector(Connector):
                     Statistics=[stat],
                 )
                 for dp in cw_resp.get("Datapoints", []):
-                    val = dp.get(stat, 0)
+                    val = float(dp.get(stat, 0.0))
+                    raw_dp = dict(dp)
+                    raw_dp["value"] = val
+                    raw_dp["unit"] = "%" if "Utilization" in metric or "Percent" in metric else ("Bytes" if "Network" in metric else "Count")
+                    events.append(ConnectorEvent(
+                        timestamp=dp.get("Timestamp"),
+                        connector="aws",
+                        event_type=metric,
+                        summary=f"{metric}: {val:.2f}",
+                        raw=raw_dp,
+                    ))
                     if val >= threshold:
                         events.append(ConnectorEvent(
                             timestamp=dp.get("Timestamp"),
                             connector="aws",
                             event_type=event_type,
                             summary=f"{summary_prefix}: {val:.2f}",
-                            raw=dp,
+                            raw=raw_dp,
                         ))
                         
             # Fetch Alarms for this instance

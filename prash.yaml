@@ -1,0 +1,19 @@
+projects:
+- created_at: '2026-09-08T16:07:01.743407+00:00'
+  environments:
+  - name: Production
+    services:
+    - connector_id: aws
+      display_name: AWS EC2
+      resource_id: ''
+    - connector_id: gcp
+      display_name: Google Cloud
+      resource_id: ''
+    - connector_id: github
+      display_name: GitHub Actions
+      resource_id: ''
+  id: default
+  name: Default Project
+settings:
+  model: kimi-k2.6
+  permission_mode: auto-safe

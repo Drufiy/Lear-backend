@@ -15,21 +15,26 @@ export const MetricCard: React.FC<MetricCardProps> = ({
   value,
   unit = '',
   change,
-  history = [20, 25, 22, 35, 42, 38, 48, 55],
+  history,
   icon,
 }) => {
   const isPositive = (change || 0) >= 0;
 
-  // Render miniature sparkline
-  const min = Math.min(...history);
-  const max = Math.max(...history, 1);
+  // Render miniature sparkline only when real historical data exists
+  const hasHistory = history && history.length >= 2;
+  let points = '';
   const width = 80;
   const height = 28;
-  const points = history.map((val, i) => {
-    const x = (i / (history.length - 1)) * width;
-    const y = height - ((val - min) / (max - min || 1)) * (height - 4) - 2;
-    return `${x},${y}`;
-  }).join(' ');
+
+  if (hasHistory) {
+    const min = Math.min(...history);
+    const max = Math.max(...history, 1);
+    points = history.map((val, i) => {
+      const x = (i / (history.length - 1)) * width;
+      const y = height - ((val - min) / (max - min || 1)) * (height - 4) - 2;
+      return `${x},${y}`;
+    }).join(' ');
+  }
 
   return (
     <div className="glass-card rounded-xl p-4 flex flex-col justify-between">
@@ -45,18 +50,20 @@ export const MetricCard: React.FC<MetricCardProps> = ({
         </div>
 
         {/* Sparkline */}
-        <div className="w-20 h-7 overflow-visible">
-          <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
-            <polyline
-              fill="none"
-              stroke={isPositive ? '#10B981' : '#F43F5E'}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              points={points}
-            />
-          </svg>
-        </div>
+        {hasHistory && (
+          <div className="w-20 h-7 overflow-visible">
+            <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
+              <polyline
+                fill="none"
+                stroke={isPositive ? '#10B981' : '#F43F5E'}
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                points={points}
+              />
+            </svg>
+          </div>
+        )}
       </div>
 
       {change !== undefined && (
