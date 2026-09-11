@@ -58,6 +58,7 @@
 | 02 | **Connector Registry** | [`02_CONNECTOR_REGISTRY.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/02_CONNECTOR_REGISTRY.md) | P0 |
 | 03 | **Design System & Theme** | [`03_DESIGN_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/03_DESIGN_SYSTEM.md) | P0 |
 | 04 | **Onboarding Wizard** | [`04_ONBOARDING_WIZARD.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/04_ONBOARDING_WIZARD.md) | P0 |
+| 05 | **Service Connection Flow** | [`05_SERVICE_CONNECTIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/05_SERVICE_CONNECTIONS.md) | P0 |
 | 06 | **Sidebar & Navigation** | [`06_SIDEBAR_NAVIGATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/06_SIDEBAR_NAVIGATION.md) | P0 |
 | 07 | **Project System** | [`07_PROJECT_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/07_PROJECT_SYSTEM.md) | P0 |
 | 08 | **Dynamic Metric Widgets** | [`08_METRIC_WIDGETS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/08_METRIC_WIDGETS.md) | P0 |
@@ -66,7 +67,6 @@
 
 | # | Feature | Spec File | Priority | Status |
 |---|---|---|---|---|
-| 05 | **Service Connection Flow** | [`05_SERVICE_CONNECTIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/05_SERVICE_CONNECTIONS.md) | P0 | Backend done, standalone form missing |
 | 09 | **Watcher Status** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/09_WATCHER_STATUS.md) | P0 | Hooks + panel exist, integration gaps |
 | 10 | **Per-Service AI Chatbox** | [`10_AI_CHATBOX.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/10_AI_CHATBOX.md) | P0 | Chat works, execute is fake, greeting hardcoded |
 | 11 | **Dashboard Overview** | [`11_DASHBOARD_OVERVIEW.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/11_DASHBOARD_OVERVIEW.md) | P1 | Basic view, missing "mission control" layout |

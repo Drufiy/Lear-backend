@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 05 — Service Connection Flow & Credential Management (`ConnectorForm.tsx`, `useConnectorStatus.ts`)**:
+  - *Reusable Standalone Connection Form (`desktop/src/components/ConnectorForm.tsx`)*: Extracted inlined Wizard logic into a standalone form supporting dynamic auth fields, show/hide password toggles, placeholder masking for active credentials (`••••••••••••`), live validation spinner, connected provider identity badges, exact error reporting, and safe disconnect confirmation.
+  - *Connection Lifecycle Hook (`desktop/src/hooks/useConnectorStatus.ts`)*: Manages connection states (`unconfigured`, `connecting`, `connected`, `expired`, `error`) with periodic 60s background health verification.
+  - *Backend Credential Masking & Provider Identity*: Enriched `registry_to_json` and `connector_detail_to_json` to return masked credentials (`mask_credential()` with first 3 + last 3 chars only), guaranteeing raw secrets are never leaked to the client. Enriched `POST /api/connectors/{id}/connect` to return caller identity (AWS STS Account ID, GitHub username, K8s cluster).
+  - *Service Disconnection & Validation Endpoints*: Implemented `POST /api/connectors/{connector_id}/disconnect` (removing keys from `.env` and halting active background watches) and `GET /api/connectors/{connector_id}/validate` in `prash/server.py`.
+  - *Integrations Modal & Wizard Overhaul*: Added inline connection modal directly in `desktop/src/components/Integrations.tsx`, eliminating the jarring redirect to the onboarding Wizard, and updated `desktop/src/components/Wizard.tsx` to consume `ConnectorForm`.
 - **Desktop Feature 08 — Dynamic Metric Widgets & Template-Driven Layout (`ServiceWidget.tsx`, `BarChart.tsx`)**:
   - *Dynamic Template-Driven Orchestration (`desktop/src/components/ServiceWidget.tsx`)*: Eliminated all hardcoded widget ordering in favor of connector registry template mapping (`widget_templates: WidgetTemplate[]`) and AI synthesized widget layouts. Dynamically renders gauges, line charts, metric cards, bar charts, event timelines, and status grids with responsive spans.
   - *Pure SVG Bar Chart Component (`desktop/src/components/widgets/BarChart.tsx`)*: Created animated SVG categorical and frequency bar chart supporting multi-key breakdowns (e.g. Snyk vulnerability severities, Kubernetes pod restart counts, serverless function volume), custom theme colors, interactive hover tooltips with relative percentages, and clean empty states.
