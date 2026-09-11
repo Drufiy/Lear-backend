@@ -210,7 +210,8 @@ def test_health_check_marks_expired_and_does_not_retry_known_invalid(service_cli
 
     assert first["status"] == "expired"
     assert first["error"] == "revoked"
-    assert first["last_verified"]
+    assert first["last_verified"] is None
+    assert first["last_checked"]
     assert second == first
     assert len(DynamicConnector.calls) == 1
 
@@ -223,6 +224,43 @@ def test_persisted_health_constructor_receives_only_owned_fields(service_client)
 
     assert state["status"] == "healthy"
     assert DynamicConnector.calls[-1] == {"DYNAMIC_TOKEN": "value", "DYNAMIC_REGION": "local"}
+
+
+def test_failed_check_preserves_last_successful_verification(service_client):
+    _, env_path = service_client
+    env_path.write_text("DYNAMIC_TOKEN=value\n", encoding="utf-8")
+    _connection_states["dynamic"] = {
+        "status": "healthy",
+        "last_verified": "2026-01-01T00:00:00+00:00",
+        "last_checked": "2026-01-01T00:00:00+00:00",
+        "error": None,
+        "identity": {"account": "old"},
+    }
+    DynamicConnector.result = False
+    DynamicConnector.error = "revoked"
+
+    state = _verify_persisted_connector("dynamic")
+
+    assert state["status"] == "expired"
+    assert state["last_verified"] == "2026-01-01T00:00:00+00:00"
+    assert state["last_checked"] != state["last_verified"]
+
+
+def test_cached_healthy_state_is_invalidated_when_required_credentials_removed(service_client):
+    client, env_path = service_client
+    env_path.write_text("", encoding="utf-8")
+    _connection_states["dynamic"] = {
+        "status": "healthy",
+        "last_verified": "2026-01-01T00:00:00+00:00",
+        "last_checked": "2026-01-01T00:00:00+00:00",
+        "error": None,
+        "identity": {"account": "old"},
+    }
+
+    listed = next(item for item in client.get("/api/connectors").json()["connectors"] if item["id"] == "dynamic")
+
+    assert listed["status"] == "unconfigured"
+    assert listed["identity"] == {}
 
 
 def test_status_does_not_reauthenticate(service_client):

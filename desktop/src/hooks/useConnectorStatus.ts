@@ -19,11 +19,8 @@ interface ConnectorStatus {
   expired: boolean;
 }
 
-const sanitizeMessage = (value: unknown, fallback: string) => {
-  if (typeof value !== 'string') return fallback;
-  const sanitized = value.replace(/<[^>]*>/g, '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
-  return sanitized || fallback;
-};
+const responseMessage = (value: unknown, fallback: string) =>
+  typeof value === 'string' && value.length > 0 ? value : fallback;
 
 const isExpired = (status: unknown) => typeof status === 'string' && status.toLowerCase() === 'expired';
 
@@ -114,14 +111,14 @@ export function useConnectorStatus(connectorId: string, initialStatus: string, h
       });
       const data = await readResponse(response);
       if (!response.ok || !data.success) {
-        setStatus({ state: 'FAILED', identity: null, error: sanitizeMessage(data.error, `Connection failed (${response.status})`), lastVerified: data.last_verified ?? null, expired: isExpired(data.status) });
+        setStatus({ state: 'FAILED', identity: null, error: responseMessage(data.error, `Connection failed (${response.status})`), lastVerified: data.last_verified ?? null, expired: isExpired(data.status) });
         return false;
       }
       setStatus({ state: stateFromStatus(data.status, true), identity: data.identity, error: null, lastVerified: data.last_verified ?? null, expired: false });
       return true;
     } catch (error) {
       if (controller.signal.aborted) return false;
-      setStatus({ state: 'FAILED', identity: null, error: sanitizeMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.'), lastVerified: null, expired: false });
+      setStatus({ state: 'FAILED', identity: null, error: responseMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.'), lastVerified: null, expired: false });
       return false;
     } finally {
       if (requestRef.current === controller) requestRef.current = null;
@@ -137,14 +134,14 @@ export function useConnectorStatus(connectorId: string, initialStatus: string, h
       const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/disconnect`, { method: 'DELETE', signal: controller.signal });
       const data = await readResponse(response);
       if (!response.ok || !data.success) {
-        setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(data.error, `Disconnect failed (${response.status})`) }));
+        setStatus(previous => ({ ...previous, state: 'FAILED', error: responseMessage(data.error, `Disconnect failed (${response.status})`) }));
         return false;
       }
       setStatus({ state: 'UNCONFIGURED', identity: null, error: null, lastVerified: null, expired: false });
       return true;
     } catch (error) {
       if (controller.signal.aborted) return false;
-      setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.') }));
+      setStatus(previous => ({ ...previous, state: 'FAILED', error: responseMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.') }));
       return false;
     } finally {
       if (requestRef.current === controller) requestRef.current = null;
@@ -159,14 +156,14 @@ export function useConnectorStatus(connectorId: string, initialStatus: string, h
       const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}/check`, { method: 'POST', signal: controller.signal });
       const data = await readResponse(response);
       if (!response.ok || !data.success || isExpired(data.status)) {
-        setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(data.error, `Connection check failed (${response.status})`), lastVerified: data.last_verified ?? previous.lastVerified, expired: isExpired(data.status) }));
+        setStatus(previous => ({ ...previous, state: 'FAILED', error: responseMessage(data.error, `Connection check failed (${response.status})`), lastVerified: data.last_verified ?? previous.lastVerified, expired: isExpired(data.status) }));
         return false;
       }
       setStatus(previous => ({ ...previous, state: stateFromStatus(data.status, true), identity: data.identity ?? previous.identity, error: null, lastVerified: data.last_verified ?? previous.lastVerified, expired: false }));
       return true;
     } catch (error) {
       if (controller.signal.aborted) return false;
-      setStatus(previous => ({ ...previous, state: 'FAILED', error: sanitizeMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.'), expired: false }));
+      setStatus(previous => ({ ...previous, state: 'FAILED', error: responseMessage(error instanceof Error ? error.message : null, 'Network error reaching API bridge.'), expired: false }));
       return false;
     } finally {
       if (requestRef.current === controller) requestRef.current = null;
@@ -185,7 +182,7 @@ export function useConnectorStatus(connectorId: string, initialStatus: string, h
         setStatus(previous => ({
           state: stateFromStatus(data.status, configured),
           identity: data.identity ?? previous.identity,
-          error: data.error ? sanitizeMessage(data.error, 'Connection unavailable') : null,
+          error: data.error ? responseMessage(data.error, 'Connection unavailable') : null,
           lastVerified: data.last_verified ?? previous.lastVerified,
           expired: isExpired(data.status),
         }));

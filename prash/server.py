@@ -146,19 +146,31 @@ def _connector_error(connector: Connector, secrets: Mapping[str, Any], fallback:
 
 
 def _state(connector_id: str, env_config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    config = env_config or {}
+    config = env_config if env_config is not None else {}
+    # Cached health is valid only while the registry-owned required credentials
+    # that produced it are still present in the current persisted configuration.
+    if not is_connector_configured(connector_id, config):
+        previous = _connection_states.get(connector_id, {})
+        return {
+            "status": "unconfigured",
+            "last_verified": previous.get("last_verified"),
+            "last_checked": previous.get("last_checked"),
+            "error": None,
+            "identity": {},
+        }
     if connector_id in _connection_states:
         return dict(_connection_states[connector_id])
-    status = "configured" if is_connector_configured(connector_id, config) else "unconfigured"
-    return {"status": status, "last_verified": None, "error": None, "identity": {}}
+    return {"status": "configured", "last_verified": None, "last_checked": None, "error": None, "identity": {}}
 
 
 def _set_state(connector_id: str, status: str, error: Optional[str] = None,
                identity: Optional[Dict[str, Any]] = None, verified: bool = False) -> Dict[str, Any]:
     previous = _connection_states.get(connector_id, {})
+    checked_at = _utcnow()
     state = {
         "status": status,
-        "last_verified": _utcnow() if verified else previous.get("last_verified"),
+        "last_verified": checked_at if verified else previous.get("last_verified"),
+        "last_checked": checked_at,
         "error": error,
         "identity": identity if identity is not None else previous.get("identity", {}),
     }
@@ -229,9 +241,9 @@ def _verify_persisted_connector(connector_id: str, automatic: bool = False) -> D
             identity = _connector_identity(connector, secrets) if authenticated else {}
     except Exception as exc:
         error = _safe_text(exc, secrets)
-        return _set_state(connector_id, "expired", error=error, identity={}, verified=True)
+        return _set_state(connector_id, "expired", error=error, identity={})
     if not authenticated:
-        return _set_state(connector_id, "expired", error=error, identity={}, verified=True)
+        return _set_state(connector_id, "expired", error=error, identity={})
     return _set_state(connector_id, "healthy", identity=identity, verified=True)
 
 

@@ -38,16 +38,16 @@ describe('ConnectorForm', () => {
     expect(screen.getByText(/Last verified 2026-03-01/)).toBeInTheDocument();
   });
 
-  it('shows the exact sanitized provider error', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockReturnValue(response({ success: false, status: 'failed', identity: null, error: '<b>Bad credentials</b>\u0000' }, false, 401)));
+  it('shows the exact provider error as escaped React text', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(response({ success: false, status: 'failed', identity: null, error: '<b>Bad credentials</b>' }, false, 401)));
     const user = userEvent.setup();
     render(<ConnectorForm connector={connector} />);
 
     await user.type(screen.getByLabelText(/Personal access token/), 'wrong');
     await user.click(screen.getByRole('button', { name: 'Validate & Save Credentials' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Bad credentials');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('<b>');
+    expect(await screen.findByRole('alert')).toHaveTextContent('<b>Bad credentials</b>');
+    expect(screen.getByRole('alert').querySelector('b')).toBeNull();
   });
 
   it('disables inputs while connecting', async () => {

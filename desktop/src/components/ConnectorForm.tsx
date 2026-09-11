@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import { useConnectorStatus } from '../hooks/useConnectorStatus';
 
@@ -27,6 +27,10 @@ export interface ConnectorDefinition {
 interface ConnectorFormProps {
   connector: ConnectorDefinition;
   onStatusChange?: (connectorId: string, status: string) => void;
+  onConnectSuccess?: (connectorId: string) => void | Promise<void>;
+  initiallyEditing?: boolean;
+  showManagementActions?: boolean;
+  disabled?: boolean;
 }
 
 const identityText = (identity: unknown): string => {
@@ -44,25 +48,37 @@ const identityText = (identity: unknown): string => {
 const existingValue = (field: AuthField) => field.masked_value ?? field.value ?? field.default ?? '';
 const hasMaskedValue = (field: AuthField) => Boolean(field.masked_value || field.configured || field.status === 'configured');
 
-export default function ConnectorForm({ connector, onStatusChange }: ConnectorFormProps) {
+export default function ConnectorForm({
+  connector,
+  onStatusChange,
+  onConnectSuccess,
+  initiallyEditing,
+  showManagementActions = true,
+  disabled: externallyDisabled = false,
+}: ConnectorFormProps) {
   const [credentials, setCredentials] = useState<Record<string, string>>({});
-  const [editing, setEditing] = useState(connector.status === 'unconfigured');
+  const [editing, setEditing] = useState(initiallyEditing ?? connector.status === 'unconfigured');
   const [locallyDisconnected, setLocallyDisconnected] = useState(false);
+  const firstFieldRef = useRef<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null>(null);
   const { state, identity, error, lastVerified, expired, connect, disconnect, check } = useConnectorStatus(connector.id, connector.status);
-  const busy = state === 'CONNECTING';
+  const busy = state === 'CONNECTING' || externallyDisabled;
   const connected = state === 'CONNECTED' || state === 'WATCHING';
   const fieldConfigured = (field: AuthField) => !locallyDisconnected && hasMaskedValue(field);
   const configured = connected || (!locallyDisconnected && connector.auth_fields.some(hasMaskedValue));
 
   useEffect(() => {
     setCredentials(Object.fromEntries(connector.auth_fields.map(field => [field.key, existingValue(field)])));
-    setEditing(connector.status === 'unconfigured');
+    setEditing(initiallyEditing ?? connector.status === 'unconfigured');
     setLocallyDisconnected(false);
-  }, [connector]);
+  }, [connector, initiallyEditing]);
 
   useEffect(() => {
     onStatusChange?.(connector.id, state);
   }, [connector.id, onStatusChange, state]);
+
+  useEffect(() => {
+    if (editing && !busy) firstFieldRef.current?.focus();
+  }, [busy, editing]);
 
   const submitCredentials = Object.fromEntries(
     connector.auth_fields
@@ -72,7 +88,11 @@ export default function ConnectorForm({ connector, onStatusChange }: ConnectorFo
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (await connect(submitCredentials)) setEditing(false);
+    if (busy) return;
+    if (await connect(submitCredentials)) {
+      setEditing(false);
+      await onConnectSuccess?.(connector.id);
+    }
   };
 
   const handleDisconnect = async () => {
@@ -99,6 +119,7 @@ export default function ConnectorForm({ connector, onStatusChange }: ConnectorFo
               {options.length > 0 ? (
                 <select
                   id={`${connector.id}-${field.key}`}
+                  ref={field === connector.auth_fields[0] ? firstFieldRef as React.Ref<HTMLSelectElement> : undefined}
                   required={field.required && !fieldConfigured(field)}
                   disabled={disabled}
                   value={value}
@@ -115,6 +136,7 @@ export default function ConnectorForm({ connector, onStatusChange }: ConnectorFo
               ) : field.type === 'textarea' ? (
                 <textarea
                   id={`${connector.id}-${field.key}`}
+                  ref={field === connector.auth_fields[0] ? firstFieldRef as React.Ref<HTMLTextAreaElement> : undefined}
                   required={field.required && !fieldConfigured(field)}
                   disabled={disabled}
                   placeholder={field.placeholder || `Enter ${field.label}`}
@@ -128,6 +150,7 @@ export default function ConnectorForm({ connector, onStatusChange }: ConnectorFo
               ) : (
                 <input
                   id={`${connector.id}-${field.key}`}
+                  ref={field === connector.auth_fields[0] ? firstFieldRef as React.Ref<HTMLInputElement> : undefined}
                   type={field.type === 'password' || hasMaskedValue(field) ? 'password' : 'text'}
                   required={field.required && !fieldConfigured(field)}
                   disabled={disabled}
@@ -179,12 +202,12 @@ export default function ConnectorForm({ connector, onStatusChange }: ConnectorFo
             {busy ? 'Authenticating...' : configured ? 'Reconnect' : 'Validate & Save Credentials'}
           </button>
         )}
-        {configured && !connected && (
+        {showManagementActions && configured && !connected && (
           <button type="button" onClick={() => void check()} disabled={busy} className="px-5 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle text-xs font-semibold text-white transition-all disabled:opacity-50">
             Check connection
           </button>
         )}
-        {configured && (
+        {showManagementActions && configured && (
           <button type="button" onClick={handleDisconnect} disabled={busy} className="px-5 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle text-xs font-semibold text-rose-400 transition-all disabled:opacity-50">
             Disconnect
           </button>

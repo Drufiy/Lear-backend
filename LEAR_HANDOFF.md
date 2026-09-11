@@ -33,11 +33,11 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 
 | Task | Status | Notes |
 |---|---|---|
-| 05 Service Connection Flow | Implemented and locally verified; commit/push pending | See `tasks/desktop/05_SERVICE_CONNECTIONS.md` and details below. |
+| 05 Service Connection Flow | Implemented, verified, and committed locally | Commit `f430134`; push blocked by expired stored GitHub credential. |
 | 06 Sidebar & Navigation | Deferred | Depends on Task 07, while Task 07 also names Task 06; resolve by implementing the shared project/navigation foundation together. |
 | 08 Dynamic Metric Widgets | Deferred | Requires Task 07 project/resource foundation. |
 | 11 Dashboard Overview | Deferred | Requires Tasks 07, 08, and 09. |
-| 12 Integrations Management | Next after Task 05 push | Reuse Task 05 `ConnectorForm`, `useConnectorStatus`, and lifecycle endpoints. |
+| 12 Integrations Management | Implemented and locally verified; commit/push pending | Reuses Task 05 form, status hook, and lifecycle endpoints. |
 
 ## Task 05 — Service Connection Flow
 
@@ -101,18 +101,43 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 
 ### Commit/push
 
-- Task 05 commit: pending.
-- Remote verification: pending.
-- Do not begin Task 12 until Task 05 is committed and pushed or the push blocker is documented explicitly.
+- Task 05 commit: `f430134` (`feat(desktop): validate connector credentials before saving`).
+- Push attempt: rejected by GitHub because the stored HTTPS credential is invalid/expired.
+- Remote verification: pending secure ALavent re-authentication.
+
+## Task 12 — Integrations Management
+
+### Implemented
+
+- Rewrote `desktop/src/components/Integrations.tsx` to render every connector and category from `/api/connectors`, with API-derived names, icons, brand colors, descriptions, auth fields, status, identity, errors, counts, and verification times.
+- Added explicit unconfigured, configured/unverified, healthy, connecting, error, loading, empty, and fetch-failure states.
+- Reused `ConnectorForm` inline for connect, configure, and reconnect; successful connections collapse and refresh authoritative API state, while failures remain inline.
+- Added real manual checks, passive 60-second list refresh with cleanup, and disconnect through an accessible Radix confirmation dialog.
+- Added focus restoration, keyboard/Escape behavior, text-plus-icon statuses, disabled concurrent actions, malformed-response handling, and a bounded registry-icon resolver with unknown fallback.
+- Hardened backend state honesty: removed credentials cannot remain cached healthy, failed checks preserve the last successful `last_verified`, and `last_checked` records attempts separately.
+- Added `desktop/src/__tests__/Integrations.test.tsx` and expanded shared form/lifecycle tests.
+
+### Verification
+
+- Full Python suite after Task 12 backend hardening: `python -m pytest -q` → **800 passed, 10 skipped, 1 existing Starlette/httpx deprecation warning**.
+- Focused backend compatibility: **44 passed, 1 existing warning**.
+- Frontend: `npm test -- --run` → **20 passed across 2 files**, no React warnings.
+- Production frontend: `npm run build` → **passed**, 2293 modules transformed.
+- `git diff --check` → no whitespace errors; only Windows line-ending notices.
+- Live provider connection management was not run because fresh provider credentials are unavailable; do not claim external E2E verification.
+
+### Commit/push
+
+- Task 12 commit: pending.
+- Remote verification: pending secure ALavent re-authentication.
 
 ## Resume here
 
-1. Review the Task 05 staged diff and scan it for secrets.
-2. Fetch `origin` again and reconcile any teammate commits without losing this Task 05 delta.
-3. Commit Task 05 with the required bot co-author trailer.
-4. Authenticate Git securely as `ALavent`, push `main`, and verify the remote head.
-5. Implement Task 12 only after Task 05 is safely published.
-6. After Task 12, stop and decide the prerequisite sequence: Task 07/shared navigation foundation → Task 06; Task 08 after Task 07; Task 09 before Task 11.
+1. Review and commit the Task 12 delta with the required bot co-author trailer.
+2. Fetch `origin` and reconcile any teammate commits without losing local commits `f430134` and Task 12.
+3. Authenticate Git securely as `ALavent`; do not reuse or store the exposed token.
+4. Push `main` and verify `refs/heads/main` using `git ls-remote`.
+5. Stop after Task 12. Next decision: Task 07/shared navigation foundation → Task 06; Task 08 after Task 07; Task 09 before Task 11.
 
 ## Durable references
 
