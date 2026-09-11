@@ -59,13 +59,13 @@
 | 03 | **Design System & Theme** | [`03_DESIGN_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/03_DESIGN_SYSTEM.md) | P0 |
 | 04 | **Onboarding Wizard** | [`04_ONBOARDING_WIZARD.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/04_ONBOARDING_WIZARD.md) | P0 |
 | 06 | **Sidebar & Navigation** | [`06_SIDEBAR_NAVIGATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/06_SIDEBAR_NAVIGATION.md) | P0 |
+| 07 | **Project System** | [`07_PROJECT_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/07_PROJECT_SYSTEM.md) | P0 |
 
 ### 🟡 In Progress → `tasks/desktop/`
 
 | # | Feature | Spec File | Priority | Status |
 |---|---|---|---|---|
 | 05 | **Service Connection Flow** | [`05_SERVICE_CONNECTIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/05_SERVICE_CONNECTIONS.md) | P0 | Backend done, standalone form missing |
-| 07 | **Project System** | [`07_PROJECT_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/07_PROJECT_SYSTEM.md) | P0 | List works, detail/create missing, hardcoded IDs |
 | 08 | **Dynamic Metric Widgets** | [`08_METRIC_WIDGETS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/08_METRIC_WIDGETS.md) | P0 | 5 widgets exist, NOT template-driven, synthetic data |
 | 09 | **Watcher Status** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/09_WATCHER_STATUS.md) | P0 | Hooks + panel exist, integration gaps |
 | 10 | **Per-Service AI Chatbox** | [`10_AI_CHATBOX.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/10_AI_CHATBOX.md) | P0 | Chat works, execute is fake, greeting hardcoded |
@@ -122,13 +122,13 @@ Phase 1 — Foundation ✅ COMPLETE
   01_BACKEND_API_BRIDGE → 02_CONNECTOR_REGISTRY → 03_DESIGN_SYSTEM
 
 Phase 2 — Core Experience (IN PROGRESS)
-  04_ONBOARDING_WIZARD ✅ → 05_SERVICE_CONNECTIONS 🟡 → 06_SIDEBAR_NAVIGATION 🟡
+  04_ONBOARDING_WIZARD ✅ → 05_SERVICE_CONNECTIONS 🟡 → 06_SIDEBAR_NAVIGATION ✅
 
 Phase 3 — The Demo (IN PROGRESS)
-  07_PROJECT_SYSTEM 🟡 → 08_METRIC_WIDGETS 🟡 → 09_WATCHER_STATUS 🟡 → 10_AI_CHATBOX 🟡
+  07_PROJECT_SYSTEM ✅ → 08_METRIC_WIDGETS 🟡 → 09_WATCHER_STATUS 🟡 → 10_AI_CHATBOX 🟡
 
 Phase 4 — Polish (IN PROGRESS)
-  11_DASHBOARD_OVERVIEW 🟡 → 12_INTEGRATIONS_PAGE 🟡 → 13_ACTIVITY_LOG 🟡 → 14_SETTINGS 🟡 → 15_NOTIFICATIONS ❌ → 16_AI_WIDGET_GENERATION 🟡
+  11_DASHBOARD_OVERVIEW 🟡 → 12_INTEGRATIONS_PAGE 🟡 → 13_ACTIVITY_LOG 🟡 → 14_SETTINGS 🟡 → 15_NOTIFICATIONS 🟡 → 16_AI_WIDGET_GENERATION 🟡
 ```
 
 ---
@@ -139,8 +139,6 @@ Phase 4 — Polish (IN PROGRESS)
 |---|---|
 | `desktop/src/components/ConnectorForm.tsx` | Feature 05 |
 | `desktop/src/hooks/useConnectorStatus.ts` | Feature 05 |
-| `desktop/src/components/ProjectDetail.tsx` | Feature 07 |
-| `desktop/src/components/ProjectCreate.tsx` | Feature 07 |
 | `desktop/src/components/widgets/BarChart.tsx` | Feature 08 |
 | `desktop/src/components/ChatMessage.tsx` | Feature 10 |
 | `desktop/src/components/NotificationToast.tsx` | Feature 15 |

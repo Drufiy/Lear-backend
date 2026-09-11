@@ -69,6 +69,9 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       }
     } else {
       context.selectProject(projectId);
+      if (projectId !== 'all') {
+        context.viewProjectDetail(projectId);
+      }
     }
     setShowProjectsDropdown(false);
   };
@@ -245,7 +248,12 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
           return (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => {
+                if (item.id === 'projects') {
+                  context.clearProjectDetail();
+                }
+                setActiveTab(item.id);
+              }}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-medium transition-all relative ${
                 isActive
                   ? 'bg-accent/10 text-accent font-semibold'

@@ -8,6 +8,7 @@ import ActivityLog from './components/ActivityLog';
 import Notifications from './components/Notifications';
 import Settings from './components/Settings';
 import NotificationToast from './components/NotificationToast';
+import Chatbot from './components/Chatbot';
 import { LearProvider, useLear } from './context/LearContext';
 
 function AppContent() {
@@ -21,6 +22,9 @@ function AppContent() {
     refreshProjects,
     toasts,
     dismissToast,
+    chatOpen,
+    closeChat,
+    chatContext,
   } = useLear();
 
   const checkConfig = async () => {
@@ -87,6 +91,13 @@ function AppContent() {
 
           {/* Global Slide-In Alerts / Toasts */}
           <NotificationToast toasts={toasts} onDismiss={dismissToast} />
+
+          {/* Global Lear Copilot Chatbot */}
+          <Chatbot
+            isOpen={chatOpen}
+            onClose={closeChat}
+            serviceContext={chatContext}
+          />
         </div>
       )}
     </>

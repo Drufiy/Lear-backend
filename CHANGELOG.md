@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 07 — Project System & Multi-Environment Hierarchy (`ProjectDetail.tsx`, `ProjectCreate.tsx`)**:
+  - *Project Detail View (`desktop/src/components/ProjectDetail.tsx`)*: Full stack management view supporting dynamic environment stages (`Production`, `Staging`, `Development`), responsive service card grid, live health polling, telemetry shortcuts, scoped AI Copilot investigation, and service removal.
+  - *Multi-Step Project Creation Flow (`desktop/src/components/ProjectCreate.tsx`)*: Interactive 4-step modal with real-time name slugification, environment setup, and dynamic connector resource discovery (`GET /api/connectors/{id}/resources`) eliminating synthetic instance IDs.
+  - *Backend Project Updates & Status Aggregation*: Implemented `PUT /api/projects/{project_id}` for schema-validated updates and `GET /api/projects/{project_id}/status` aggregating live `poll_state()` results across all project environments.
+  - *Drill-down Navigation*: Connected `Projects.tsx` stack cards and Sidebar dropdown selection directly into `ProjectDetail`.
+- **Desktop Feature 06 — Sidebar & Global Navigation State (`LearContext.tsx`, `Sidebar.tsx`)**:
+  - *Unified Global State (`desktop/src/context/LearContext.tsx`)*: Centralized application state management for active project selection, dynamic environment switching (`Production`, `Staging`, `Development`), project persistence, active background watcher tracking, aggregate system health, and connection counts.
+  - *Overhauled Navigation Sidebar (`desktop/src/components/Sidebar.tsx`)*: Implemented dynamic project selection dropdown, "All Projects" aggregate view, inline "+ New Project" modal trigger, project-specific dynamic environments, active watch status badge (`GET /api/watch/active`), connection counter badge, aggregate health dot, and version indicator (`GET /api/system/version`).
+  - *Backend Support Endpoints*: Added `GET /api/watch/active` returning active watcher handles and `GET /api/system/version` in `prash/server.py`.
+- **Desktop Copilot Real Execution Bridge (`POST /api/chat/execute`)**:
+  - Replaced simulated action timeouts with a live execution bridge in `prash/server.py` that parses natural language operational commands through the CLI intent resolver and dispatcher, executing real actions and recording audit events to `AuditLog`.
+- **Persistent Settings Management (`GET`/`POST /api/settings`)**:
+  - Connected `desktop/src/components/Settings.tsx` to live backend endpoints reading and updating preferences, active LLM model choices, auto-refresh intervals, and credential tokens directly in `prash.yaml` and `.env`.
+- **In-App Notifications & Alert Toasts Subsystem**:
+  - Implemented real notification polling and management (`desktop/src/hooks/useNotifications.ts`, `GET /api/notifications`, `POST /api/notifications/{id}/read`, `DELETE /api/notifications`) connected to audit activity, featuring animated toast banners (`NotificationToast.tsx`) with audio cues.
 - **Lear Desktop Application v2.0 (Full Overhaul & Backend API Bridge)**:
   - *Zero Hardcoding Guarantee*: Audited and eliminated all hardcoded mock metrics (`45.2`, `12.5`, `32.1`, `"14ms"`), static status returns, and mock fallback handlers across `prash/server.py`. Added an AST-based test suite (`tests/test_desktop_api.py`) verifying no static telemetry dictionaries exist.
   - *Dynamic Connector Registry (`prash/connector_registry.py`)*: Built a dynamic registry for all 13 supported providers (AWS, Azure, GCP, Kubernetes, Vercel, GitHub, GitLab, Datadog, Grafana, PagerDuty, Snyk, Gitleaks, Terraform). Provides metadata, authentication field specifications, icon/color tokens, default widget templates, and lazy instance caching.
@@ -20,7 +35,7 @@ All notable changes to this project will be documented in this file.
     - `EventTimeline`: Vertical incident and alarm timeline with severity badges.
     - `StatusGrid`: System health tile matrix.
   - *Lear Copilot / Chatbot (`desktop/src/components/Chatbot.tsx`)*: Upgraded chat interface with live service context chips, real-time telemetry injection, and interactive "Execute Action" confirmation flows.
-  - *Design System Overhaul (`desktop/src/index.css`)*: Implemented a dark obsidian design system (`#080B11`, surface `#0E131F`, emerald accent `#10B981`, glassmorphism, radar-pulse keyframe).
+  - *Design System Overhaul (`desktop/src/index.css`)*: Implemented a dark obsidian design system (`#080B11`, surface `#0E131F`, neon pink accent `#FF3A89`, glassmorphism, radar-pulse keyframe).
 - **Terraform Integration (Tracks B, C, D, E)**: Added comprehensive Terraform support across the entire architecture.
   - *Connectors*: Added `TerraformConnector` to monitor `.tfstate` and execute drift detection locally, with stubs for future Terraform Cloud integrations.
   - *Actions*: Added `terraform_init` (SAFE tier) and `terraform_apply` (dynamic risk tier defaulting to APPROVAL) to resolve config drift and setup failures.
@@ -39,6 +54,15 @@ All notable changes to this project will be documented in this file.
 - **AWS Brain Integration**: Wired AWS EC2 context directly into the `DiagnosisAgent` via `format_aws_context` and `diagnose_aws_instance`, allowing `prash fix <instance> --provider aws` to produce AI-driven root cause analyses based on instance metrics and logs.
 - **Wizard enhancements**: `prash setup` now prompts for Azure VM configurations (`AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_LOCATION`) and Google Cloud Compute Engine keys (`GCP_PROJECT_ID`, `GCP_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`).
 ### Fixed
+- **Desktop Anti-Hardcoding Audit & Zero Synthetic Data Enforcement**:
+  - *ServiceWidget (`desktop/src/components/ServiceWidget.tsx`)*: Completely eradicated synthetic fallback time-series points (`cpuVal * 0.8`, `cpuVal * 1.1`, `cpuVal`) and hardcoded status grid tiles (`sts_auth`, `metrics_poll`, `rule_eval`). The component now renders an honest empty state ("No real-time metric stream available") when no connector telemetry is returned.
+  - *Chatbot (`desktop/src/components/Chatbot.tsx`)*: Removed mocked `setTimeout` execution simulation stubs and wired action buttons directly to the live execution API (`POST /api/chat/execute`).
+  - *Wizard & Projects (`desktop/src/components/Wizard.tsx`, `Projects.tsx`)*: Replaced mock credential and environment handlers with live verification and persistence to `prash.yaml`.
+  - *Overview & EventTimeline (`desktop/src/components/Overview.tsx`, `EventTimeline.tsx`)*: Removed mock activity feeds and wired them to live audit events.
+- **Telemetry Ingestion & CloudWatch Metric Extraction**:
+  - *AWS Connector (`prash/connectors/aws.py`)*: Removed duplicate method definitions (`poll_state`, `fetch_logs`, `authenticate`), added auto-locate fallback for EC2 instances when the resource ID is omitted, and emitted real metric event structures for CloudWatch metrics (`CPUUtilization`, `DiskReadOps`, `DiskWriteOps`, `NetworkIn`, `NetworkOut`, `StatusCheckFailed`).
+  - *Kubernetes Connector (`prash/connectors/kubernetes.py`)*: Made the `since` parameter optional in `fetch_logs()` to prevent unhandled `TypeError` exceptions, and enriched raw events with numeric `count` fields for dynamic SVG chart generation.
+  - *Server Metrics Pipeline (`prash/server.py`)*: Enriched `/api/connectors/{id}/metrics` to reliably parse and project numeric metrics from nested stats, `poll_state` details, workflows, and incident alerts when CloudWatch/Prometheus time series are absent.
 - **PagerDuty Phase 3 live-verification bugs (found live 2026-09-09, each with a regression test)**:
   - *Dedup-key lookup never matched*: PagerDuty REST returns `incident_key: null` on incident objects even for Events-v2 triggers, so `find_incident_by_incident_key()` (and therefore `pagerduty-page`'s verify) always missed. Lookup now filters server-side (`/incidents?incident_key=`) and falls back to the incident alert's `alert_key`; `_paginate` learned the `alerts` collection key.
   - *Watch loop died on its first notification on cp1252 legacy Windows consoles*: rich buffers text and raises `UnicodeEncodeError` at flush time on the `⚠` marker, poisoning the Console so even the next plain-ASCII print crashed. New `watcher._console_notify()` sanitizes for the console's own encoding; both the PagerDuty and Datadog notifiers route through it, and `run_watchhandle_loop` now guards `notify_fn` the same way it guards `poll()`.
@@ -49,4 +73,11 @@ All notable changes to this project will be documented in this file.
 - **Hardcoded Secret Removal**: Removed hardcoded Gemini API keys from `test_live_infra.py` to fix GitHub push protection (GH013) violations. Secrets are now securely loaded from `.env` via `os.getenv`, and `.env.example` has been updated with the corresponding templates.
 
 ### Changed
+- **Design System Visual Rebrand (Pink Accent `#FF3A89`)**:
+  - Shifted the primary brand accent throughout the desktop application from emerald green (`#10B981`) to neon pink (`#FF3A89`, light `#FF66A5`, glow `rgba(255, 58, 137, 0.25)`).
+  - Updated Tailwind `@theme` in `desktop/src/index.css` and restyled SVG visualization primitives (`MetricLineChart`, `MetricGauge`, `MetricCard`, `ServiceWidget`, `Sidebar`, `Settings`).
+  - Removed orphaned `desktop/src/App.css` and updated `desktop/index.html` title to `"Lear — Infrastructure Intelligence"`.
+- **Project Structure & Task Tracking**:
+  - Moved completed specification `tasks/desktop/06_SIDEBAR_NAVIGATION.md` to `tasks/desktop/completed/06_SIDEBAR_NAVIGATION.md` and updated `tasks/desktop/00_DESKTOP_OVERVIEW.md`.
+  - Added `prash.yaml` to `.gitignore`.
 - **`test_live_infra.py` relocated**: Moved from the repo root to `scripts/verify_aws_live.py`. It's a manual live-verification script, not a pytest test file (no `test_` functions), and its old name/location was misleading.

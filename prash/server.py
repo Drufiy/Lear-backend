@@ -487,6 +487,33 @@ def get_connector_resources(connector_id: str):
                             "type": "k8s_pod",
                             "state": p.status.phase if hasattr(p, "status") else "unknown",
                         })
+        elif connector_id == "github":
+            repo_val = env_config.get("GITHUB_REPO")
+            if repo_val:
+                resources.append({
+                    "id": repo_val,
+                    "name": repo_val,
+                    "type": "github_repo",
+                    "state": "configured",
+                })
+        elif connector_id == "vercel":
+            proj_val = env_config.get("VERCEL_PROJECT_ID") or env_config.get("VERCEL_PROJECT")
+            if proj_val:
+                resources.append({
+                    "id": proj_val,
+                    "name": proj_val,
+                    "type": "vercel_project",
+                    "state": "configured",
+                })
+        elif connector_id == "datadog":
+            mon_val = env_config.get("DATADOG_MONITOR_ID")
+            if mon_val:
+                resources.append({
+                    "id": mon_val,
+                    "name": f"Datadog Monitor ({mon_val})",
+                    "type": "datadog_monitor",
+                    "state": "configured",
+                })
         return {"resources": resources}
     except Exception as e:
         logger.error(f"Error discovering resources for {connector_id}: {e}")
@@ -677,6 +704,149 @@ def save_project(payload: Dict[str, Any] = Body(...)):
 
     _write_prash_yaml(data)
     return {"project": project}
+
+
+@app.put("/api/projects/{project_id}")
+def update_project(project_id: str, payload: Dict[str, Any] = Body(...)):
+    """Update an existing project's name, environments, and services."""
+    project = payload.get("project", payload)
+    data = _read_prash_yaml()
+    existing_index = None
+    for i, p in enumerate(data["projects"]):
+        if p.get("id") == project_id:
+            existing_index = i
+            break
+
+    if existing_index is None:
+        raise APIBridgeException("RESOURCE_NOT_FOUND", f"Project {project_id} not found", 404)
+
+    # Validate referenced connectors exist
+    environments = project.get("environments", [])
+    for env in environments:
+        for svc in env.get("services", []):
+            cid = svc.get("connector_id")
+            if cid and cid not in CONNECTOR_REGISTRY:
+                raise APIBridgeException(
+                    "BAD_REQUEST",
+                    f"Unknown connector_id '{cid}' in environment '{env.get('name')}'",
+                    400,
+                )
+
+    orig = data["projects"][existing_index]
+    updated = {
+        "id": project_id,
+        "name": project.get("name", orig.get("name", project_id)),
+        "created_at": orig.get("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "environments": environments,
+    }
+    data["projects"][existing_index] = updated
+    _write_prash_yaml(data)
+    return {"project": updated}
+
+
+@app.get("/api/projects/{project_id}/status")
+def get_project_status(project_id: str):
+    """Aggregate live health per service via poll_state() across all environments in a project."""
+    data = _read_prash_yaml()
+    project = None
+    for p in data.get("projects", []):
+        if p.get("id") == project_id:
+            project = p
+            break
+
+    if not project:
+        raise APIBridgeException("RESOURCE_NOT_FOUND", f"Project {project_id} not found", 404)
+
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    summary_counts = {"healthy": 0, "warning": 0, "error": 0, "unknown": 0, "total": 0}
+    env_statuses = []
+
+    for env in project.get("environments", []):
+        env_services = []
+        env_summary = {"healthy": 0, "warning": 0, "error": 0, "unknown": 0}
+
+        for svc in env.get("services", []):
+            cid = svc.get("connector_id")
+            rid = svc.get("resource_id", "")
+            disp_name = svc.get("display_name") or (f"{CONNECTOR_REGISTRY[cid].name} ({rid})" if cid in CONNECTOR_REGISTRY else rid)
+
+            svc_status = "unknown"
+            state_label = "NOT_CONFIGURED"
+            detail_msg = ""
+
+            if cid in CONNECTOR_REGISTRY and is_connector_configured(cid, env_config):
+                try:
+                    connector = get_connector(cid, env_config)
+                    poll_res = connector.poll_state(rid) if hasattr(connector, "poll_state") else None
+                    if poll_res:
+                        state_val = getattr(poll_res, "state", None)
+                        state_name = getattr(state_val, "name", str(state_val)).upper()
+                        state_label = state_name
+                        detail_msg = getattr(poll_res, "message", "")
+
+                        if state_name in ("HEALTHY", "OK", "STABLE", "RUNNING"):
+                            svc_status = "healthy"
+                        elif state_name in ("DEGRADED", "WARN", "WARNING", "DEPLOYING"):
+                            svc_status = "warning"
+                        elif state_name in ("FAILED", "ERROR", "ALERT", "CRASHLOOP"):
+                            svc_status = "error"
+                        else:
+                            svc_status = "unknown"
+                except Exception as e:
+                    logger.warning(f"Error polling state for {cid}/{rid}: {e}")
+                    svc_status = "error"
+                    state_label = "ERROR"
+                    detail_msg = str(e)
+            else:
+                svc_status = "unknown"
+                state_label = "UNCONFIGURED"
+                detail_msg = f"Connector '{cid}' not configured in environment"
+
+            env_summary[svc_status] = env_summary.get(svc_status, 0) + 1
+            summary_counts[svc_status] = summary_counts.get(svc_status, 0) + 1
+            summary_counts["total"] += 1
+
+            env_services.append({
+                "connector_id": cid,
+                "resource_id": rid,
+                "display_name": disp_name,
+                "status": svc_status,
+                "state_label": state_label,
+                "detail": detail_msg,
+                "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+
+        if env_summary["error"] > 0:
+            env_status = "error"
+        elif env_summary["warning"] > 0:
+            env_status = "warning"
+        elif env_summary["healthy"] > 0:
+            env_status = "healthy"
+        else:
+            env_status = "unknown"
+
+        env_statuses.append({
+            "name": env.get("name"),
+            "status": env_status,
+            "services": env_services,
+        })
+
+    if summary_counts["error"] > 0:
+        overall_status = "error"
+    elif summary_counts["warning"] > 0:
+        overall_status = "warning"
+    elif summary_counts["healthy"] > 0:
+        overall_status = "healthy"
+    else:
+        overall_status = "unknown"
+
+    return {
+        "project_id": project_id,
+        "status": overall_status,
+        "summary": summary_counts,
+        "environments": env_statuses,
+    }
 
 
 @app.delete("/api/projects/{project_id}")

@@ -262,6 +262,79 @@ def test_PROJECT_YAML_PERSISTENCE(client, monkeypatch, tmp_path):
     assert res_verify.json()["projects"] == []
 
 
+def test_PROJECT_PUT_AND_STATUS(client, monkeypatch, tmp_path):
+    """Validates PUT /api/projects/{id} and GET /api/projects/{id}/status live aggregation."""
+    mock_yaml = tmp_path / "prash.yaml"
+    monkeypatch.setattr("prash.server.YAML_PATH", str(mock_yaml))
+
+    # 1. Create a project
+    proj = {
+        "id": "my-app",
+        "name": "My App",
+        "environments": [
+            {
+                "name": "Production",
+                "services": [
+                    {"connector_id": "aws", "resource_id": "i-test123", "display_name": "Prod Server"}
+                ]
+            }
+        ]
+    }
+    client.post("/api/projects", json={"project": proj})
+
+    # 2. Test PUT /api/projects/{id} - Update environments
+    updated_proj = {
+        "name": "My App V2",
+        "environments": [
+            {
+                "name": "Production",
+                "services": [
+                    {"connector_id": "aws", "resource_id": "i-test123", "display_name": "Prod Server V2"}
+                ]
+            },
+            {
+                "name": "Staging",
+                "services": []
+            }
+        ]
+    }
+    res_put = client.put("/api/projects/my-app", json={"project": updated_proj})
+    assert res_put.status_code == 200
+    res_data = res_put.json()["project"]
+    assert res_data["name"] == "My App V2"
+    assert len(res_data["environments"]) == 2
+
+    # 3. Test PUT on non-existent project returns 404
+    res_404 = client.put("/api/projects/non-existent", json={"project": updated_proj})
+    assert res_404.status_code == 404
+
+    # 4. Test GET /api/projects/{id}/status
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("AWS_ACCESS_KEY_ID=test\nAWS_SECRET_ACCESS_KEY=test\nAWS_REGION=us-east-1\n")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+
+    # Mock connector poll_state
+    mock_conn = MagicMock()
+    mock_poll = MagicMock()
+    mock_poll.state.name = "HEALTHY"
+    mock_poll.message = "Instance running normally"
+    mock_conn.poll_state.return_value = mock_poll
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    res_status = client.get("/api/projects/my-app/status")
+    assert res_status.status_code == 200
+    status_data = res_status.json()
+    assert status_data["project_id"] == "my-app"
+    assert status_data["status"] == "healthy"
+    assert status_data["summary"]["healthy"] == 1
+    assert status_data["summary"]["total"] == 1
+    assert len(status_data["environments"]) == 2
+    prod_env = next(e for e in status_data["environments"] if e["name"] == "Production")
+    assert prod_env["status"] == "healthy"
+    assert prod_env["services"][0]["display_name"] == "Prod Server V2"
+    assert prod_env["services"][0]["status"] == "healthy"
+
+
 def test_CHAT_TELEMETRY_INJECTION(client, monkeypatch, tmp_path):
     """Verifies that when service_context is provided to /api/chat, live telemetry is polled and injected."""
     mock_env = tmp_path / ".env"

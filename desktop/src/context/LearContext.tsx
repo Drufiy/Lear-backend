@@ -50,6 +50,15 @@ interface LearContextType {
   setActiveTab: (tab: string) => void;
   openCreateProjectModal: boolean;
   setOpenCreateProjectModal: (open: boolean) => void;
+  selectedProjectIdForDetail: string | null;
+  viewProjectDetail: (id: string) => void;
+  clearProjectDetail: () => void;
+
+  // Global Copilot / Chatbot
+  chatOpen: boolean;
+  chatContext: { connectorId?: string; resourceId?: string } | null;
+  openChat: (ctx?: { connectorId?: string; resourceId?: string } | null) => void;
+  closeChat: () => void;
 
   // Active Services
   activeServices: ServiceItem[];
@@ -84,6 +93,29 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [openCreateProjectModal, setOpenCreateProjectModal] = useState(false);
+  const [selectedProjectIdForDetail, setSelectedProjectIdForDetail] = useState<string | null>(null);
+
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatContext, setChatContext] = useState<{ connectorId?: string; resourceId?: string } | null>(null);
+
+  const viewProjectDetail = useCallback((id: string) => {
+    setSelectedProjectIdForDetail(id);
+    setActiveTab('projects');
+  }, []);
+
+  const clearProjectDetail = useCallback(() => {
+    setSelectedProjectIdForDetail(null);
+  }, []);
+
+  const openChat = useCallback((ctx?: { connectorId?: string; resourceId?: string } | null) => {
+    setChatContext(ctx || null);
+    setChatOpen(true);
+  }, []);
+
+  const closeChat = useCallback(() => {
+    setChatOpen(false);
+    setChatContext(null);
+  }, []);
 
   const [connectedCount, setConnectedCount] = useState<number>(0);
   const [activeWatches, setActiveWatches] = useState<ActiveWatch[]>([]);
@@ -351,6 +383,13 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setActiveTab,
       openCreateProjectModal,
       setOpenCreateProjectModal,
+      selectedProjectIdForDetail,
+      viewProjectDetail,
+      clearProjectDetail,
+      chatOpen,
+      chatContext,
+      openChat,
+      closeChat,
       activeServices,
       connectedCount,
       activeWatches,
@@ -374,6 +413,13 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
       environments,
       activeTab,
       openCreateProjectModal,
+      selectedProjectIdForDetail,
+      viewProjectDetail,
+      clearProjectDetail,
+      chatOpen,
+      chatContext,
+      openChat,
+      closeChat,
       activeServices,
       connectedCount,
       activeWatches,
