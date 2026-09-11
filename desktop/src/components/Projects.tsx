@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { FolderGit2, Plus, Trash2, Layers } from 'lucide-react';
+import { useLear } from '../context/LearContext';
 
 interface ServiceItem {
   connector_id: string;
@@ -20,11 +21,20 @@ interface Project {
 }
 
 export default function Projects() {
+  const context = useLear();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [showModal, setShowModal] = useState(false);
+
+  // Sync with LearContext openCreateProjectModal
+  useEffect(() => {
+    if (context.openCreateProjectModal) {
+      setShowModal(true);
+      context.setOpenCreateProjectModal(false);
+    }
+  }, [context.openCreateProjectModal]);
 
   const fetchProjects = async () => {
     try {
@@ -51,6 +61,7 @@ export default function Projects() {
       if (res.ok) {
         const data = await res.json();
         setProjects(data.projects || []);
+        context.refreshProjects();
       }
     } catch (e) {
       console.error('Error auto-importing:', e);
@@ -87,6 +98,7 @@ export default function Projects() {
         setNewProjectName('');
         setShowModal(false);
         fetchProjects();
+        context.refreshProjects();
       }
     } catch (e) {
       console.error('Error creating project:', e);
@@ -98,6 +110,7 @@ export default function Projects() {
       const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setProjects(prev => prev.filter(p => p.id !== id));
+        context.refreshProjects();
       }
     } catch (e) {
       console.error('Error deleting project:', e);

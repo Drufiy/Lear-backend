@@ -518,6 +518,29 @@ def poll_active_watches():
     return {"events": all_events}
 
 
+@app.get("/api/watch/active")
+def get_active_watches():
+    """Returns list of currently active watch handles with target and connector metadata."""
+    watches = []
+    for wid, handle in list(_active_watches.items()):
+        connector_id = getattr(handle, "connector", wid.split(":")[0] if ":" in wid else "unknown")
+        target = getattr(handle, "target", wid.split(":", 1)[1] if ":" in wid else wid)
+        watches.append({
+            "watch_id": wid,
+            "connector": connector_id,
+            "target": target,
+            "status": "healthy",
+        })
+    return {"watches": watches, "count": len(watches)}
+
+
+@app.get("/api/system/version")
+def get_system_version():
+    """Returns application name and version."""
+    return {"name": "Lear", "version": "2.0.0", "engine": "FastAPI + Prash Core"}
+
+
+
 @app.websocket("/ws/events")
 async def websocket_events_endpoint(websocket: WebSocket):
     """Real-time event stream broadcasting watch events."""
