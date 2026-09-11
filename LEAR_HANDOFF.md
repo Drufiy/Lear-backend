@@ -37,7 +37,7 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 | 06 Sidebar & Navigation | Deferred | Depends on Task 07, while Task 07 also names Task 06; resolve by implementing the shared project/navigation foundation together. |
 | 08 Dynamic Metric Widgets | Deferred | Requires Task 07 project/resource foundation. |
 | 11 Dashboard Overview | Deferred | Requires Tasks 07, 08, and 09. |
-| 12 Integrations Management | Implemented and locally verified; commit/push pending | Reuses Task 05 form, status hook, and lifecycle endpoints. |
+| 12 Integrations Management | Implemented, verified, and committed locally | Commit `1d7a1c8`; push blocked by expired stored GitHub credential. |
 
 ## Task 05 — Service Connection Flow
 
