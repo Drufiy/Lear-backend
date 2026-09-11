@@ -21,7 +21,7 @@ export const MetricGauge: React.FC<MetricGaugeProps> = ({
   const strokeDashoffset = circumference - (safeValue / 100) * circumference;
 
   // Determine color based on threshold
-  let strokeColor = '#10B981'; // Green
+  let strokeColor = '#FF3A89';
   if (safeValue > 70 && safeValue <= 85) {
     strokeColor = '#F59E0B'; // Amber
   } else if (safeValue > 85) {
@@ -38,7 +38,7 @@ export const MetricGauge: React.FC<MetricGaugeProps> = ({
         >
           <defs>
             <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#10B981" />
+              <stop offset="0%" stopColor="#FF3A89" />
               <stop offset="70%" stopColor="#F59E0B" />
               <stop offset="100%" stopColor="#F43F5E" />
             </linearGradient>

@@ -4,9 +4,9 @@
   --color-background: #080B11;
   --color-surface: #0E131F;
   --color-surface-elevated: #151C2C;
-  --color-accent: #10B981;
-  --color-accent-light: #34D399;
-  --color-accent-glow: rgba(16, 185, 129, 0.25);
+  --color-accent: #FF3A89;
+  --color-accent-light: #FF66A5;
+  --color-accent-glow: rgba(255, 58, 137, 0.25);
   --color-cyan: #06B6D4;
   --color-amber: #F59E0B;
   --color-rose: #F43F5E;
@@ -56,22 +56,22 @@
 }
 
 .glass-card:hover {
-  border-color: rgba(16, 185, 129, 0.35);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 0 15px rgba(16, 185, 129, 0.1);
+  border-color: rgba(255, 58, 137, 0.35);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 0 15px rgba(255, 58, 137, 0.1);
 }
 
 @keyframes pulse-radar {
   0% {
     transform: scale(0.95);
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+    box-shadow: 0 0 0 0 rgba(255, 58, 137, 0.7);
   }
   70% {
     transform: scale(1);
-    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 8px rgba(255, 58, 137, 0);
   }
   100% {
     transform: scale(0.95);
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 0 rgba(255, 58, 137, 0);
   }
 }
 

@@ -90,7 +90,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
         return 'bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.6)]';
       case 'healthy':
       default:
-        return 'bg-accent shadow-[0_0_8px_rgba(16,185,129,0.6)]';
+        return 'bg-accent shadow-[0_0_8px_rgba(255,58,137,0.6)]';
     }
   };
 
@@ -100,7 +100,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       <div className="p-5 pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-accent to-emerald-400 flex items-center justify-center shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-accent to-pink-400 flex items-center justify-center shadow-[0_0_15px_rgba(255,58,137,0.3)]">
               <Sparkles size={18} className="text-gray-950" />
             </div>
             <div>

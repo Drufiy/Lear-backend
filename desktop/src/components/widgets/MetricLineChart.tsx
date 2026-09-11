@@ -17,7 +17,7 @@ export const MetricLineChart: React.FC<MetricLineChartProps> = ({
   data = [],
   label,
   unit = '',
-  color = '#10B981',
+  color = '#FF3A89',
   height = 160,
 }) => {
   const [hoveredPoint, setHoveredPoint] = useState<TimeSeriesPoint | null>(null);

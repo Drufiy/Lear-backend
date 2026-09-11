@@ -267,7 +267,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                       data={chartData}
                       label={widget.label || 'Telemetry Trend'}
                       unit={unit}
-                      color={connectorInfo?.color || '#10B981'}
+                      color={connectorInfo?.color || '#ff3a89'}
                     />
                   </div>
                 );
