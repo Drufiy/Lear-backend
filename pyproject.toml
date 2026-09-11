@@ -22,6 +22,10 @@ dependencies = [
     # macOS. Found live, verifying the watcher against the actual cluster.
     "pyobjus>=1.2.3; sys_platform == 'darwin'",
     "boto3>=1.34",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

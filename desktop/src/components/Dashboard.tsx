@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Plus, Sparkles, Server } from 'lucide-react';
-import WatcherPanel from './WatcherPanel';
+import { WatcherPanel } from './WatcherPanel';
 import ServiceWidget from './ServiceWidget';
 import Chatbot from './Chatbot';
 import useWatcher from '../hooks/useWatcher';
@@ -85,7 +85,7 @@ export default function Dashboard({
         activeCount={activeWatches.length}
         eventCount={events.length}
         isConnected={isConnected}
-        onToggleWatch={services.length > 0 ? handleToggleWatchAll : undefined}
+        onToggleWatch={handleToggleWatchAll}
       />
 
       {/* 2. Services Metric Widgets */}
