@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Maximize2 } from 'lucide-react';
 
 export interface TimeSeriesPoint {
   timestamp: string;
@@ -11,6 +12,7 @@ interface MetricLineChartProps {
   unit?: string;
   color?: string;
   height?: number;
+  onExpand?: () => void;
 }
 
 export const MetricLineChart: React.FC<MetricLineChartProps> = ({
@@ -19,6 +21,7 @@ export const MetricLineChart: React.FC<MetricLineChartProps> = ({
   unit = '',
   color = '#FF3A89',
   height = 160,
+  onExpand,
 }) => {
   const [hoveredPoint, setHoveredPoint] = useState<TimeSeriesPoint | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
@@ -63,7 +66,18 @@ export const MetricLineChart: React.FC<MetricLineChartProps> = ({
   return (
     <div className="flex flex-col p-4 w-full relative">
       <div className="flex justify-between items-center mb-2">
-        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">{label}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">{label}</span>
+          {onExpand && (
+            <button
+              onClick={onExpand}
+              className="p-1 rounded text-gray-500 hover:text-white hover:bg-surface-elevated transition-colors cursor-pointer"
+              title="Expand Chart View"
+            >
+              <Maximize2 size={12} />
+            </button>
+          )}
+        </div>
         {hoveredPoint ? (
           <span className="text-xs font-mono text-accent">
             {hoveredPoint.value.toFixed(2)} {unit}

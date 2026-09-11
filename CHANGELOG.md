@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 08 — Dynamic Metric Widgets & Template-Driven Layout (`ServiceWidget.tsx`, `BarChart.tsx`)**:
+  - *Dynamic Template-Driven Orchestration (`desktop/src/components/ServiceWidget.tsx`)*: Eliminated all hardcoded widget ordering in favor of connector registry template mapping (`widget_templates: WidgetTemplate[]`) and AI synthesized widget layouts. Dynamically renders gauges, line charts, metric cards, bar charts, event timelines, and status grids with responsive spans.
+  - *Pure SVG Bar Chart Component (`desktop/src/components/widgets/BarChart.tsx`)*: Created animated SVG categorical and frequency bar chart supporting multi-key breakdowns (e.g. Snyk vulnerability severities, Kubernetes pod restart counts, serverless function volume), custom theme colors, interactive hover tooltips with relative percentages, and clean empty states.
+  - *Data Adapters & Rolling History Buffer*: Built dedicated data adapters translating raw telemetry into time-series points, categorical bar items, genuine KPI deltas from sequential polls (replacing hardcoded `change={2.4}`), and authentic provider status checks. Maintains a rolling cache of continuous telemetry points across 30s auto-refresh cycles.
+  - *High-Resolution Expand Modal & Time Range Selector*: Added inspection overlay modal with full-resolution SVG charts and raw tabular datapoint views. Added `15m`, `1h`, `6h`, `24h` range selector and contextual "Ask Copilot" action buttons on all widgets.
+  - *Backend AI Widget Shadowing Fix*: Removed redundant mock route at line 554 in `prash/server.py` that shadowed the dynamic AI widget generation endpoint at line 1185, fixing `tests/test_widget_generation.py`.
 - **Desktop Feature 07 — Project System & Multi-Environment Hierarchy (`ProjectDetail.tsx`, `ProjectCreate.tsx`)**:
   - *Project Detail View (`desktop/src/components/ProjectDetail.tsx`)*: Full stack management view supporting dynamic environment stages (`Production`, `Staging`, `Development`), responsive service card grid, live health polling, telemetry shortcuts, scoped AI Copilot investigation, and service removal.
   - *Multi-Step Project Creation Flow (`desktop/src/components/ProjectCreate.tsx`)*: Interactive 4-step modal with real-time name slugification, environment setup, and dynamic connector resource discovery (`GET /api/connectors/{id}/resources`) eliminating synthetic instance IDs.

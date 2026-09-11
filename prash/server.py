@@ -551,17 +551,6 @@ def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Failed to start watch: {str(e)}", 500)
 
 
-@app.post("/api/connectors/{connector_id}/generate-widgets")
-async def generate_widgets(connector_id: str):
-    # Analyze live connector stats or fallback to dynamic layout configuration
-    widgets = [
-        {"type": "metric_card", "title": "Live Throughput", "value": "1.2k req/s", "trend": "+12%"},
-        {"type": "gauge", "title": "Resource Saturation", "value": 44.5, "unit": "%"},
-        {"type": "line_chart", "title": "Latency Distribution", "data": [14, 18, 12, 22, 16]}
-    ]
-    return {"connector_id": connector_id, "widgets": widgets}
-
-
 @app.delete("/api/connectors/{connector_id}/watch")
 def stop_watch(connector_id: str, target: Optional[str] = Query(None), watch_id: Optional[str] = Query(None)):
     """Stop an active watch handle."""
