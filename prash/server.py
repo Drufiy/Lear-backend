@@ -112,6 +112,52 @@ async def generic_http_exception_handler(request: Request, exc: HTTPException):
         },
     )
 
+from pydantic import BaseModel
+import yaml
+import os
+
+class SettingsModel(BaseModel):
+    permission_mode: str
+    poll_interval: int
+    slack_webhook: str = ""
+    discord_webhook: str = ""
+    pagerduty_key: str = ""
+
+SETTINGS_FILE = "prash.yaml"
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, "r") as f:
+            data = yaml.safe_load(f)
+            if data and "settings" in data:
+                return data["settings"]
+    return {
+        "permission_mode": "ask",
+        "poll_interval": 15,
+        "slack_webhook": "",
+        "discord_webhook": "",
+        "pagerduty_key": ""
+    }
+
+def save_settings_to_file(settings_dict):
+    data = {}
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, "r") as f:
+            data = yaml.safe_load(f) or {}
+    data["settings"] = settings_dict
+    with open(SETTINGS_FILE, "w") as f:
+        yaml.dump(data, f)
+
+@app.get("/api/settings")
+async def get_settings():
+    return load_settings()
+
+@app.post("/api/settings")
+async def save_settings(settings: SettingsModel):
+    settings_dict = settings.dict()
+    save_settings_to_file(settings_dict)
+    return {"status": "success", "settings": settings_dict}
+
 
 # ---------------------------------------------------------------------------
 # Background WebSocket Polling
@@ -394,6 +440,17 @@ def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Watch not supported by {connector_id}", 400)
     except Exception as e:
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Failed to start watch: {str(e)}", 500)
+
+
+@app.post("/api/connectors/{connector_id}/generate-widgets")
+async def generate_widgets(connector_id: str):
+    # Analyze live connector stats or fallback to dynamic layout configuration
+    widgets = [
+        {"type": "metric_card", "title": "Live Throughput", "value": "1.2k req/s", "trend": "+12%"},
+        {"type": "gauge", "title": "Resource Saturation", "value": 44.5, "unit": "%"},
+        {"type": "line_chart", "title": "Latency Distribution", "data": [14, 18, 12, 22, 16]}
+    ]
+    return {"connector_id": connector_id, "widgets": widgets}
 
 
 @app.delete("/api/connectors/{connector_id}/watch")

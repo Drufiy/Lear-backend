@@ -1,3 +1,4 @@
+import React from 'react';
 import { Radio, Play, Square, AlertTriangle } from 'lucide-react';
 import { WatcherState } from '../hooks/useWatcher';
 
