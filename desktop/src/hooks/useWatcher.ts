@@ -87,6 +87,7 @@ export function useWatcher() {
     events,
     startWatch,
     stopWatch,
+    isRunning: watcherState === 'ACTIVE' || watcherState === 'ALERTING',
   };
 }
 
