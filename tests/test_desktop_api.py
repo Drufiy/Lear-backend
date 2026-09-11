@@ -262,6 +262,79 @@ def test_PROJECT_YAML_PERSISTENCE(client, monkeypatch, tmp_path):
     assert res_verify.json()["projects"] == []
 
 
+def test_PROJECT_PUT_AND_STATUS(client, monkeypatch, tmp_path):
+    """Validates PUT /api/projects/{id} and GET /api/projects/{id}/status live aggregation."""
+    mock_yaml = tmp_path / "prash.yaml"
+    monkeypatch.setattr("prash.server.YAML_PATH", str(mock_yaml))
+
+    # 1. Create a project
+    proj = {
+        "id": "my-app",
+        "name": "My App",
+        "environments": [
+            {
+                "name": "Production",
+                "services": [
+                    {"connector_id": "aws", "resource_id": "i-test123", "display_name": "Prod Server"}
+                ]
+            }
+        ]
+    }
+    client.post("/api/projects", json={"project": proj})
+
+    # 2. Test PUT /api/projects/{id} - Update environments
+    updated_proj = {
+        "name": "My App V2",
+        "environments": [
+            {
+                "name": "Production",
+                "services": [
+                    {"connector_id": "aws", "resource_id": "i-test123", "display_name": "Prod Server V2"}
+                ]
+            },
+            {
+                "name": "Staging",
+                "services": []
+            }
+        ]
+    }
+    res_put = client.put("/api/projects/my-app", json={"project": updated_proj})
+    assert res_put.status_code == 200
+    res_data = res_put.json()["project"]
+    assert res_data["name"] == "My App V2"
+    assert len(res_data["environments"]) == 2
+
+    # 3. Test PUT on non-existent project returns 404
+    res_404 = client.put("/api/projects/non-existent", json={"project": updated_proj})
+    assert res_404.status_code == 404
+
+    # 4. Test GET /api/projects/{id}/status
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("AWS_ACCESS_KEY_ID=test\nAWS_SECRET_ACCESS_KEY=test\nAWS_REGION=us-east-1\n")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+
+    # Mock connector poll_state
+    mock_conn = MagicMock()
+    mock_poll = MagicMock()
+    mock_poll.state.name = "HEALTHY"
+    mock_poll.message = "Instance running normally"
+    mock_conn.poll_state.return_value = mock_poll
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    res_status = client.get("/api/projects/my-app/status")
+    assert res_status.status_code == 200
+    status_data = res_status.json()
+    assert status_data["project_id"] == "my-app"
+    assert status_data["status"] == "healthy"
+    assert status_data["summary"]["healthy"] == 1
+    assert status_data["summary"]["total"] == 1
+    assert len(status_data["environments"]) == 2
+    prod_env = next(e for e in status_data["environments"] if e["name"] == "Production")
+    assert prod_env["status"] == "healthy"
+    assert prod_env["services"][0]["display_name"] == "Prod Server V2"
+    assert prod_env["services"][0]["status"] == "healthy"
+
+
 def test_CHAT_TELEMETRY_INJECTION(client, monkeypatch, tmp_path):
     """Verifies that when service_context is provided to /api/chat, live telemetry is polled and injected."""
     mock_env = tmp_path / ".env"
@@ -341,3 +414,68 @@ def test_WATCH_LIFECYCLE_START_STOP(client, monkeypatch):
     assert res_stop.status_code == 200
     assert res_stop.json()["success"] is True
     mock_handle.stop.assert_called_once()
+
+
+def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
+    """Verifies the complete connection lifecycle: connect, validate, masked credentials, and disconnect."""
+    test_env = tmp_path / ".test_connect_env"
+    test_env.write_text("")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(test_env))
+    monkeypatch.setattr("prash.connector_registry.ENV_PATH", str(test_env))
+
+    # 1. Missing credentials must fail with 400
+    res_fail = client.post("/api/connectors/aws/connect", json={"AWS_REGION": "us-east-1"})
+    assert res_fail.status_code == 400
+    assert res_fail.json()["code"] == "CONNECTOR_NOT_CONFIGURED"
+
+    # 2. Mock authenticate success
+    mock_conn = MagicMock()
+    mock_conn.authenticate.return_value = True
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    res_connect = client.post("/api/connectors/aws/connect", json={
+        "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+        "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "AWS_REGION": "us-west-2",
+    })
+    assert res_connect.status_code == 200
+    data_conn = res_connect.json()
+    assert data_conn["success"] is True
+    assert "identity" in data_conn
+    assert "AWS" in data_conn["identity"]
+
+    # 3. Verify masked credentials are returned, not raw secrets
+    res_detail = client.get("/api/connectors/aws")
+    assert res_detail.status_code == 200
+    detail_data = res_detail.json()
+    assert detail_data["status"] == "configured"
+    assert "masked_credentials" in detail_data
+    masked_key = detail_data["masked_credentials"]["AWS_ACCESS_KEY_ID"]
+    assert masked_key.startswith("AKI")
+    assert masked_key.endswith("PLE")
+    assert "IOSFODNN7" not in masked_key  # Must not contain inner secret
+
+    # 4. Validate credentials
+    res_val = client.get("/api/connectors/aws/validate")
+    assert res_val.status_code == 200
+    assert res_val.json()["valid"] is True
+    assert res_val.json()["status"] == "connected"
+
+    # 5. When auth fails (e.g. expired)
+    mock_conn.authenticate.return_value = False
+    res_exp = client.get("/api/connectors/aws/validate")
+    assert res_exp.status_code == 200
+    assert res_exp.json()["valid"] is False
+    assert res_exp.json()["status"] == "expired"
+
+    # 6. Disconnect
+    res_disc = client.post("/api/connectors/aws/disconnect")
+    assert res_disc.status_code == 200
+    assert res_disc.json()["success"] is True
+
+    # 7. Connector should now be unconfigured
+    res_unconf = client.get("/api/connectors/aws")
+    assert res_unconf.status_code == 200
+    assert res_unconf.json()["status"] == "unconfigured"
+    assert len(res_unconf.json()["masked_credentials"]) == 0
+

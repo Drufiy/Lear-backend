@@ -8,40 +8,36 @@ import ActivityLog from './components/ActivityLog';
 import Notifications from './components/Notifications';
 import Settings from './components/Settings';
 import NotificationToast from './components/NotificationToast';
-import useNotifications from './hooks/useNotifications';
+import Chatbot from './components/Chatbot';
+import ErrorBoundary from './components/ErrorBoundary';
+import { LearProvider, useLear } from './context/LearContext';
 
-function App() {
+function AppContent() {
   const [isSetupComplete, setIsSetupComplete] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
-  const [projects, setProjects] = useState<any[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string>('default');
-  const [activeEnvironment, setActiveEnvironment] = useState<string>('Production');
 
-  const { toasts, unreadCount, dismissToast } = useNotifications();
+  const {
+    activeTab,
+    activeProject,
+    activeEnvironment,
+    refreshProjects,
+    toasts,
+    dismissToast,
+    chatOpen,
+    closeChat,
+    chatContext,
+  } = useLear();
 
-  const loadData = async () => {
+  const checkConfig = async () => {
     try {
-      // 1. Check configuration
       const resConfig = await fetch('/api/config');
       if (resConfig.ok) {
         const data = await resConfig.json();
         const hasConfigured = data.services && Object.keys(data.services).length > 0;
         setIsSetupComplete(hasConfigured);
       }
-
-      // 2. Fetch projects
-      const resProjects = await fetch('/api/projects');
-      if (resProjects.ok) {
-        const pData = await resProjects.json();
-        const list = pData.projects || [];
-        setProjects(list);
-        if (list.length > 0 && !list.find((p: any) => p.id === activeProjectId)) {
-          setActiveProjectId(list[0].id);
-        }
-      }
     } catch (e) {
-      console.error('Error loading app initial state:', e);
+      console.error('Error checking setup status:', e);
       setIsSetupComplete(false);
     } finally {
       setLoading(false);
@@ -49,18 +45,13 @@ function App() {
   };
 
   useEffect(() => {
-    loadData();
+    checkConfig();
   }, []);
-
-  const activeProject = projects.find(p => p.id === activeProjectId) || projects[0];
-  const activeEnvObj = activeProject?.environments?.find(
-    (e: any) => e.name.toLowerCase() === activeEnvironment.toLowerCase()
-  ) || activeProject?.environments?.[0];
-  const activeServices = activeEnvObj?.services || [];
 
   const handleSetupComplete = () => {
     setIsSetupComplete(true);
-    loadData();
+    checkConfig();
+    refreshProjects();
   };
 
   if (loading) {
@@ -78,42 +69,49 @@ function App() {
         <Wizard onComplete={handleSetupComplete} />
       ) : (
         <div className="flex h-screen w-full relative z-10 overflow-hidden bg-background">
-          <Sidebar
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            activeProject={activeProject}
-            projects={projects}
-            onSelectProject={(p) => setActiveProjectId(p.id)}
-            activeEnvironment={activeEnvironment}
-            setActiveEnvironment={setActiveEnvironment}
-            services={activeServices}
-            unreadNotificationsCount={unreadCount}
-          />
+          <Sidebar />
 
           <main className="flex-1 overflow-y-auto">
-            {activeTab === 'dashboard' && (
-              <Dashboard
-                activeProject={activeProject}
-                activeEnvironment={activeEnvironment}
-                onOpenWizard={() => setIsSetupComplete(false)}
-              />
-            )}
-            {activeTab === 'projects' && <Projects />}
-            {activeTab === 'integrations' && (
-              <Integrations onConfigureConnector={() => setIsSetupComplete(false)} />
-            )}
-            {activeTab === 'activity' && <ActivityLog />}
-            {activeTab === 'notifications' && <Notifications />}
-            {activeTab === 'settings' && (
-              <Settings onReconfigure={() => setIsSetupComplete(false)} />
-            )}
+            <ErrorBoundary fallbackTitle="View Error" fallbackMessage="There was a problem rendering this section.">
+              {activeTab === 'dashboard' && (
+                <Dashboard
+                  activeProject={activeProject}
+                  activeEnvironment={activeEnvironment}
+                  onOpenWizard={() => setIsSetupComplete(false)}
+                />
+              )}
+              {activeTab === 'projects' && <Projects />}
+              {activeTab === 'integrations' && <Integrations />}
+              {activeTab === 'activity' && <ActivityLog />}
+              {activeTab === 'notifications' && <Notifications />}
+              {activeTab === 'settings' && (
+                <Settings onReconfigure={() => setIsSetupComplete(false)} />
+              )}
+            </ErrorBoundary>
           </main>
 
           {/* Global Slide-In Alerts / Toasts */}
           <NotificationToast toasts={toasts} onDismiss={dismissToast} />
+
+          {/* Global Lear Copilot Chatbot */}
+          <Chatbot
+            isOpen={chatOpen}
+            onClose={closeChat}
+            serviceContext={chatContext}
+          />
         </div>
       )}
     </>
+  );
+}
+
+function App() {
+  return (
+    <ErrorBoundary fallbackTitle="Lear Application Error" fallbackMessage="A critical error occurred while loading the application.">
+      <LearProvider>
+        <AppContent />
+      </LearProvider>
+    </ErrorBoundary>
   );
 }
 

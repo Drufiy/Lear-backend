@@ -29,6 +29,7 @@ from prash.connector_registry import (
     get_connector,
     get_missing_fields,
     is_connector_configured,
+    mask_credential,
     registry_to_json,
 )
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
@@ -239,6 +240,64 @@ def get_connector_info(connector_id: str):
     return connector_detail_to_json(connector_id, env_config)
 
 
+def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[str, str]) -> str:
+    """Extract human-readable provider identity (account ID, username, context) from authenticated connector."""
+    entry = CONNECTOR_REGISTRY.get(connector_id)
+    name = entry.name if entry else connector_id.upper()
+
+    try:
+        if connector_id == "aws":
+            region = env_config.get("AWS_REGION", "us-east-1")
+            sts = getattr(connector, "_sts_client", None)
+            if not sts and hasattr(connector, "session") and connector.session:
+                try:
+                    sts = connector.session.client("sts")
+                except Exception:
+                    pass
+            if sts:
+                try:
+                    ident = sts.get_caller_identity()
+                    acct = ident.get("Account", "Active")
+                    return f"AWS Account {acct} ({region})"
+                except Exception:
+                    pass
+            return f"AWS ({region})"
+
+        if connector_id == "github":
+            owner = env_config.get("GITHUB_OWNER") or env_config.get("GITHUB_REPO")
+            if owner:
+                return f"GitHub: {owner}"
+            token = env_config.get("GITHUB_TOKEN", "")
+            return f"GitHub ({mask_credential(token)})"
+
+        if connector_id == "kubernetes":
+            context = getattr(connector, "context", None)
+            namespace = getattr(connector, "namespace", None) or env_config.get("K8S_NAMESPACE", "default")
+            if context:
+                return f"Cluster: {context} ({namespace})"
+            return f"Kubernetes ({namespace})"
+
+        if connector_id == "vercel":
+            team = env_config.get("VERCEL_TEAM_ID") or env_config.get("VERCEL_PROJECT_ID")
+            if team:
+                return f"Vercel: {team}"
+            return "Vercel Platform"
+
+        if connector_id == "datadog":
+            site = env_config.get("DATADOG_SITE", "datadoghq.com")
+            return f"Datadog ({site})"
+
+        # General account key heuristics
+        for key in ("ACCOUNT_ID", "PROJECT_ID", "ORG_ID", "USERNAME"):
+            for k, v in env_config.items():
+                if key in k and v:
+                    return f"{name} ({v})"
+
+        return f"{name} Verified"
+    except Exception:
+        return f"{name} Connected"
+
+
 @app.post("/api/connectors/{connector_id}/connect")
 def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)):
     """Authenticate and save credentials for any connector."""
@@ -276,11 +335,99 @@ def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)
                 401,
             )
         entry = CONNECTOR_REGISTRY[connector_id]
-        return {"success": True, "message": f"{entry.name} authenticated successfully"}
+        identity = _get_provider_identity(connector_id, connector, env_config)
+        return {
+            "success": True,
+            "message": f"{entry.name} authenticated successfully",
+            "identity": identity,
+        }
     except APIBridgeException:
         raise
     except Exception as e:
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Authentication error: {str(e)}", 500)
+
+
+@app.post("/api/connectors/{connector_id}/disconnect")
+def disconnect_connector(connector_id: str):
+    """Disconnect a service by removing credentials from .env and halting active watches."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    entry = CONNECTOR_REGISTRY[connector_id]
+
+    # 1. Remove all auth field keys from .env
+    if os.path.exists(ENV_PATH):
+        for field in entry.auth_fields:
+            try:
+                dotenv.unset_key(ENV_PATH, field.key)
+            except Exception as e:
+                logger.warning(f"Error unsetting key {field.key}: {e}")
+        dotenv.load_dotenv(ENV_PATH, override=True)
+
+    # 2. Stop any active watches associated with this connector
+    stopped_watches = []
+    for wid in list(_active_watches.keys()):
+        if wid.startswith(f"{connector_id}:") or wid == connector_id:
+            handle = _active_watches.pop(wid, None)
+            if handle:
+                try:
+                    handle.stop()
+                    stopped_watches.append(wid)
+                except Exception as e:
+                    logger.warning(f"Error stopping watch {wid} on disconnect: {e}")
+
+    # 3. Clear cached connector instance
+    clear_connector_cache(connector_id)
+
+    return {
+        "success": True,
+        "message": f"{entry.name} disconnected successfully",
+        "stopped_watches": stopped_watches,
+    }
+
+
+@app.get("/api/connectors/{connector_id}/validate")
+def validate_connector(connector_id: str):
+    """Check credentials validity and health without modifying .env."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    entry = CONNECTOR_REGISTRY[connector_id]
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    if not is_connector_configured(connector_id, env_config):
+        return {
+            "valid": False,
+            "status": "unconfigured",
+            "message": f"{entry.name} is not configured",
+            "identity": None,
+        }
+
+    try:
+        connector = get_connector(connector_id, env_config)
+        is_authenticated = connector.authenticate()
+        if is_authenticated:
+            identity = _get_provider_identity(connector_id, connector, env_config)
+            return {
+                "valid": True,
+                "status": "connected",
+                "message": f"{entry.name} credentials are active",
+                "identity": identity,
+            }
+        else:
+            return {
+                "valid": False,
+                "status": "expired",
+                "message": f"{entry.name} credentials failed authentication or expired",
+                "identity": None,
+            }
+    except Exception as e:
+        return {
+            "valid": False,
+            "status": "error",
+            "message": f"Validation error: {str(e)}",
+            "identity": None,
+        }
+
 
 
 @app.get("/api/connectors/{connector_id}/status")
@@ -343,7 +490,19 @@ def get_connector_metrics(
             except Exception:
                 pass
 
-        events = connector.get_stats(target=target)
+        events = []
+        try:
+            events = connector.get_stats(target=target)
+        except TypeError:
+            try:
+                events = connector.get_stats(resource=target)
+            except TypeError:
+                try:
+                    events = connector.get_stats(target)
+                except Exception:
+                    events = []
+        except ValueError:
+            events = []
 
         # Normalize metrics from real events
         normalized_metrics = []
@@ -487,6 +646,33 @@ def get_connector_resources(connector_id: str):
                             "type": "k8s_pod",
                             "state": p.status.phase if hasattr(p, "status") else "unknown",
                         })
+        elif connector_id == "github":
+            repo_val = env_config.get("GITHUB_REPO")
+            if repo_val:
+                resources.append({
+                    "id": repo_val,
+                    "name": repo_val,
+                    "type": "github_repo",
+                    "state": "configured",
+                })
+        elif connector_id == "vercel":
+            proj_val = env_config.get("VERCEL_PROJECT_ID") or env_config.get("VERCEL_PROJECT")
+            if proj_val:
+                resources.append({
+                    "id": proj_val,
+                    "name": proj_val,
+                    "type": "vercel_project",
+                    "state": "configured",
+                })
+        elif connector_id == "datadog":
+            mon_val = env_config.get("DATADOG_MONITOR_ID")
+            if mon_val:
+                resources.append({
+                    "id": mon_val,
+                    "name": f"Datadog Monitor ({mon_val})",
+                    "type": "datadog_monitor",
+                    "state": "configured",
+                })
         return {"resources": resources}
     except Exception as e:
         logger.error(f"Error discovering resources for {connector_id}: {e}")
@@ -522,17 +708,6 @@ def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Watch not supported by {connector_id}", 400)
     except Exception as e:
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Failed to start watch: {str(e)}", 500)
-
-
-@app.post("/api/connectors/{connector_id}/generate-widgets")
-async def generate_widgets(connector_id: str):
-    # Analyze live connector stats or fallback to dynamic layout configuration
-    widgets = [
-        {"type": "metric_card", "title": "Live Throughput", "value": "1.2k req/s", "trend": "+12%"},
-        {"type": "gauge", "title": "Resource Saturation", "value": 44.5, "unit": "%"},
-        {"type": "line_chart", "title": "Latency Distribution", "data": [14, 18, 12, 22, 16]}
-    ]
-    return {"connector_id": connector_id, "widgets": widgets}
 
 
 @app.delete("/api/connectors/{connector_id}/watch")
@@ -573,6 +748,29 @@ def poll_active_watches():
             logger.error(f"Error polling watch {watch_id}: {e}")
 
     return {"events": all_events}
+
+
+@app.get("/api/watch/active")
+def get_active_watches():
+    """Returns list of currently active watch handles with target and connector metadata."""
+    watches = []
+    for wid, handle in list(_active_watches.items()):
+        connector_id = getattr(handle, "connector", wid.split(":")[0] if ":" in wid else "unknown")
+        target = getattr(handle, "target", wid.split(":", 1)[1] if ":" in wid else wid)
+        watches.append({
+            "watch_id": wid,
+            "connector": connector_id,
+            "target": target,
+            "status": "healthy",
+        })
+    return {"watches": watches, "count": len(watches)}
+
+
+@app.get("/api/system/version")
+def get_system_version():
+    """Returns application name and version."""
+    return {"name": "Lear", "version": "2.0.0", "engine": "FastAPI + Prash Core"}
+
 
 
 @app.websocket("/ws/events")
@@ -654,6 +852,149 @@ def save_project(payload: Dict[str, Any] = Body(...)):
 
     _write_prash_yaml(data)
     return {"project": project}
+
+
+@app.put("/api/projects/{project_id}")
+def update_project(project_id: str, payload: Dict[str, Any] = Body(...)):
+    """Update an existing project's name, environments, and services."""
+    project = payload.get("project", payload)
+    data = _read_prash_yaml()
+    existing_index = None
+    for i, p in enumerate(data["projects"]):
+        if p.get("id") == project_id:
+            existing_index = i
+            break
+
+    if existing_index is None:
+        raise APIBridgeException("RESOURCE_NOT_FOUND", f"Project {project_id} not found", 404)
+
+    # Validate referenced connectors exist
+    environments = project.get("environments", [])
+    for env in environments:
+        for svc in env.get("services", []):
+            cid = svc.get("connector_id")
+            if cid and cid not in CONNECTOR_REGISTRY:
+                raise APIBridgeException(
+                    "BAD_REQUEST",
+                    f"Unknown connector_id '{cid}' in environment '{env.get('name')}'",
+                    400,
+                )
+
+    orig = data["projects"][existing_index]
+    updated = {
+        "id": project_id,
+        "name": project.get("name", orig.get("name", project_id)),
+        "created_at": orig.get("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "environments": environments,
+    }
+    data["projects"][existing_index] = updated
+    _write_prash_yaml(data)
+    return {"project": updated}
+
+
+@app.get("/api/projects/{project_id}/status")
+def get_project_status(project_id: str):
+    """Aggregate live health per service via poll_state() across all environments in a project."""
+    data = _read_prash_yaml()
+    project = None
+    for p in data.get("projects", []):
+        if p.get("id") == project_id:
+            project = p
+            break
+
+    if not project:
+        raise APIBridgeException("RESOURCE_NOT_FOUND", f"Project {project_id} not found", 404)
+
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    summary_counts = {"healthy": 0, "warning": 0, "error": 0, "unknown": 0, "total": 0}
+    env_statuses = []
+
+    for env in project.get("environments", []):
+        env_services = []
+        env_summary = {"healthy": 0, "warning": 0, "error": 0, "unknown": 0}
+
+        for svc in env.get("services", []):
+            cid = svc.get("connector_id")
+            rid = svc.get("resource_id", "")
+            disp_name = svc.get("display_name") or (f"{CONNECTOR_REGISTRY[cid].name} ({rid})" if cid in CONNECTOR_REGISTRY else rid)
+
+            svc_status = "unknown"
+            state_label = "NOT_CONFIGURED"
+            detail_msg = ""
+
+            if cid in CONNECTOR_REGISTRY and is_connector_configured(cid, env_config):
+                try:
+                    connector = get_connector(cid, env_config)
+                    poll_res = connector.poll_state(rid) if hasattr(connector, "poll_state") else None
+                    if poll_res:
+                        state_val = getattr(poll_res, "state", None)
+                        state_name = getattr(state_val, "name", str(state_val)).upper()
+                        state_label = state_name
+                        detail_msg = getattr(poll_res, "message", "")
+
+                        if state_name in ("HEALTHY", "OK", "STABLE", "RUNNING"):
+                            svc_status = "healthy"
+                        elif state_name in ("DEGRADED", "WARN", "WARNING", "DEPLOYING"):
+                            svc_status = "warning"
+                        elif state_name in ("FAILED", "ERROR", "ALERT", "CRASHLOOP"):
+                            svc_status = "error"
+                        else:
+                            svc_status = "unknown"
+                except Exception as e:
+                    logger.warning(f"Error polling state for {cid}/{rid}: {e}")
+                    svc_status = "error"
+                    state_label = "ERROR"
+                    detail_msg = str(e)
+            else:
+                svc_status = "unknown"
+                state_label = "UNCONFIGURED"
+                detail_msg = f"Connector '{cid}' not configured in environment"
+
+            env_summary[svc_status] = env_summary.get(svc_status, 0) + 1
+            summary_counts[svc_status] = summary_counts.get(svc_status, 0) + 1
+            summary_counts["total"] += 1
+
+            env_services.append({
+                "connector_id": cid,
+                "resource_id": rid,
+                "display_name": disp_name,
+                "status": svc_status,
+                "state_label": state_label,
+                "detail": detail_msg,
+                "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+
+        if env_summary["error"] > 0:
+            env_status = "error"
+        elif env_summary["warning"] > 0:
+            env_status = "warning"
+        elif env_summary["healthy"] > 0:
+            env_status = "healthy"
+        else:
+            env_status = "unknown"
+
+        env_statuses.append({
+            "name": env.get("name"),
+            "status": env_status,
+            "services": env_services,
+        })
+
+    if summary_counts["error"] > 0:
+        overall_status = "error"
+    elif summary_counts["warning"] > 0:
+        overall_status = "warning"
+    elif summary_counts["healthy"] > 0:
+        overall_status = "healthy"
+    else:
+        overall_status = "unknown"
+
+    return {
+        "project_id": project_id,
+        "status": overall_status,
+        "summary": summary_counts,
+        "environments": env_statuses,
+    }
 
 
 @app.delete("/api/projects/{project_id}")

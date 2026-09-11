@@ -132,7 +132,7 @@ export default function Settings({ onReconfigure }: { onReconfigure?: () => void
                 name="permission"
                 checked={permissionMode === p.id}
                 onChange={() => setPermissionMode(p.id)}
-                className="mt-1 accent-emerald-500"
+                className="mt-1 accent-[#ff3a89]"
               />
               <div>
                 <span className="font-bold text-xs block text-white">{p.label}</span>

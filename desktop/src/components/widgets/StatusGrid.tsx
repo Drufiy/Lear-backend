@@ -63,7 +63,11 @@ export const StatusGrid: React.FC<StatusGridProps> = ({
             >
               <div className="flex flex-col">
                 <span className="text-xs font-medium text-gray-200">{item.name}</span>
-                {item.detail && <span className="text-[10px] text-gray-500 font-mono">{item.detail}</span>}
+                {item.detail && (
+                  <span className="text-[10px] text-gray-500 font-mono">
+                    {typeof item.detail === 'string' ? item.detail : JSON.stringify(item.detail)}
+                  </span>
+                )}
               </div>
               <div>{getBadge(item.status)}</div>
             </div>

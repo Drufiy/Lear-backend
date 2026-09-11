@@ -55,7 +55,7 @@ export const MetricCard: React.FC<MetricCardProps> = ({
             <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
               <polyline
                 fill="none"
-                stroke={isPositive ? '#10B981' : '#F43F5E'}
+                stroke={isPositive ? '#FF3A89' : '#F43F5E'}
                 strokeWidth="2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
