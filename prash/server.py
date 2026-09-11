@@ -29,6 +29,7 @@ from prash.connector_registry import (
     get_connector,
     get_missing_fields,
     is_connector_configured,
+    mask_credential,
     registry_to_json,
 )
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
@@ -239,6 +240,64 @@ def get_connector_info(connector_id: str):
     return connector_detail_to_json(connector_id, env_config)
 
 
+def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[str, str]) -> str:
+    """Extract human-readable provider identity (account ID, username, context) from authenticated connector."""
+    entry = CONNECTOR_REGISTRY.get(connector_id)
+    name = entry.name if entry else connector_id.upper()
+
+    try:
+        if connector_id == "aws":
+            region = env_config.get("AWS_REGION", "us-east-1")
+            sts = getattr(connector, "_sts_client", None)
+            if not sts and hasattr(connector, "session") and connector.session:
+                try:
+                    sts = connector.session.client("sts")
+                except Exception:
+                    pass
+            if sts:
+                try:
+                    ident = sts.get_caller_identity()
+                    acct = ident.get("Account", "Active")
+                    return f"AWS Account {acct} ({region})"
+                except Exception:
+                    pass
+            return f"AWS ({region})"
+
+        if connector_id == "github":
+            owner = env_config.get("GITHUB_OWNER") or env_config.get("GITHUB_REPO")
+            if owner:
+                return f"GitHub: {owner}"
+            token = env_config.get("GITHUB_TOKEN", "")
+            return f"GitHub ({mask_credential(token)})"
+
+        if connector_id == "kubernetes":
+            context = getattr(connector, "context", None)
+            namespace = getattr(connector, "namespace", None) or env_config.get("K8S_NAMESPACE", "default")
+            if context:
+                return f"Cluster: {context} ({namespace})"
+            return f"Kubernetes ({namespace})"
+
+        if connector_id == "vercel":
+            team = env_config.get("VERCEL_TEAM_ID") or env_config.get("VERCEL_PROJECT_ID")
+            if team:
+                return f"Vercel: {team}"
+            return "Vercel Platform"
+
+        if connector_id == "datadog":
+            site = env_config.get("DATADOG_SITE", "datadoghq.com")
+            return f"Datadog ({site})"
+
+        # General account key heuristics
+        for key in ("ACCOUNT_ID", "PROJECT_ID", "ORG_ID", "USERNAME"):
+            for k, v in env_config.items():
+                if key in k and v:
+                    return f"{name} ({v})"
+
+        return f"{name} Verified"
+    except Exception:
+        return f"{name} Connected"
+
+
 @app.post("/api/connectors/{connector_id}/connect")
 def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)):
     """Authenticate and save credentials for any connector."""
@@ -276,11 +335,99 @@ def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)
                 401,
             )
         entry = CONNECTOR_REGISTRY[connector_id]
-        return {"success": True, "message": f"{entry.name} authenticated successfully"}
+        identity = _get_provider_identity(connector_id, connector, env_config)
+        return {
+            "success": True,
+            "message": f"{entry.name} authenticated successfully",
+            "identity": identity,
+        }
     except APIBridgeException:
         raise
     except Exception as e:
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Authentication error: {str(e)}", 500)
+
+
+@app.post("/api/connectors/{connector_id}/disconnect")
+def disconnect_connector(connector_id: str):
+    """Disconnect a service by removing credentials from .env and halting active watches."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    entry = CONNECTOR_REGISTRY[connector_id]
+
+    # 1. Remove all auth field keys from .env
+    if os.path.exists(ENV_PATH):
+        for field in entry.auth_fields:
+            try:
+                dotenv.unset_key(ENV_PATH, field.key)
+            except Exception as e:
+                logger.warning(f"Error unsetting key {field.key}: {e}")
+        dotenv.load_dotenv(ENV_PATH, override=True)
+
+    # 2. Stop any active watches associated with this connector
+    stopped_watches = []
+    for wid in list(_active_watches.keys()):
+        if wid.startswith(f"{connector_id}:") or wid == connector_id:
+            handle = _active_watches.pop(wid, None)
+            if handle:
+                try:
+                    handle.stop()
+                    stopped_watches.append(wid)
+                except Exception as e:
+                    logger.warning(f"Error stopping watch {wid} on disconnect: {e}")
+
+    # 3. Clear cached connector instance
+    clear_connector_cache(connector_id)
+
+    return {
+        "success": True,
+        "message": f"{entry.name} disconnected successfully",
+        "stopped_watches": stopped_watches,
+    }
+
+
+@app.get("/api/connectors/{connector_id}/validate")
+def validate_connector(connector_id: str):
+    """Check credentials validity and health without modifying .env."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    entry = CONNECTOR_REGISTRY[connector_id]
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    if not is_connector_configured(connector_id, env_config):
+        return {
+            "valid": False,
+            "status": "unconfigured",
+            "message": f"{entry.name} is not configured",
+            "identity": None,
+        }
+
+    try:
+        connector = get_connector(connector_id, env_config)
+        is_authenticated = connector.authenticate()
+        if is_authenticated:
+            identity = _get_provider_identity(connector_id, connector, env_config)
+            return {
+                "valid": True,
+                "status": "connected",
+                "message": f"{entry.name} credentials are active",
+                "identity": identity,
+            }
+        else:
+            return {
+                "valid": False,
+                "status": "expired",
+                "message": f"{entry.name} credentials failed authentication or expired",
+                "identity": None,
+            }
+    except Exception as e:
+        return {
+            "valid": False,
+            "status": "error",
+            "message": f"Validation error: {str(e)}",
+            "identity": None,
+        }
+
 
 
 @app.get("/api/connectors/{connector_id}/status")

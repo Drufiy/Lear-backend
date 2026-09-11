@@ -936,6 +936,16 @@ def clear_connector_cache(connector_id: Optional[str] = None) -> None:
         _active_connectors.clear()
 
 
+def mask_credential(value: Optional[str]) -> str:
+    """Safely mask credential string, revealing only first 3 and last 3 characters."""
+    if not value:
+        return ""
+    val_str = str(value).strip()
+    if len(val_str) <= 6:
+        return "***"
+    return f"{val_str[:3]}...{val_str[-3:]}"
+
+
 def registry_to_json(env_config: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
     """Serialize the full registry to a JSON-ready list for frontend consumption."""
     if env_config is None:
@@ -945,6 +955,11 @@ def registry_to_json(env_config: Optional[Mapping[str, Any]] = None) -> List[Dic
     for cid, entry in CONNECTOR_REGISTRY.items():
         missing = get_missing_fields(cid, env_config)
         configured = is_connector_configured(cid, env_config)
+        masked = {
+            f.key: mask_credential(env_config.get(f.key))
+            for f in entry.auth_fields
+            if f.key in env_config and env_config.get(f.key)
+        }
 
         entry_dict = {
             "id": entry.id,
@@ -956,6 +971,7 @@ def registry_to_json(env_config: Optional[Mapping[str, Any]] = None) -> List[Dic
             "docs_url": entry.docs_url,
             "status": "configured" if configured else "unconfigured",
             "missing_fields": missing,
+            "masked_credentials": masked,
             "supports_watch": entry.supports_watch,
             "supports_stats": entry.supports_stats,
             "supports_execute": entry.supports_execute,
@@ -980,6 +996,11 @@ def connector_detail_to_json(
 
     missing = get_missing_fields(connector_id, env_config)
     configured = is_connector_configured(connector_id, env_config)
+    masked = {
+        f.key: mask_credential(env_config.get(f.key))
+        for f in entry.auth_fields
+        if f.key in env_config and env_config.get(f.key)
+    }
 
     return {
         "id": entry.id,
@@ -991,6 +1012,7 @@ def connector_detail_to_json(
         "docs_url": entry.docs_url,
         "status": "configured" if configured else "unconfigured",
         "missing_fields": missing,
+        "masked_credentials": masked,
         "supports_watch": entry.supports_watch,
         "supports_stats": entry.supports_stats,
         "supports_execute": entry.supports_execute,
