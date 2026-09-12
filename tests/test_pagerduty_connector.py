@@ -621,6 +621,34 @@ def test_find_incident_by_incident_key_rejects_incident_without_matching_key(mon
     assert pd.find_incident_by_incident_key("dk-mine", since=_SINCE) is None
 
 
+def test_find_incident_by_incident_key_survives_one_incidents_alerts_failing(monkeypatch):
+    """Regression: the per-incident /alerts fallback is unguarded, so one
+    incident's alerts fetch failing (404 on a purged/merged incident, a 403,
+    or an exhausted-retry 5xx) used to raise straight out and abort the whole
+    scan -- skipping a genuine match on a LATER incident in the same window.
+    A window query can legitimately return several incidents sharing a dedup
+    key across trigger/resolve cycles, so this is reachable. The failing fetch
+    must now be logged-and-skipped, not fatal."""
+    page = _incidents_body(
+        _incident(id="PINC-OLD", incident_key=None),   # scanned first; its /alerts 404s
+        _incident(id="PINC-NEW", incident_key=None),   # the real match, reached only if we don't abort
+    )
+    match_alerts = json.dumps({"alerts": [{"id": "AL2", "alert_key": "dk-mine"}], "more": False}).encode()
+
+    def fake_urlopen(req, timeout=30):
+        url = req.full_url
+        if "/incidents/PINC-OLD/alerts" in url:
+            raise urllib.error.HTTPError(url, 404, "not found", {}, None)
+        if "/incidents/PINC-NEW/alerts" in url:
+            return _FakeResponse(match_alerts)
+        return _FakeResponse(page)  # the /incidents window query
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
+    found = pd.find_incident_by_incident_key("dk-mine", since=_SINCE)
+    assert found is not None and found["id"] == "PINC-NEW"
+
+
 def test_list_services_resolves_watch_targets(monkeypatch):
     _capture_urlopen(monkeypatch, json.dumps({
         "services": [{"id": "PSVC1", "name": "checkout"}, {"id": "PSVC2", "name": "api"}],

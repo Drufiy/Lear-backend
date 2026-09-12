@@ -209,6 +209,8 @@ def test_silence_alert_raises_when_rule_not_found(monkeypatch):
 
 import email.message
 import io
+
+import pytest
 from datetime import datetime, timezone
 
 import prash.connectors.grafana as grafana_mod
@@ -398,6 +400,27 @@ def test_get_stats_swallows_api_errors_to_empty(monkeypatch):
     _watch_flow(monkeypatch, [_http_error(500), _http_error(500), _http_error(500), _http_error(500)])
     gf = GrafanaConnector({"GRAFANA_URL": "https://acme.grafana.net", "GRAFANA_API_KEY": "k"})
     assert gf.get_stats("abc123") == []
+
+
+def test_watch_poll_raises_on_fetch_error_instead_of_false_recovery(monkeypatch):
+    """Regression: a failed alerts fetch during watch must NOT look like a
+    mass recovery. _rule_alerts used to swallow the error to [], so poll()
+    saw an empty list, emitted alert_recovered for every firing instance, and
+    pruned _last_state -- a false stand-down, then a false re-page on the next
+    healthy poll. poll() now passes raise_on_error=True so the error
+    propagates to run_watchhandle_loop, which skips the cycle without touching
+    _last_state (matching Datadog/PagerDuty)."""
+    monkeypatch.setattr(grafana_mod.time, "sleep", lambda *a, **k: None)  # no real backoff wait
+    _watch_flow(monkeypatch, [
+        [],                    # watch() baseline: quiet
+        [_alert("active")],    # poll 1: new firing, now tracked in _last_state
+        _http_error(500),      # poll 2: fetch fails (repeats through all retries)
+    ])
+    gf = GrafanaConnector({"GRAFANA_URL": "https://acme.grafana.net", "GRAFANA_API_KEY": "k"})
+    handle = gf.watch("abc123")
+    assert [e["event_type"] for e in handle.poll()] == ["alert_firing"]
+    with pytest.raises(GrafanaError):
+        handle.poll()  # raises, not a [] that would fabricate alert_recovered
 
 
 def test_list_rules_maps_and_caps(monkeypatch):

@@ -153,7 +153,10 @@ class _GrafanaWatchHandle(WatchHandle):
         self._last_state = last_state
 
     def poll(self) -> List[ConnectorEvent]:
-        alerts = self._gf._rule_alerts(self.rule_title)
+        # raise_on_error=True: a failed fetch must NOT look like "everything
+        # recovered" -- let it propagate so the shared loop skips this cycle
+        # without pruning _last_state. See _rule_alerts' docstring.
+        alerts = self._gf._rule_alerts(self.rule_title, raise_on_error=True)
         events: List[ConnectorEvent] = []
         seen: Dict[Tuple[Tuple[str, str], ...], Tuple[str, str]] = {}
         for alert in alerts:
@@ -297,15 +300,26 @@ class GrafanaConnector(Connector):
                     break
         return out
 
-    def _rule_alerts(self, rule_title: str) -> List[Dict[str, Any]]:
+    def _rule_alerts(self, rule_title: str, raise_on_error: bool = False) -> List[Dict[str, Any]]:
         """Current Alertmanager instances whose `alertname` label equals the
         rule title -- the same matching poll_state() uses, so a watcher and
         an investigate() call always agree on what "this rule is firing"
-        means. A poll error returns [] (the shared watch loop treats a bad
-        cycle as silence, never as a mass recovery)."""
+        means.
+
+        raise_on_error controls what a failed fetch means. The watch handle's
+        poll() MUST pass raise_on_error=True: there, "empty" is the recovery
+        signal (a resolved instance simply drops out of the list), so
+        swallowing a 5xx/timeout/401 to [] would make every firing instance
+        look recovered -- a false stand-down, then a false re-page next cycle.
+        Letting the error propagate instead lets run_watchhandle_loop skip the
+        bad cycle WITHOUT mutating _last_state, matching Datadog/PagerDuty.
+        poll_state()/get_stats() pass the default (False): a one-shot read has
+        no prior state to corrupt, so [] on error is the safe degradation."""
         try:
             alerts = self._request("GET", "/api/alertmanager/grafana/api/v2/alerts")
         except GrafanaError:
+            if raise_on_error:
+                raise
             return []
         if not isinstance(alerts, list):
             return []
