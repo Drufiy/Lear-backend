@@ -252,18 +252,18 @@ class GCPConnector(Connector):
                     "exit_code": ssh_err.returncode
                 }
 
-    def watch(self, target: str, **kwargs: Any) -> WatchHandle:
+    def watch(self, resource: str, **kwargs: Any) -> WatchHandle:
         if not self.authenticate():
             raise RuntimeError("GCP Connector failed to authenticate")
-        zone = self._get_zone(target)
+        zone = self._get_zone(resource)
         if not zone:
-            raise ValueError(f"Instance {target} not found in project")
-        return GCPWatchHandle(self, target)
+            raise ValueError(f"Instance {resource} not found in project")
+        return GCPWatchHandle(self, resource)
 
-    def get_stats(self, target: str, since: datetime.datetime | None = None, **kwargs: Any) -> list[ConnectorEvent]:
+    def get_stats(self, resource: str, since: datetime.datetime | None = None, **kwargs: Any) -> list[ConnectorEvent]:
         if not self.authenticate():
             return []
-        zone = self._get_zone(target)
+        zone = self._get_zone(resource)
         if not zone:
             return []
 
@@ -278,7 +278,7 @@ class GCPConnector(Connector):
                 monitoring = discovery.build('monitoring', 'v3', credentials=self._creds, cache_discovery=False)
                 ts = monitoring.projects().timeSeries().list(
                     name=f"projects/{self.project_id}",
-                    filter=f'metric.type="compute.googleapis.com/instance/cpu/utilization" AND metric.labels.instance_name="{target}"',
+                    filter=f'metric.type="compute.googleapis.com/instance/cpu/utilization" AND metric.labels.instance_name="{resource}"',
                     interval_startTime=since.isoformat("T") + "Z",
                     interval_endTime=now.isoformat("T") + "Z",
                     view="FULL"
@@ -293,7 +293,7 @@ class GCPConnector(Connector):
                                 "timestamp": pt_time,
                                 "connector": "gcp",
                                 "event_type": "HighCPUUtilization",
-                                "summary": f"High CPU utilization detected on {target}: {val*100:.1f}%",
+                                "summary": f"High CPU utilization detected on {resource}: {val*100:.1f}%",
                                 "raw": {"value": val}
                             })
                             
@@ -301,7 +301,7 @@ class GCPConnector(Connector):
                 logging_svc = discovery.build('logging', 'v2', credentials=self._creds, cache_discovery=False)
                 logs = logging_svc.entries().list(body={
                     "resourceNames": [f"projects/{self.project_id}"],
-                    "filter": f'resource.type="gce_instance" AND resource.labels.instance_id="{target}" AND protoPayload.methodName="v1.compute.instances.stop"',
+                    "filter": f'resource.type="gce_instance" AND resource.labels.instance_id="{resource}" AND protoPayload.methodName="v1.compute.instances.stop"',
                     "pageSize": 50
                 }).execute()
                 
@@ -314,7 +314,7 @@ class GCPConnector(Connector):
                                 "timestamp": entry_time,
                                 "connector": "gcp",
                                 "event_type": "InstanceStopped",
-                                "summary": f"Instance {target} was stopped",
+                                "summary": f"Instance {resource} was stopped",
                                 "raw": entry
                             })
             except Exception:

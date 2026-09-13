@@ -7,7 +7,7 @@ interface WatcherPanelProps {
   activeCount: number;
   eventCount: number;
   isConnected: boolean;
-  onToggleWatch?: (interval: number) => void;
+  onToggleWatch?: () => void;
 }
 
 export const WatcherPanel: React.FC<WatcherPanelProps> = ({
@@ -17,8 +17,6 @@ export const WatcherPanel: React.FC<WatcherPanelProps> = ({
   isConnected,
   onToggleWatch,
 }) => {
-  const [interval, setInterval] = React.useState<number>(5);
-
   const getStateBadge = () => {
     switch (state) {
       case 'ACTIVE':
@@ -83,19 +81,8 @@ export const WatcherPanel: React.FC<WatcherPanelProps> = ({
         </div>
 
         {onToggleWatch && (
-          <div className="flex items-center gap-3">
-            <select
-              value={interval}
-              onChange={(e) => setInterval(Number(e.target.value))}
-              disabled={state === 'ACTIVE'}
-              className="bg-surface border border-border-subtle rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-accent"
-            >
-              <option value={5}>5s</option>
-              <option value={15}>15s</option>
-              <option value={60}>60s</option>
-            </select>
-            <button
-              onClick={() => onToggleWatch(interval)}
+          <button
+            onClick={onToggleWatch}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl font-semibold text-xs transition-all cursor-pointer shadow-lg ${
               state === 'ACTIVE'
                 ? 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30'
@@ -112,7 +99,6 @@ export const WatcherPanel: React.FC<WatcherPanelProps> = ({
               </>
             )}
           </button>
-          </div>
         )}
       </div>
     </div>

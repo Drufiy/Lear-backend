@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Sparkles, Server, Activity, AlertTriangle, ShieldCheck, Stethoscope } from 'lucide-react';
+import { Plus, Sparkles, Server } from 'lucide-react';
 import { WatcherPanel } from './WatcherPanel';
 import ServiceWidget from './ServiceWidget';
 import ErrorBoundary from './ErrorBoundary';
@@ -49,10 +49,6 @@ export default function Dashboard({
     }
   };
 
-  const isAlerting = watcherState === 'ALERTING';
-  const healthyCount = services.length; // Simplified for now, real app might check actual individual states
-  const healthScore = services.length === 0 ? 0 : (isAlerting ? 60 : 100);
-
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
       {/* Top Header */}
@@ -80,57 +76,6 @@ export default function Dashboard({
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent text-gray-950 font-bold text-xs hover:bg-accent-light transition-all shadow-lg cursor-pointer"
           >
             <Sparkles size={16} /> Open Lear Copilot
-          </button>
-        </div>
-      </div>
-
-      {/* Incident Banner */}
-      {isAlerting && (
-        <div className="bg-rose-500/20 border border-rose-500/50 rounded-2xl p-4 flex items-center justify-between gap-4 animate-pulse">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-rose-500/30 rounded-full text-rose-400">
-              <AlertTriangle size={20} />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-rose-400">Critical Alert Detected</h3>
-              <p className="text-xs text-rose-300/80">Watcher detected anomalies or failures in connected services.</p>
-            </div>
-          </div>
-          <button className="px-4 py-2 bg-rose-500 text-white rounded-xl text-xs font-bold hover:bg-rose-600 transition-colors">
-            View Incident Details
-          </button>
-        </div>
-      )}
-
-      {/* Overview Stats (Health Score) & Quick Diagnostics */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex items-center gap-4">
-          <div className={`p-4 rounded-xl flex items-center justify-center ${isAlerting ? 'bg-amber-500/20 text-amber-500' : 'bg-emerald-500/20 text-emerald-500'}`}>
-            <Activity size={24} />
-          </div>
-          <div>
-            <p className="text-xs text-gray-400 font-medium">System Health Score</p>
-            <div className="flex items-baseline gap-2">
-              <h2 className="text-2xl font-bold text-white">{healthScore}%</h2>
-              <span className={`text-xs font-semibold ${isAlerting ? 'text-amber-500' : 'text-emerald-500'}`}>
-                {isAlerting ? 'Degraded' : 'Optimal'}
-              </span>
-            </div>
-          </div>
-        </div>
-        
-        <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col justify-center">
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-xs text-gray-400 font-medium">Active Services</p>
-            <ShieldCheck size={16} className="text-accent" />
-          </div>
-          <h2 className="text-2xl font-bold text-white">{healthyCount}</h2>
-        </div>
-
-        <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col justify-center gap-2">
-          <p className="text-xs text-gray-400 font-medium mb-1">Quick Diagnostics</p>
-          <button className="flex items-center gap-2 px-3 py-2 bg-surface hover:bg-surface-elevated border border-border-subtle rounded-xl text-xs font-semibold text-gray-200 transition-colors w-full cursor-pointer">
-            <Stethoscope size={14} className="text-accent" /> Run System Diagnostic
           </button>
         </div>
       </div>

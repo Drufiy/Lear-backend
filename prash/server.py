@@ -47,9 +47,6 @@ _ws_clients: Set[WebSocket] = set()
 _ws_polling_task: Optional[asyncio.Task] = None
 _notifications: List[Dict[str, Any]] = []
 
-# Global in-memory activity log for Task 14
-_activity_log: List[Dict[str, Any]] = []
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -183,21 +180,14 @@ async def _poll_watches_loop():
                     for ev in new_events:
                         ts = ev.get("timestamp")
                         ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                        
-                        event_payload = {
+                        events_to_broadcast.append({
                             "watch_id": watch_id,
                             "connector": ev.get("connector"),
                             "event_type": ev.get("event_type"),
                             "summary": ev.get("summary"),
                             "raw": ev.get("raw", {}),
                             "timestamp": ts_str,
-                        }
-                        events_to_broadcast.append(event_payload)
-                        
-                        # Store in global activity log, keep last 1000
-                        _activity_log.insert(0, event_payload)
-                        if len(_activity_log) > 1000:
-                            _activity_log.pop()
+                        })
                 except Exception as e:
                     logger.error(f"Error polling watch {watch_id}: {e}")
 
@@ -503,7 +493,15 @@ def get_connector_metrics(
         events = []
         try:
             events = connector.get_stats(target=target)
-        except Exception:
+        except TypeError:
+            try:
+                events = connector.get_stats(resource=target)
+            except TypeError:
+                try:
+                    events = connector.get_stats(target)
+                except Exception:
+                    events = []
+        except ValueError:
             events = []
 
         # Normalize metrics from real events
@@ -692,8 +690,6 @@ def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
     target = body.get("target")
-    interval = body.get("interval", 5) # Default 5s if not provided
-
     if not target:
         raise APIBridgeException("BAD_REQUEST", "Field 'target' is required", 400)
 
@@ -754,20 +750,6 @@ def poll_active_watches():
     return {"events": all_events}
 
 
-@app.get("/api/activity")
-def get_activity_log(q: Optional[str] = Query(None), connector: Optional[str] = Query(None)):
-    """Return historical events from the in-memory activity log."""
-    results = _activity_log
-    
-    if connector and connector.lower() != "all":
-        results = [ev for ev in results if ev.get("connector", "").lower() == connector.lower()]
-        
-    if q:
-        q_lower = q.lower()
-        results = [ev for ev in results if q_lower in ev.get("summary", "").lower() or q_lower in ev.get("event_type", "").lower()]
-        
-    return {"events": results}
-
 @app.get("/api/watch/active")
 def get_active_watches():
     """Returns list of currently active watch handles with target and connector metadata."""
@@ -788,6 +770,7 @@ def get_active_watches():
 def get_system_version():
     """Returns application name and version."""
     return {"name": "Lear", "version": "2.0.0", "engine": "FastAPI + Prash Core"}
+
 
 
 @app.websocket("/ws/events")
