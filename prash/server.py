@@ -19,7 +19,7 @@ import dotenv
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from prash.connector_registry import (
     CONNECTOR_REGISTRY,
@@ -108,6 +108,12 @@ _notifications: List[Dict[str, Any]] = []
 
 # Global in-memory activity log for Task 14
 _activity_log: List[Dict[str, Any]] = []
+
+# 10s TTL cache for dashboard summary
+_dashboard_summary_cache: Dict[str, Any] = {
+    "timestamp": 0.0,
+    "data": None,
+}
 
 
 @asynccontextmanager
@@ -979,6 +985,137 @@ def get_activity_log(q: Optional[str] = Query(None), connector: Optional[str] = 
     return {"events": results}
 
 
+@app.get("/api/dashboard/summary")
+def get_dashboard_summary():
+    """Returns aggregate infrastructure health summary, counts, and active watch totals.
+    Implements a 10s in-memory TTL cache to minimize connector polling overhead.
+    """
+    import time
+    now = time.time()
+    if _dashboard_summary_cache["data"] is not None and (now - _dashboard_summary_cache["timestamp"]) < 10.0:
+        cached_result = dict(_dashboard_summary_cache["data"])
+        cached_result["cached"] = True
+        return cached_result
+
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    yaml_data = _read_prash_yaml()
+    projects = yaml_data.get("projects", [])
+    if not isinstance(projects, list):
+        projects = []
+
+    # Gather configured connectors
+    configured_connectors = [
+        cid for cid in CONNECTOR_REGISTRY if is_connector_configured(cid, env_config)
+    ]
+    unconfigured_count = len(CONNECTOR_REGISTRY) - len(configured_connectors)
+
+    # Collect distinct services from projects
+    services_seen = set()
+    total_services = 0
+    for p in projects:
+        if isinstance(p, dict):
+            for env in p.get("environments", []):
+                if isinstance(env, dict):
+                    for s in env.get("services", []):
+                        if isinstance(s, dict):
+                            total_services += 1
+                            key = f"{s.get('connector_id')}:{s.get('resource_id')}"
+                            services_seen.add(key)
+
+    # Check status of configured connectors
+    healthy_count = 0
+    degraded_count = 0
+    error_count = 0
+
+    # Also incorporate active watch statuses
+    for wid, handle in list(_active_watches.items()):
+        meta = _watch_metadata.get(wid, {})
+        w_status = meta.get("status", "healthy")
+        if w_status == "degraded":
+            degraded_count += 1
+        elif w_status == "error":
+            error_count += 1
+
+    # Check configured connectors
+    for cid in configured_connectors:
+        try:
+            conn = get_connector(cid, env_config)
+            is_auth = conn.authenticate()
+            if is_auth:
+                healthy_count += 1
+            else:
+                degraded_count += 1
+        except Exception:
+            error_count += 1
+
+    total_active_entities = healthy_count + degraded_count + error_count
+    if total_active_entities == 0:
+        health_score = 0
+        overall_status = "unconfigured"
+    else:
+        score_calc = int(((healthy_count * 100) + (degraded_count * 50)) / total_active_entities)
+        health_score = max(0, min(100, score_calc))
+        if error_count > 0:
+            overall_status = "error"
+        elif degraded_count > 0 or health_score < 80:
+            overall_status = "degraded"
+        else:
+            overall_status = "healthy"
+
+    result = {
+        "status": overall_status,
+        "health_score": health_score,
+        "counts": {
+            "total_services": total_services,
+            "configured_connectors": len(configured_connectors),
+            "unconfigured_connectors": unconfigured_count,
+            "healthy": healthy_count,
+            "degraded": degraded_count,
+            "error": error_count,
+        },
+        "active_watches_count": len(_active_watches),
+        "projects_count": len(projects),
+        "cached": False,
+    }
+
+    _dashboard_summary_cache["timestamp"] = now
+    _dashboard_summary_cache["data"] = result
+    return result
+
+
+@app.get("/api/dashboard/activity")
+def get_dashboard_activity(limit: int = Query(10)):
+    """Returns cross-service recent events merged from activity log and active watch events."""
+    recent_events = list(_activity_log)
+
+    # Also gather recent error events from active watches
+    for wid, handle in list(_active_watches.items()):
+        meta = _watch_metadata.get(wid, {})
+        conn_id = meta.get("connector") or getattr(handle, "connector", wid.split(":")[0] if ":" in wid else "system")
+        target = meta.get("target") or getattr(handle, "target", wid.split(":", 1)[1] if ":" in wid else wid)
+        last_err = meta.get("last_error")
+        if last_err:
+            recent_events.append({
+                "watch_id": wid,
+                "connector": conn_id,
+                "event_type": "WATCH_ERROR",
+                "summary": f"Watch error on {target}: {last_err}",
+                "timestamp": meta.get("started_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "severity": "error",
+            })
+
+    # Sort descending by timestamp
+    recent_events.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+    clamped_limit = max(1, min(100, limit))
+    sliced = recent_events[:clamped_limit]
+
+    return {
+        "events": sliced,
+        "count": len(sliced),
+        "total_available": len(recent_events),
+    }
+
+
 @app.get("/api/watch/active")
 def get_active_watches():
     """Returns list of currently active watch handles with target, connector, interval, and health status."""
@@ -1416,6 +1553,144 @@ def save_settings(payload: Dict[str, Any] = Body(...)):
 # Enhanced AI Chat with Live Telemetry Injection
 # ---------------------------------------------------------------------------
 
+@app.get("/api/chat/greeting")
+def get_chat_greeting(
+    connector_id: Optional[str] = Query(None),
+    resource_id: Optional[str] = Query(None),
+):
+    """Generates dynamic, live-telemetry greeting and suggested prompts for Copilot."""
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+
+    # 1. Service context greeting
+    if connector_id and connector_id.lower() in CONNECTOR_REGISTRY:
+        cid = connector_id.lower()
+        conn = None
+        if is_connector_configured(cid, env_config):
+            try:
+                conn = get_connector(cid, env_config)
+            except Exception as ce:
+                logger.warning(f"Error instantiating connector {cid} for greeting: {ce}")
+
+        state_str = "connected"
+        telemetry_detail: Dict[str, Any] = {}
+        cpu_val = None
+        mem_val = None
+
+        if conn:
+            if resource_id:
+                try:
+                    state_obj = conn.poll_state(resource_id)
+                    state_str = state_obj.state.value if hasattr(state_obj, "state") else str(state_obj)
+                    telemetry_detail = state_obj.detail if hasattr(state_obj, "detail") else {}
+                    if isinstance(telemetry_detail, dict):
+                        cpu_val = telemetry_detail.get("cpu") or telemetry_detail.get("cpu_percent") or telemetry_detail.get("cpu_utilization")
+                        mem_val = telemetry_detail.get("memory") or telemetry_detail.get("mem_percent") or telemetry_detail.get("memory_utilization")
+                except Exception as pe:
+                    state_str = f"unreachable ({str(pe)})"
+            else:
+                try:
+                    is_auth = conn.authenticate()
+                    state_str = "authenticated" if is_auth else "unauthenticated"
+                except Exception as ae:
+                    state_str = f"auth_failed ({str(ae)})"
+
+        # Tailor prompt chips based on connector type
+        if cid == "aws":
+            suggested_prompts = [
+                "Why is CPU utilization fluctuating?",
+                "Show recent CloudWatch error events",
+                "Check EC2 instance health checks",
+                "Propose instance reboot or scale plan",
+            ]
+        elif cid == "kubernetes":
+            suggested_prompts = [
+                "Are any pods crash looping or failing?",
+                "Show recent pod logs and events",
+                "Inspect container memory limits",
+                "Restart crashed deployment",
+            ]
+        elif cid == "github":
+            suggested_prompts = [
+                "Show status of recent CI workflow runs",
+                "Diagnose latest build failure",
+                "List open dependabot alerts",
+            ]
+        elif cid == "docker":
+            suggested_prompts = [
+                "Check container restart counts",
+                "Inspect container resource limits",
+                "Prune stopped containers and volumes",
+            ]
+        else:
+            suggested_prompts = [
+                f"What is the current status of {cid}?",
+                "Inspect latest error logs and events",
+                "Run diagnostic verification check",
+            ]
+
+        metric_snippets = []
+        if cpu_val is not None:
+            metric_snippets.append(f"CPU: {cpu_val}%")
+        if mem_val is not None:
+            metric_snippets.append(f"Memory: {mem_val}%")
+        metrics_str = f" ({', '.join(metric_snippets)})" if metric_snippets else ""
+
+        if resource_id:
+            greeting_text = (
+                f"Hello! I am Lear Copilot. Monitoring live infrastructure for **{cid.upper()}** (`{resource_id}`). "
+                f"Current status is **{state_str}**{metrics_str}. "
+                "How can I assist your operational workflow?"
+            )
+        else:
+            greeting_text = (
+                f"Hello! I am Lear Copilot. Connected to **{cid.upper()}** with status **{state_str}**. "
+                "How can I assist your operational workflow?"
+            )
+
+        return {
+            "greeting": greeting_text,
+            "service_context": {"connector_id": cid, "resource_id": resource_id or ""},
+            "state": state_str,
+            "telemetry": telemetry_detail,
+            "suggested_prompts": suggested_prompts,
+        }
+
+    # 2. Global Chat greeting (no connector specified or connector not registered)
+    configured_connectors = [
+        c for c in CONNECTOR_REGISTRY if is_connector_configured(c, env_config)
+    ]
+    active_watch_count = len(_active_watches)
+    conf_count = len(configured_connectors)
+
+    if conf_count > 0:
+        names = ", ".join([c.upper() for c in configured_connectors])
+        greeting_text = (
+            f"Hello! I am Lear Copilot. Live bridge active across {conf_count} configured services ({names}) "
+            f"with {active_watch_count} active watches. "
+            "Ask about any service or use `@connector` to scope context."
+        )
+    else:
+        greeting_text = (
+            "Hello! I am Lear Copilot. No connectors configured yet. "
+            "You can ask general operational questions, or set up integrations in Settings."
+        )
+
+    suggested_prompts = [
+        "Summarize overall infrastructure health",
+        "Show all active watches and recent events",
+        "Check for any failing services or crash loops",
+        "Explain available remediation commands",
+    ]
+
+    return {
+        "greeting": greeting_text,
+        "service_context": None,
+        "state": "active",
+        "telemetry": {"configured_connectors": configured_connectors, "active_watches": active_watch_count},
+        "suggested_prompts": suggested_prompts,
+    }
+
+
 @app.post("/api/chat")
 async def chat(
     message: str = Body(..., embed=True),
@@ -1470,7 +1745,7 @@ async def chat(
             }
         else:
             return {
-                "text": "I could not resolve that intent.",
+                "text": "I analyzed the current telemetry but could not identify an automated remediation command.",
                 "actionRequired": False,
                 "executable": False,
             }
@@ -1482,6 +1757,100 @@ async def chat(
         }
 
 
+@app.post("/api/chat/stream")
+async def chat_stream(
+    payload: Dict[str, Any] = Body(...),
+):
+    """SSE streaming endpoint for Prash Copilot reasoning responses."""
+    message = payload.get("message", "")
+    service_context = payload.get("service_context")
+
+    if not message:
+        raise APIBridgeException("BAD_REQUEST", "Message is required", 400)
+
+    async def event_generator():
+        try:
+            from prash.intent import _Context, _resolve_via_llm_async, Clarify, resolve, Suggestion
+
+            ctx = _Context()
+            telemetry_context = ""
+            if service_context and "connector_id" in service_context:
+                cid = service_context["connector_id"]
+                rid = service_context.get("resource_id", "")
+                if cid in CONNECTOR_REGISTRY:
+                    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+                    if is_connector_configured(cid, env_config):
+                        try:
+                            conn = get_connector(cid, env_config)
+                            if rid:
+                                state = conn.poll_state(rid)
+                                telemetry_context = f"[Live Telemetry: Service {cid}/{rid} is in state {state.state.value}. Detail: {json.dumps(state.detail)}]"
+                            else:
+                                is_auth = conn.authenticate()
+                                telemetry_context = f"[Live Telemetry: Service {cid} authenticated: {is_auth}]"
+                        except Exception as te:
+                            telemetry_context = f"[Live Telemetry: Service {cid} error: {str(te)}]"
+
+            augmented_message = f"{telemetry_context}\nUser: {message}" if telemetry_context else message
+
+            # 1. Fast path resolve
+            result = resolve(message, ctx)
+            if result is None:
+                # 2. LLM fallback
+                result = await _resolve_via_llm_async(augmented_message, ctx)
+
+            if isinstance(result, Suggestion):
+                explain_text = result.explain
+                words = explain_text.split(" ")
+                for word in words:
+                    yield f"data: {json.dumps({'token': word + ' ', 'done': False})}\n\n"
+                    await asyncio.sleep(0.01)
+
+                final_text = f"{result.explain} -> `prash {' '.join(result.argv)}`"
+                final_payload = {
+                    "text": final_text,
+                    "actionRequired": True,
+                    "command": result.argv,
+                    "executable": True,
+                    "action_id": result.argv[0] if result.argv else None,
+                    "done": True,
+                }
+                yield f"data: {json.dumps(final_payload)}\n\n"
+
+            elif isinstance(result, Clarify):
+                question = result.question + (" Options: " + ", ".join(result.options) if result.options else "")
+                words = question.split(" ")
+                for word in words:
+                    yield f"data: {json.dumps({'token': word + ' ', 'done': False})}\n\n"
+                    await asyncio.sleep(0.01)
+
+                yield f"data: {json.dumps({'text': question, 'actionRequired': False, 'executable': False, 'done': True})}\n\n"
+
+            else:
+                fallback_msg = "I analyzed the current telemetry but could not identify an automated remediation command."
+                words = fallback_msg.split(" ")
+                for word in words:
+                    yield f"data: {json.dumps({'token': word + ' ', 'done': False})}\n\n"
+                    await asyncio.sleep(0.01)
+
+                yield f"data: {json.dumps({'text': fallback_msg, 'actionRequired': False, 'executable': False, 'done': True})}\n\n"
+
+        except Exception as err:
+            logger.error(f"Error in chat stream: {err}")
+            err_text = f"Bridge Error: {str(err)}"
+            yield f"data: {json.dumps({'error': err_text, 'text': err_text, 'done': True})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/chat/execute")
 def execute_chat_action(payload: Dict[str, Any] = Body(...)):
     """Executes an action generated from intent resolution or chat copilot."""
@@ -1491,15 +1860,31 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
     if not command and not action_id:
         raise APIBridgeException("BAD_REQUEST", "Command or action_id is required", 400)
 
-    cmd_str = " ".join(command) if isinstance(command, list) else str(command)
+    argv: List[str] = list(command) if isinstance(command, list) else str(command).split()
+    if not argv and action_id:
+        argv = [action_id]
+
+    # Strip redundant 'prash' program prefix if provided
+    if argv and argv[0].lower() == "prash":
+        argv = argv[1:]
+
+    # Known top-level subcommands in prash CLI
+    known_subcommands = {
+        "run", "fix", "investigate", "stats", "watch", "config",
+        "doctor", "plugins", "actions", "diff", "reconcile", "version", "telemetry"
+    }
+
+    # If the command starts with an action name rather than subcommand, route via 'run'
+    if argv and argv[0] not in known_subcommands and not argv[0].startswith("-"):
+        argv = ["run"] + argv
+
+    cmd_str = " ".join(argv)
     logger.info(f"Executing chat action: {cmd_str}")
 
     try:
         from prash.audit import AuditLog
         from io import StringIO
         import sys
-
-        argv = command if isinstance(command, list) else command.split()
 
         from prash import cli
         parser = cli.build_parser()
@@ -1549,6 +1934,22 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
         except Exception as ae:
             logger.warning(f"Audit log recording error: {ae}")
 
+        # Record in desktop in-memory activity log
+        try:
+            service_ctx = payload.get("service_context")
+            conn_name = service_ctx.get("connector_id", "system") if isinstance(service_ctx, dict) else "system"
+            act_event = {
+                "watch_id": f"chat:{action_id or (argv[0] if argv else 'action')}",
+                "connector": conn_name,
+                "event_type": "ACTION_EXECUTED" if ret_code == 0 else "ACTION_FAILED",
+                "summary": f"Executed `prash {cmd_str}` (exit {ret_code})",
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "severity": "info" if ret_code == 0 else "error",
+            }
+            _activity_log.append(act_event)
+        except Exception as act_err:
+            logger.warning(f"Failed to record chat action in activity log: {act_err}")
+
         return {
             "success": ret_code == 0,
             "exit_code": ret_code,
@@ -1560,7 +1961,7 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
         return {
             "success": False,
             "exit_code": 1,
-            "command": argv if 'argv' in locals() else [cmd_str],
+            "command": argv,
             "output": f"Execution error: {str(e)}",
         }
 

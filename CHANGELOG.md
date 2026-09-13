@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 10 — Per-Service AI Chatbox & Real Action Execution (`Chatbot.tsx`, `ChatMessage.tsx`)**:
+  - *Dynamic Context-Aware Greeting (`GET /api/chat/greeting`)*: Eradicated static hardcoded greetings in `Chatbot.tsx`. The Copilot greeting now queries live connector telemetry (`poll_state`, `get_stats`) and returns real metrics (CPU %, memory %, state, healthy checks) and service-tailored suggested prompt chips with zero hardcoded numbers.
+  - *Real Copilot Action Execution (`POST /api/chat/execute`)*: Upgraded action execution to parse commands through `prash.cli.build_parser()`, sanitize `prash` prefixes, route action names via `run`, execute safely, capture stdout/stderr, and append execution events to both disk-based `AuditLog` and desktop `_activity_log`.
+  - *SSE Reasoning Streaming (`POST /api/chat/stream`)*: Added server-sent events (SSE) streaming endpoint returning `text/event-stream`, delivering reasoning tokens in real-time and emitting final action recommendations.
+  - *Modular Chat Component (`desktop/src/components/ChatMessage.tsx`)*: Created dedicated message component with custom Markdown parsing (bold, inline code, bullet lists), fenced code blocks with language headers and interactive "Copy Code" buttons, terminal action execution cards with loading spinners, bridge error banners, and streaming pulse cursors.
+  - *Interactive Copilot UX*: Added suggested prompt chips, `@connector` mention parsing in chat input, service context switcher, and session chat clearance.
+- **Desktop Feature 09 — Watcher Status & Live Monitoring (`WatcherPanel.tsx`, `useWatcher.ts`)**:
+  - *Watch Lifecycle Architecture*: Implemented `POST /api/connectors/{id}/watch`, `DELETE /api/connectors/{id}/watch`, and `GET /api/watch/active` returning handle status, intervals, and error metadata.
+  - *YAML Synchronization & Persistence*: Synced active background watches with `prash.yaml`, reconciling state across server restarts in lifespan startup.
+  - *Dynamic Polling Cadence & Failure Recovery*: Per-handle intervals (`5s` to `60s`), failure counter with automatic degradation (`healthy` -> `degraded` -> `error`), self-healing recovery, and status change event broadcasting.
+  - *Full Duplex WebSocket Control*: Added WebSocket control protocol over `/ws/events` (`ping`/`pong`, `pause`, `resume`, `stop`), plus REST controls (`/watch/pause`, `/watch/resume`).
+  - *Tauri UI Live Watcher*: Built `WatcherPanel.tsx` with animated radar pulses, live countdown timers (`Next poll in 4s`), and collapsible active handles drawer. Built `useWatcher.ts` with rolling event buffer and stale closure protections.
 - **Desktop Feature 05 — Service Connection Flow & Credential Management (`ConnectorForm.tsx`, `useConnectorStatus.ts`)**:
   - *Reusable Standalone Connection Form (`desktop/src/components/ConnectorForm.tsx`)*: Extracted inlined Wizard logic into a standalone form supporting dynamic auth fields, show/hide password toggles, placeholder masking for active credentials (`••••••••••••`), live validation spinner, connected provider identity badges, exact error reporting, and safe disconnect confirmation.
   - *Connection Lifecycle Hook (`desktop/src/hooks/useConnectorStatus.ts`)*: Manages connection states (`unconfigured`, `connecting`, `connected`, `expired`, `error`) with periodic 60s background health verification.

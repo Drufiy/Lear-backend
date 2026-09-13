@@ -586,3 +586,190 @@ def test_WATCH_YAML_PERSISTENCE(client, monkeypatch, tmp_path):
     assert len(yaml_content2.get("active_watches", [])) == 0
 
 
+def test_CHAT_GREETING_CONTEXT_AWARE(client, monkeypatch, tmp_path):
+    """Verifies that /api/chat/greeting fetches live connector telemetry and returns context-aware greeting."""
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("AWS_ACCESS_KEY_ID=test\nAWS_SECRET_ACCESS_KEY=test\nAWS_REGION=us-east-1\n")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+    monkeypatch.setattr("prash.connector_registry.ENV_PATH", str(mock_env))
+
+    mock_conn = MagicMock()
+    mock_conn.poll_state.return_value = ResourceState(
+        resource="i-0abc123",
+        state=ConnectorState.HEALTHY,
+        detail={"cpu": 19.5, "memory": 40.2}
+    )
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    res = client.get("/api/chat/greeting?connector_id=aws&resource_id=i-0abc123")
+    assert res.status_code == 200
+    data = res.json()
+    assert "AWS" in data["greeting"]
+    assert "i-0abc123" in data["greeting"]
+    assert "healthy" in data["greeting"]
+    assert "19.5" in data["greeting"]
+    assert "40.2" in data["greeting"]
+    assert len(data["suggested_prompts"]) > 0
+
+
+def test_CHAT_GREETING_GLOBAL(client, monkeypatch, tmp_path):
+    """Verifies that /api/chat/greeting returns global copilot greeting when no context is specified."""
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+    monkeypatch.setattr("prash.connector_registry.ENV_PATH", str(mock_env))
+
+    res = client.get("/api/chat/greeting")
+    assert res.status_code == 200
+    data = res.json()
+    assert "Lear Copilot" in data["greeting"]
+    assert len(data["suggested_prompts"]) > 0
+
+
+def test_CHAT_EXECUTE_ACTION_CLI(client):
+    """Verifies that /api/chat/execute executes real CLI command and appends to activity log."""
+    res = client.post(
+        "/api/chat/execute",
+        json={"command": ["actions"], "action_id": "actions"}
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is True
+    assert data["exit_code"] == 0
+    assert "actions" in data["command"]
+    assert "restart" in data["output"]
+
+    # Verify event was recorded in /api/activity
+    act_res = client.get("/api/activity")
+    assert act_res.status_code == 200
+    events = act_res.json()["events"]
+    chat_events = [e for e in events if e.get("watch_id", "").startswith("chat:")]
+    assert len(chat_events) > 0
+    assert "ACTION_EXECUTED" == chat_events[-1]["event_type"]
+
+
+def test_CHAT_EXECUTE_STRIPS_PRASH_PREFIX(client):
+    """Verifies that /api/chat/execute strips leading 'prash' if passed in command."""
+    res = client.post(
+        "/api/chat/execute",
+        json={"command": ["prash", "actions"]}
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is True
+    assert data["command"] == ["actions"]
+
+
+def test_CHAT_STREAM_SSE(client, monkeypatch, tmp_path):
+    """Verifies that /api/chat/stream streams reasoning tokens and final action payload via SSE."""
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("AWS_ACCESS_KEY_ID=test\nAWS_SECRET_ACCESS_KEY=test\nAWS_REGION=us-east-1\n")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+    monkeypatch.setattr("prash.connector_registry.ENV_PATH", str(mock_env))
+
+    mock_conn = MagicMock()
+    mock_conn.poll_state.return_value = ResourceState(
+        resource="i-0abc123",
+        state=ConnectorState.CRASH_LOOPING,
+        detail={"error": "OOM"}
+    )
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    async def mock_llm_resolve(prompt, ctx):
+        from prash.intent import Suggestion
+        return Suggestion(explain="Restart crashed instance", argv=["restart", "i-0abc123"])
+
+    monkeypatch.setattr("prash.intent._resolve_via_llm_async", mock_llm_resolve)
+    monkeypatch.setattr("prash.intent.resolve", lambda msg, ctx: None)
+
+    res = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "Why is the server down?",
+            "service_context": {"connector_id": "aws", "resource_id": "i-0abc123"}
+        }
+    )
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]
+    body = res.text
+    assert "data: " in body
+    assert "Restart" in body
+    assert "prash restart i-0abc123" in body
+    assert '"done": true' in body
+
+
+def test_DASHBOARD_SUMMARY_ENDPOINT(client, monkeypatch, tmp_path):
+    """Verifies that /api/dashboard/summary returns aggregate infrastructure health and counts."""
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("AWS_ACCESS_KEY_ID=test\nAWS_SECRET_ACCESS_KEY=test\nAWS_REGION=us-east-1\n")
+    mock_yaml = tmp_path / "prash.yaml"
+    mock_yaml.write_text("projects:\n  - id: proj-1\n    name: Test Project\n    environments:\n      - name: Production\n        services:\n          - connector_id: aws\n            resource_id: i-123\n")
+
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+    monkeypatch.setattr("prash.connector_registry.ENV_PATH", str(mock_env))
+    monkeypatch.setattr("prash.server.YAML_PATH", str(mock_yaml))
+
+    # Reset cache
+    from prash.server import _dashboard_summary_cache
+    _dashboard_summary_cache["timestamp"] = 0.0
+    _dashboard_summary_cache["data"] = None
+
+    mock_conn = MagicMock()
+    mock_conn.authenticate.return_value = True
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    res = client.get("/api/dashboard/summary")
+    assert res.status_code == 200
+    data = res.json()
+    assert "status" in data
+    assert "health_score" in data
+    assert data["health_score"] >= 0
+    assert data["counts"]["total_services"] == 1
+    assert data["projects_count"] == 1
+    assert data["cached"] is False
+
+
+def test_DASHBOARD_SUMMARY_CACHING(client, monkeypatch, tmp_path):
+    """Verifies that /api/dashboard/summary caches result for 10 seconds."""
+    from prash.server import _dashboard_summary_cache
+    _dashboard_summary_cache["timestamp"] = 0.0
+    _dashboard_summary_cache["data"] = None
+
+    mock_yaml = tmp_path / "prash.yaml"
+    mock_yaml.write_text("projects: []\n")
+    monkeypatch.setattr("prash.server.YAML_PATH", str(mock_yaml))
+
+    # First call - cache miss
+    res1 = client.get("/api/dashboard/summary")
+    assert res1.status_code == 200
+    assert res1.json()["cached"] is False
+
+    # Second call - cache hit within 10s
+    res2 = client.get("/api/dashboard/summary")
+    assert res2.status_code == 200
+    assert res2.json()["cached"] is True
+
+
+def test_DASHBOARD_ACTIVITY_ENDPOINT(client):
+    """Verifies that /api/dashboard/activity returns cross-service events with limit."""
+    from prash.server import _activity_log
+    _activity_log.append({
+        "watch_id": "test:watch-1",
+        "connector": "aws",
+        "event_type": "TEST_EVENT",
+        "summary": "Instance status ok",
+        "timestamp": "2026-09-13T12:00:00Z",
+        "severity": "info",
+    })
+
+    res = client.get("/api/dashboard/activity?limit=5")
+    assert res.status_code == 200
+    data = res.json()
+    assert "events" in data
+    assert data["count"] <= 5
+    assert len(data["events"]) > 0
+    assert any(e["summary"] == "Instance status ok" for e in data["events"])
+
+
+
+
