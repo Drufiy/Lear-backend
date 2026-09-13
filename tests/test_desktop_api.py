@@ -1021,6 +1021,79 @@ def test_SYSTEM_VERSION_DYNAMIC(client):
     assert isinstance(data["connectors_configured"], int)
 
 
+def test_NOTIFICATIONS_LIFECYCLE_PERSISTENCE(client, monkeypatch, tmp_path):
+    """Verifies notification queue operations, unread count tracking, and disk persistence."""
+    test_notifs_path = tmp_path / "notifications.json"
+    monkeypatch.setattr("prash.server.NOTIFICATIONS_PATH", str(test_notifs_path))
+
+    import prash.server as srv
+    srv._notifications.clear()
+
+    # 1. Initially empty
+    res = client.get("/api/notifications")
+    assert res.status_code == 200
+    assert res.json()["notifications"] == []
+    assert res.json()["unread_count"] == 0
+
+    # 2. Add test notifications
+    n1 = {
+        "id": "notif_1",
+        "title": "EC2 Memory Spike",
+        "message": "Memory utilization exceeded 90% on i-0123",
+        "connector": "aws",
+        "severity": "warning",
+        "timestamp": "2026-09-13T10:00:00Z",
+        "read": False,
+    }
+    n2 = {
+        "id": "notif_2",
+        "title": "Kubernetes CrashLoopBackOff",
+        "message": "Pod order-service restarted 5 times",
+        "connector": "kubernetes",
+        "severity": "error",
+        "timestamp": "2026-09-13T10:05:00Z",
+        "read": False,
+    }
+    srv._notifications.extend([n1, n2])
+    srv._save_notifications_to_disk()
+
+    # Verify saved to disk
+    assert test_notifs_path.exists()
+    assert "notif_1" in test_notifs_path.read_text()
+
+    # 3. Fetch notifications and check unread count
+    res_list = client.get("/api/notifications")
+    assert res_list.status_code == 200
+    data = res_list.json()
+    assert len(data["notifications"]) == 2
+    assert data["unread_count"] == 2
+
+    # 4. Mark notif_1 as read
+    res_read1 = client.post("/api/notifications/notif_1/read")
+    assert res_read1.status_code == 200
+    assert res_read1.json()["unread_count"] == 1
+
+    # Verify disk updated
+    disk_data = json.loads(test_notifs_path.read_text())
+    assert any(n["id"] == "notif_1" and n["read"] is True for n in disk_data)
+
+    # 5. Mark all as read
+    res_read_all = client.post("/api/notifications/all/read")
+    assert res_read_all.status_code == 200
+    assert res_read_all.json()["unread_count"] == 0
+
+    # 6. Clear all notifications
+    res_clear = client.delete("/api/notifications")
+    assert res_clear.status_code == 200
+    assert res_clear.json()["unread_count"] == 0
+
+    res_empty = client.get("/api/notifications")
+    assert res_empty.json()["notifications"] == []
+    assert res_empty.json()["unread_count"] == 0
+    assert json.loads(test_notifs_path.read_text()) == []
+
+
+
 
 
 

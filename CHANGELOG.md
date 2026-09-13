@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 15 — Notification System (`Notifications.tsx`, `NotificationToast.tsx`, `prash/server.py`)**:
+  - *Disk Persistence & Queue Storage (`.prash/notifications.json`)*: Created persistent local JSON storage for notifications bounded to 100 entries. Restores historical notifications on FastAPI startup (`lifespan`) and automatically persists watcher alarm events directly into the incident record.
+  - *Enhanced Backend Notification Endpoints*: Enriched `GET /api/notifications` to compute and return live `unread_count` and `total`. Enhanced `POST /api/notifications/{notification_id}/read` to support individual IDs and `"all"` batch reading. Enhanced `DELETE /api/notifications` to clear the in-memory queue and wipe persistent disk records.
+  - *Smart Auto-Dismiss Notification Toasts (`NotificationToast.tsx`)*: Upgraded in-app toast stack with severity-based display durations (5,000ms for info/success, 10,000ms for warning/error), slide-in animations, dismiss controls, and one-click "Investigate" action buttons that immediately open Lear Copilot scoped to the affected service.
+  - *Comprehensive Incident Notification Center (`Notifications.tsx`)*: Rewrote the notification center into a dual-tab experience:
+    - **Incident Center Tab**: Groups alerts into "NEW" (unread) and "EARLIER" (read) sections. Includes severity filter pills ("All", "Unread", "Critical", "Warning", "Info"), debounced free-text search, relative timestamps ("just now", "Xm ago"), contextual actions ("Investigate with Copilot", "Open Dashboard", "Mark as read"), and bulk operations ("Mark all as read", "Clear all", "Refresh").
+    - **Alert Channels Tab**: Preserves external delivery routing and channel configuration (Slack, Discord, WhatsApp, Email, PagerDuty) with webhook verification.
+  - *Real-Time Unread Count Badge*: Synchronized backend unread count with `LearContext.tsx` and `Sidebar.tsx`, dynamically updating the bell icon counter badge.
 - **Desktop Feature 14 — Settings & Configuration (`Settings.tsx`, `prash/server.py`)**:
   - *Consolidated Settings & Dual Persistence (`GET`/`POST /api/settings`)*: Removed the legacy duplicate route in `prash/server.py` that caused 422 errors and consolidated into a unified endpoint. Persists AI model preferences, permission safety modes, background watcher polling cadence, retention days, and notification webhooks directly to `prash.yaml` (`settings:` block) and `.env`.
   - *Dynamic AI Model Provider Selection*: Eradicated hardcoded model options in `Settings.tsx`, dynamically loading supported models (`deepseek-v4-flash`, `kimi-k2.6`, `gemini-1.5-pro`, `claude-3-5-sonnet`, `gpt-4o`) with provider tags, descriptions, and active status indicators.

@@ -39,8 +39,35 @@ logger = logging.getLogger(__name__)
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 YAML_PATH = os.path.join(os.path.dirname(__file__), "..", "prash.yaml")
+NOTIFICATIONS_PATH = os.path.join(os.path.dirname(__file__), "..", ".prash", "notifications.json")
 
 dotenv.load_dotenv(ENV_PATH, override=True)
+
+
+def _load_persisted_notifications() -> List[Dict[str, Any]]:
+    if not os.path.exists(NOTIFICATIONS_PATH):
+        return []
+    try:
+        with open(NOTIFICATIONS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict) and "notifications" in data and isinstance(data["notifications"], list):
+                return data["notifications"]
+            return []
+    except Exception as e:
+        logger.warning(f"Error loading persisted notifications: {e}")
+        return []
+
+
+def _save_notifications_to_disk() -> None:
+    try:
+        os.makedirs(os.path.dirname(NOTIFICATIONS_PATH), exist_ok=True)
+        with open(NOTIFICATIONS_PATH, "w", encoding="utf-8") as f:
+            json.dump(_notifications[:100], f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to persist notifications to disk: {e}")
+
 
 def _read_prash_yaml() -> Dict[str, Any]:
     if not os.path.exists(YAML_PATH):
@@ -119,11 +146,17 @@ _dashboard_summary_cache: Dict[str, Any] = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _ws_polling_task
+    global _ws_polling_task, _notifications
     try:
         _restore_persisted_watches()
     except Exception as e:
         logger.warning(f"Error restoring persisted watches on startup: {e}")
+    try:
+        loaded_notifs = _load_persisted_notifications()
+        if loaded_notifs:
+            _notifications = loaded_notifs
+    except Exception as e:
+        logger.warning(f"Error loading persisted notifications on startup: {e}")
     _ws_polling_task = asyncio.create_task(_poll_watches_loop())
     yield
     if _ws_polling_task:
@@ -288,6 +321,7 @@ async def _poll_watches_loop():
                     })
                 if len(_notifications) > 100:
                     del _notifications[100:]
+                _save_notifications_to_disk()
 
                 payload = json.dumps({"events": events_to_broadcast})
                 for ws in list(_ws_clients):
@@ -2225,26 +2259,46 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
 
 @app.get("/api/notifications")
 def get_notifications():
-    """Returns in-memory notification queue and watch updates."""
-    return {"notifications": _notifications}
+    """Returns persistent notification queue, unread count, and watch updates."""
+    unread = sum(1 for n in _notifications if not n.get("read"))
+    return {
+        "notifications": _notifications,
+        "unread_count": unread,
+        "total": len(_notifications),
+    }
 
 
 @app.post("/api/notifications/{notification_id}/read")
 def mark_notification_read(notification_id: str):
-    """Mark a notification as read."""
+    """Mark a notification (or all) as read and persist state."""
+    global _notifications
+    if notification_id.lower() == "all":
+        for n in _notifications:
+            n["read"] = True
+        _save_notifications_to_disk()
+        return {"success": True, "unread_count": 0}
+
+    found = False
     for n in _notifications:
         if n.get("id") == notification_id:
             n["read"] = True
-            return {"success": True}
-    return {"success": True}
+            found = True
+            break
+
+    if found:
+        _save_notifications_to_disk()
+
+    unread = sum(1 for n in _notifications if not n.get("read"))
+    return {"success": True, "unread_count": unread}
 
 
 @app.delete("/api/notifications")
 def clear_notifications():
-    """Clear all notifications."""
+    """Clear all notifications and persist empty queue."""
     global _notifications
     _notifications = []
-    return {"success": True}
+    _save_notifications_to_disk()
+    return {"success": True, "unread_count": 0}
 
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,7 @@
 | 12 | **Integrations Management** | [`12_INTEGRATIONS_PAGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/12_INTEGRATIONS_PAGE.md) | P1 |
 | 13 | **Activity & Event Log** | [`13_ACTIVITY_LOG.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/13_ACTIVITY_LOG.md) | P1 |
 | 14 | **Settings & Configuration** | [`14_SETTINGS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/14_SETTINGS.md) | P2 |
+| 15 | **Notification System** | [`15_NOTIFICATIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/15_NOTIFICATIONS.md) | P2 |
 
 ### 🟡 In Progress → `tasks/desktop/`
 
@@ -77,9 +78,7 @@
 
 ### ❌ Not Started → `tasks/desktop/`
 
-| # | Feature | Spec File | Priority | Status |
-|---|---|---|---|---|
-| 15 | **Notification System** | [`15_NOTIFICATIONS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/15_NOTIFICATIONS.md) | P2 | Wrong component exists (channels page, not toasts) |
+*All core specifications from Features 01 through 15 are now in progress or completed.*
 
 ---
 
@@ -124,11 +123,11 @@ Phase 1 — Foundation ✅ COMPLETE
 Phase 2 — Core Experience (IN PROGRESS)
   04_ONBOARDING_WIZARD ✅ → 05_SERVICE_CONNECTIONS 🟡 → 06_SIDEBAR_NAVIGATION ✅
 
-Phase 3 — The Demo (IN PROGRESS)
-  07_PROJECT_SYSTEM ✅ → 08_METRIC_WIDGETS ✅ → 09_WATCHER_STATUS ✅ → 10_AI_CHATBOX 🟡
+Phase 3 — The Demo ✅ COMPLETE
+  07_PROJECT_SYSTEM ✅ → 08_METRIC_WIDGETS ✅ → 09_WATCHER_STATUS ✅ → 10_AI_CHATBOX ✅
 
 Phase 4 — Polish (IN PROGRESS)
-  11_DASHBOARD_OVERVIEW 🟡 → 12_INTEGRATIONS_PAGE 🟡 → 13_ACTIVITY_LOG ✅ → 14_SETTINGS ✅ → 15_NOTIFICATIONS 🟡 → 16_AI_WIDGET_GENERATION 🟡
+  11_DASHBOARD_OVERVIEW ✅ → 12_INTEGRATIONS_PAGE ✅ → 13_ACTIVITY_LOG ✅ → 14_SETTINGS ✅ → 15_NOTIFICATIONS ✅ → 16_AI_WIDGET_GENERATION 🟡
 ```
 
 ---

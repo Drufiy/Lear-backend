@@ -1,7 +1,8 @@
 import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, X, Sparkles } from 'lucide-react';
 import { AppNotification } from '../hooks/useNotifications';
+import { useLear } from '../context/LearContext';
 
 interface NotificationToastProps {
   toasts: AppNotification[];
@@ -24,12 +25,16 @@ const ToastItem: React.FC<{ toast: AppNotification; onDismiss: (id: string) => v
   toast,
   onDismiss,
 }) => {
+  const { openChat } = useLear();
+
+  // B2. Severity-based auto-dismiss (5s for info/success, 10s for warning/error)
   useEffect(() => {
+    const duration = toast.severity === 'error' || toast.severity === 'warning' ? 10000 : 5000;
     const timer = setTimeout(() => {
       onDismiss(toast.id);
-    }, 6000);
+    }, duration);
     return () => clearTimeout(timer);
-  }, [toast.id, onDismiss]);
+  }, [toast.id, toast.severity, onDismiss]);
 
   const getIcon = () => {
     switch (toast.severity) {
@@ -47,13 +52,13 @@ const ToastItem: React.FC<{ toast: AppNotification; onDismiss: (id: string) => v
   const getBorderColor = () => {
     switch (toast.severity) {
       case 'error':
-        return 'border-rose-500/30 bg-rose-500/10';
+        return 'border-rose-500/30 bg-rose-950/40 shadow-rose-950/50';
       case 'warning':
-        return 'border-amber-500/30 bg-amber-500/10';
+        return 'border-amber-500/30 bg-amber-950/40 shadow-amber-950/50';
       case 'success':
-        return 'border-accent/30 bg-accent/10';
+        return 'border-accent/30 bg-surface-elevated/90 shadow-accent/10';
       default:
-        return 'border-border-subtle bg-surface-elevated/90';
+        return 'border-border-subtle bg-surface-elevated/90 shadow-black/50';
     }
   };
 
@@ -65,27 +70,41 @@ const ToastItem: React.FC<{ toast: AppNotification; onDismiss: (id: string) => v
       exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }}
       className={`pointer-events-auto p-4 rounded-xl border backdrop-blur-xl shadow-2xl flex items-start justify-between gap-3 text-white ${getBorderColor()}`}
     >
-      <div className="flex items-start gap-3 min-w-0">
+      <div className="flex items-start gap-3 min-w-0 flex-1">
         {getIcon()}
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="font-bold text-xs truncate">{toast.title}</span>
             {toast.connector && (
-              <span className="text-[9px] uppercase font-mono px-1.5 py-0.2 rounded bg-white/10 text-gray-300">
+              <span className="text-[9px] uppercase font-mono px-1.5 py-0.5 rounded bg-white/10 text-gray-300">
                 {toast.connector}
               </span>
             )}
           </div>
-          <p className="text-[11px] text-gray-300 mt-1 line-clamp-2">{toast.message}</p>
-          <span className="text-[9px] text-gray-500 font-mono mt-1 block">
-            {new Date(toast.timestamp).toLocaleTimeString()}
-          </span>
+          <p className="text-[11px] text-gray-300 mt-1 line-clamp-2 leading-relaxed">{toast.message}</p>
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span className="text-[9px] text-gray-500 font-mono">
+              {new Date(toast.timestamp).toLocaleTimeString()}
+            </span>
+            {toast.connector && (
+              <button
+                onClick={() => {
+                  openChat({ connectorId: toast.connector });
+                  onDismiss(toast.id);
+                }}
+                className="text-[10px] text-accent hover:underline flex items-center gap-1 font-bold cursor-pointer"
+              >
+                <Sparkles size={11} />
+                Investigate
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
       <button
         onClick={() => onDismiss(toast.id)}
-        className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors shrink-0"
+        className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors shrink-0 cursor-pointer"
       >
         <X size={14} />
       </button>
