@@ -14,6 +14,7 @@ export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
   const [lastEvent, setLastEvent] = useState<WebSocketEvent | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<any>(null);
+  const reconnectAttemptRef = useRef<number>(0);
 
   const connect = useCallback(() => {
     try {
@@ -22,6 +23,7 @@ export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
 
       ws.onopen = () => {
         setIsConnected(true);
+        reconnectAttemptRef.current = 0; // Reset on successful connection
       };
 
       ws.onmessage = (event) => {
@@ -39,8 +41,10 @@ export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
 
       ws.onclose = () => {
         setIsConnected(false);
-        // Attempt reconnect after 3 seconds
-        reconnectTimeoutRef.current = setTimeout(connect, 3000);
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptRef.current), 30000);
+        reconnectAttemptRef.current += 1;
+        reconnectTimeoutRef.current = setTimeout(connect, delay);
       };
 
       ws.onerror = () => {
@@ -49,7 +53,9 @@ export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
       };
     } catch (e) {
       console.error('WebSocket connection error:', e);
-      reconnectTimeoutRef.current = setTimeout(connect, 3000);
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptRef.current), 30000);
+      reconnectAttemptRef.current += 1;
+      reconnectTimeoutRef.current = setTimeout(connect, delay);
     }
   }, [url]);
 

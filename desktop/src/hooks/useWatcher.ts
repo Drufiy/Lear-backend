@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import useWebSocket, { WebSocketEvent } from './useWebSocket';
 
 export type WatcherState = 'IDLE' | 'STARTING' | 'ACTIVE' | 'DEGRADED' | 'ALERTING' | 'ERROR';
@@ -8,6 +8,12 @@ export function useWatcher() {
   const [activeWatches, setActiveWatches] = useState<string[]>([]);
   const [events, setEvents] = useState<WebSocketEvent[]>([]);
   const [watcherState, setWatcherState] = useState<WatcherState>('IDLE');
+  const watcherStateRef = useRef<WatcherState>('IDLE');
+
+  // Keep ref in sync with state to avoid stale closure
+  useEffect(() => {
+    watcherStateRef.current = watcherState;
+  }, [watcherState]);
 
   // Push incoming WS events into local event stream
   useEffect(() => {
@@ -17,7 +23,7 @@ export function useWatcher() {
       const summary = (lastEvent.summary || '').toLowerCase();
       if (type.includes('fail') || type.includes('alarm') || summary.includes('error')) {
         setWatcherState('ALERTING');
-      } else if (watcherState === 'IDLE' || watcherState === 'STARTING') {
+      } else if (watcherStateRef.current === 'IDLE' || watcherStateRef.current === 'STARTING') {
         setWatcherState('ACTIVE');
       }
     }
@@ -26,7 +32,7 @@ export function useWatcher() {
   // Update state based on active watches count
   useEffect(() => {
     if (activeWatches.length > 0) {
-      if (watcherState === 'IDLE') {
+      if (watcherStateRef.current === 'IDLE') {
         setWatcherState('ACTIVE');
       }
     } else {
