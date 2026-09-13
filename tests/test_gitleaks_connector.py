@@ -19,6 +19,8 @@ def _fake_run_writing_report(findings):
     asked for, simulating what the real binary would produce."""
 
     def fake_run(cmd, capture_output=True, text=True, timeout=300):
+        if "version" in cmd:
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="8.18.2\n", stderr="")
         report_path = cmd[cmd.index("--report-path") + 1]
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(findings, f)
@@ -29,8 +31,14 @@ def _fake_run_writing_report(findings):
 
 def test_authenticate_true_when_binary_found(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/gitleaks")
+    monkeypatch.setattr(
+        "prash.connectors.gitleaks.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, stdout="8.18.2\n", stderr=""),
+    )
     gl = GitleaksConnector({})
     assert gl.authenticate() is True
+    assert gl.auth_identity == {"version": "8.18.2"}
+    assert gl.auth_error is None
 
 
 def test_authenticate_false_when_binary_missing(monkeypatch):
@@ -113,6 +121,8 @@ def test_poll_state_never_leaks_the_actual_secret_value(monkeypatch, tmp_path):
 
 def test_run_scan_raises_on_nonzero_exit(monkeypatch, tmp_path):
     def fake_run(cmd, capture_output=True, text=True, timeout=300):
+        if "version" in cmd:
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="8.18.2\n", stderr="")
         return subprocess.CompletedProcess(cmd, returncode=2, stdout="", stderr="fatal: something broke")
 
     monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/gitleaks")

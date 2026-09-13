@@ -123,17 +123,32 @@ class KubernetesConnector(Connector):
 
     def authenticate(self) -> bool:
         kubeconfig = self.credentials.get("KUBECONFIG") or os.environ.get("KUBECONFIG")
-        context = self.credentials.get("KUBE_CONTEXT") or os.environ.get("KUBE_CONTEXT") or None
+        requested_context = self.credentials.get("KUBE_CONTEXT") or os.environ.get("KUBE_CONTEXT") or None
 
         try:
-            config.load_kube_config(config_file=kubeconfig, context=context)
-        except Exception:
+            contexts, active_context = config.list_kube_config_contexts(config_file=kubeconfig)
+            config.load_kube_config(config_file=kubeconfig, context=requested_context)
+            self.api_client = client.ApiClient()
+            self.core_v1 = client.CoreV1Api(self.api_client)
+            self.apps_v1 = client.AppsV1Api(self.api_client)
+            namespaces = self.core_v1.list_namespace()
+            selected = requested_context or ((active_context or {}).get("name"))
+            context_data = next((item.get("context", {}) for item in (contexts or []) if item.get("name") == selected), {})
+            cluster = context_data.get("cluster")
+            namespace_count = len(getattr(namespaces, "items", []) or [])
+            self.auth_identity = {
+                key: value for key, value in {
+                    "cluster": cluster,
+                    "context": selected,
+                    "namespace_count": namespace_count,
+                }.items() if value is not None
+            }
+            self.auth_error = None
+            return True
+        except Exception as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
-
-        self.api_client = client.ApiClient()
-        self.core_v1 = client.CoreV1Api(self.api_client)
-        self.apps_v1 = client.AppsV1Api(self.api_client)
-        return True
 
     def locate(self, resource: str) -> dict:
         env_namespace = self.credentials.get("KUBE_NAMESPACE") or _default_namespace(None)

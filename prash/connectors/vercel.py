@@ -51,11 +51,23 @@ class VercelConnector(Connector):
 
     def authenticate(self) -> bool:
         if not self.token:
+            self.auth_error = "Vercel token is required"
             return False
         try:
-            self._request("GET", "/v2/user")
+            resp = self._request("GET", "/v2/user")
+            user = resp.get("user", resp) if isinstance(resp, dict) else {}
+            team = resp.get("team") if isinstance(resp, dict) else None
+            self.auth_identity = {
+                key: value for key, value in {
+                    "user": user.get("username") or user.get("name") or user.get("email"),
+                    "team": (team or {}).get("name") or (team or {}).get("slug") if isinstance(team, dict) else None,
+                }.items() if value
+            }
+            self.auth_error = None
             return True
-        except VercelError:
+        except VercelError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

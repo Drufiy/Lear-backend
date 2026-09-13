@@ -338,11 +338,22 @@ class PagerDutyConnector(Connector):
 
     def authenticate(self) -> bool:
         if not self.api_key:
+            self.auth_error = "PagerDuty API key is required"
             return False
         try:
-            self._request("GET", "/abilities", timeout=SHORT_TIMEOUT)
+            resp = self._request("GET", "/users/me", timeout=SHORT_TIMEOUT)
+            user = resp.get("user", resp) if isinstance(resp, dict) else {}
+            self.auth_identity = {
+                key: value for key, value in {
+                    "user": user.get("name"),
+                    "email": user.get("email"),
+                }.items() if value
+            }
+            self.auth_error = None
             return True
-        except PagerDutyError:
+        except PagerDutyError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

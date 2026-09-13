@@ -55,6 +55,31 @@ def _patched_core_api(monkeypatch):
     return fake_api
 
 
+def test_authenticate_exposes_cluster_context_and_namespace_count(monkeypatch):
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    monkeypatch.delenv("KUBE_CONTEXT", raising=False)
+    namespaces = SimpleNamespace(items=[object(), object()])
+    core = MagicMock()
+    core.list_namespace.return_value = namespaces
+    monkeypatch.setattr(k8s.config, "list_kube_config_contexts", lambda **kwargs: (
+        [{"name": "kind-lear", "context": {"cluster": "kind-lear"}}],
+        {"name": "kind-lear"},
+    ))
+    monkeypatch.setattr(k8s.config, "load_kube_config", lambda **kwargs: None)
+    monkeypatch.setattr(k8s.client, "ApiClient", MagicMock())
+    monkeypatch.setattr(k8s.client, "CoreV1Api", lambda api_client: core)
+    monkeypatch.setattr(k8s.client, "AppsV1Api", MagicMock())
+
+    connector = k8s.KubernetesConnector({})
+    assert connector.authenticate() is True
+    assert connector.auth_identity == {
+        "cluster": "kind-lear",
+        "context": "kind-lear",
+        "namespace_count": 2,
+    }
+    assert connector.auth_error is None
+
+
 # ── get_pod_status: the four states Track D + Track E both key off ─────────
 
 def test_crash_loop_back_off_detected(monkeypatch):

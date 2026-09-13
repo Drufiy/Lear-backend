@@ -37,6 +37,14 @@ def _capture_urlopen(monkeypatch, body: bytes = b"[]"):
     return calls
 
 
+def test_authenticate_exposes_login(monkeypatch):
+    _capture_urlopen(monkeypatch, json.dumps({"login": "octocat"}).encode())
+    gh = GitHubConnector({"GITHUB_TOKEN": "t"})
+    assert gh.authenticate() is True
+    assert gh.auth_identity == {"login": "octocat"}
+    assert gh.auth_error is None
+
+
 def test_get_dependabot_alerts_defaults_to_open_state(monkeypatch):
     body = json.dumps([{"number": 1, "dependency": {"package": {"name": "lodash"}}, "security_vulnerability": {"severity": "high"}}]).encode()
     calls = _capture_urlopen(monkeypatch, body)

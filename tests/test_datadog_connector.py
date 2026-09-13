@@ -48,13 +48,15 @@ def _capture_urlopen(monkeypatch, body: bytes = b"{}"):
     return calls
 
 
-def test_authenticate_sends_api_key_header_without_app_key(monkeypatch):
-    calls = _capture_urlopen(monkeypatch, b'{"valid": true}')
-    dd = DatadogConnector({"DATADOG_API_KEY": "key123"})
+def test_authenticate_verifies_api_and_application_keys(monkeypatch):
+    calls = _capture_urlopen(monkeypatch, b'{"monitors": []}')
+    dd = DatadogConnector({"DATADOG_API_KEY": "key123", "DATADOG_APP_KEY": "app123"})
     assert dd.authenticate() is True
     assert calls[0].get_header("Dd-api-key") == "key123"
-    assert calls[0].get_header("Dd-application-key") is None
-    assert calls[0].full_url == "https://api.datadoghq.com/api/v1/validate"
+    assert calls[0].get_header("Dd-application-key") == "app123"
+    assert calls[0].full_url == "https://api.datadoghq.com/api/v1/monitor/search?per_page=1"
+    assert dd.auth_identity == {"valid": True}
+    assert dd.auth_error is None
 
 
 def test_authenticate_false_without_api_key():
@@ -62,24 +64,26 @@ def test_authenticate_false_without_api_key():
     assert dd.authenticate() is False
 
 
-def test_authenticate_false_when_api_says_invalid(monkeypatch):
-    _capture_urlopen(monkeypatch, b'{"valid": false}')
-    dd = DatadogConnector({"DATADOG_API_KEY": "bad-key"})
+def test_authenticate_false_without_application_key(monkeypatch):
+    calls = _capture_urlopen(monkeypatch)
+    dd = DatadogConnector({"DATADOG_API_KEY": "key123"})
     assert dd.authenticate() is False
+    assert dd.auth_error == "Datadog application key is required"
+    assert calls == []
 
 
 def test_custom_site_changes_base_url(monkeypatch):
     calls = _capture_urlopen(monkeypatch, b'{"valid": true}')
-    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_SITE": "datadoghq.eu"})
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a", "DATADOG_SITE": "datadoghq.eu"})
     dd.authenticate()
-    assert calls[0].full_url == "https://api.datadoghq.eu/api/v1/validate"
+    assert calls[0].full_url == "https://api.datadoghq.eu/api/v1/monitor/search?per_page=1"
 
 
 def test_blank_site_defaults_to_us1(monkeypatch):
     calls = _capture_urlopen(monkeypatch, b'{"valid": true}')
-    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_SITE": ""})
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a", "DATADOG_SITE": ""})
     dd.authenticate()
-    assert calls[0].full_url == "https://api.datadoghq.com/api/v1/validate"
+    assert calls[0].full_url == "https://api.datadoghq.com/api/v1/monitor/search?per_page=1"
 
 
 def test_locate_by_numeric_id_hits_monitor_endpoint_directly(monkeypatch):
@@ -217,7 +221,7 @@ def test_request_retries_429_with_backoff(monkeypatch):
         return _FakeResponse(b'{"valid": true}')
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    dd = DatadogConnector({"DATADOG_API_KEY": "k"})
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
     assert dd.authenticate() is True
     assert attempts["n"] == 3
     assert sleeps == [1, 2]  # capped exponential: 2**0, 2**1
@@ -235,7 +239,7 @@ def test_request_429_honors_retry_after_header(monkeypatch):
         return _FakeResponse(b'{"valid": true}')
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    dd = DatadogConnector({"DATADOG_API_KEY": "k"})
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
     assert dd.authenticate() is True
     assert sleeps == [7]  # Retry-After wins over the computed backoff
 
@@ -252,7 +256,7 @@ def test_request_retries_transient_network_errors(monkeypatch):
         return _FakeResponse(b'{"valid": true}')
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    dd = DatadogConnector({"DATADOG_API_KEY": "k"})
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
     assert dd.authenticate() is True
     assert attempts["n"] == 3
     assert sleeps == [1, 2]
@@ -305,7 +309,7 @@ def test_401_without_rotation_raises_immediately(monkeypatch):
         raise _http_error(401)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    dd = DatadogConnector({"DATADOG_API_KEY": "stale-key"})
+    dd = DatadogConnector({"DATADOG_API_KEY": "stale-key", "DATADOG_APP_KEY": "a"})
     # authenticate() never raises (its contract) — but it must NOT retry, and
     # the single attempt must fail honestly.
     assert dd.authenticate() is False
@@ -321,7 +325,7 @@ def test_regional_site_urls():
         "ap1.datadoghq.com": "https://api.ap1.datadoghq.com",
     }
     for site, expected_base in sites.items():
-        dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_SITE": site})
+        dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a", "DATADOG_SITE": site})
         assert dd.base_url == expected_base, site
 
 
@@ -335,9 +339,9 @@ def test_timeout_varies_by_endpoint(monkeypatch):
         return inner
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_body(b'{"valid": true}'))
-    dd = DatadogConnector({"DATADOG_API_KEY": "k"})
+    dd = DatadogConnector({"DATADOG_API_KEY": "k", "DATADOG_APP_KEY": "a"})
     dd.authenticate()
-    assert seen[-1] == 10  # single-document validate read
+    assert seen[-1] == 10  # credential-pair monitor-search validation
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_body(b'{"id": 1, "name": "m", "overall_state": "OK"}'))
     dd.locate("1")

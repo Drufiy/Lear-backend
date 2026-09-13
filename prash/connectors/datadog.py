@@ -261,15 +261,23 @@ class DatadogConnector(Connector):
                 raise DatadogError(f"Datadog API unreachable: {exc}") from exc
 
     def authenticate(self) -> bool:
-        # /v1/validate only checks the API key (no app key needed) -- the
-        # cheapest possible real auth check, same role GitHub's /user and
-        # GitLab's /user play here.
         if not self.api_key:
+            self.auth_error = "Datadog API key is required"
+            return False
+        if not self.app_key:
+            self.auth_error = "Datadog application key is required"
             return False
         try:
-            resp = self._request("GET", "/api/v1/validate", need_app_key=False, timeout=SHORT_TIMEOUT)
-            return bool(resp.get("valid"))
-        except DatadogError:
+            # Monitor search requires both API and application keys, so success
+            # verifies the complete credential pair rather than only the API key.
+            resp = self._request("GET", "/api/v1/monitor/search?per_page=1", need_app_key=True, timeout=SHORT_TIMEOUT)
+            valid = isinstance(resp, dict)
+            self.auth_identity = {"valid": True} if valid else {}
+            self.auth_error = None if valid else "Datadog credentials are invalid"
+            return valid
+        except DatadogError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

@@ -42,6 +42,8 @@ def test_authenticate_sends_bearer_token(monkeypatch):
     assert gf.authenticate() is True
     assert calls[0].get_header("Authorization") == "Bearer gf-secret"
     assert calls[0].full_url == "https://acme.grafana.net/api/org"
+    assert gf.auth_identity == {"org": "Main Org."}
+    assert gf.auth_error is None
 
 
 def test_authenticate_false_without_url_or_key():

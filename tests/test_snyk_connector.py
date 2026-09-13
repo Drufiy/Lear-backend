@@ -25,23 +25,27 @@ class _FakeResponse:
         return False
 
 
-def _capture_urlopen(monkeypatch, body: bytes = b"{}"):
+def _capture_urlopen(monkeypatch, body: bytes = b"{}", bodies: list[bytes] | None = None):
     calls = []
+    responses = iter(bodies or [body])
 
     def fake_urlopen(req, timeout=30):
         calls.append(req)
-        return _FakeResponse(body)
+        return _FakeResponse(next(responses))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     return calls
 
 
 def test_authenticate_sends_token_header(monkeypatch):
-    calls = _capture_urlopen(monkeypatch, b'{"username": "aradhya"}')
-    sn = SnykConnector({"SNYK_API_TOKEN": "snyk-secret"})
+    calls = _capture_urlopen(monkeypatch, bodies=[b'{"data": {"type": "self"}}', b'{"name": "Security Team"}'])
+    sn = SnykConnector({"SNYK_API_TOKEN": "snyk-secret", "SNYK_ORG_ID": "org-1"})
     assert sn.authenticate() is True
     assert calls[0].get_header("Authorization") == "token snyk-secret"
-    assert calls[0].full_url == "https://api.snyk.io/v1/user/me"
+    assert calls[0].full_url == "https://api.snyk.io/rest/self?version=2024-10-15"
+    assert calls[1].full_url == "https://api.snyk.io/v1/org/org-1"
+    assert sn.auth_identity == {"org": "Security Team"}
+    assert sn.auth_error is None
 
 
 def test_authenticate_false_without_token():

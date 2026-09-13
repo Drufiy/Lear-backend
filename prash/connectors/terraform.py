@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -21,23 +23,43 @@ class TerraformConnector(Connector):
         super().__init__(credentials)
         self.use_cloud = str(self.credentials.get("TERRAFORM_USE_CLOUD", "false")).lower() == "true"
         self.cloud_token = self.credentials.get("TERRAFORM_API_TOKEN", "")
+        self.state_path = self.credentials.get("TERRAFORM_STATE_PATH") or "."
 
     def authenticate(self) -> bool:
-        """Validate credentials or local binary."""
+        """Validate Terraform Cloud credentials or inspect local state."""
         if self.use_cloud:
             if not self.cloud_token:
-                logger.warning("Terraform Cloud enabled but TERRAFORM_API_TOKEN is missing")
+                self.auth_error = "Terraform Cloud API token is required"
                 return False
-            # Here we would normally make a lightweight API call to TF Cloud to verify token.
-            return True
-        else:
-            # Local execution check
+            request = urllib.request.Request(
+                "https://app.terraform.io/api/v2/account/details",
+                headers={"Authorization": f"Bearer {self.cloud_token}", "Content-Type": "application/vnd.api+json"},
+            )
             try:
-                subprocess.run(["terraform", "version"], check=True, capture_output=True)
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    payload = json.loads(response.read() or b"{}")
+                username = (payload.get("data") or {}).get("attributes", {}).get("username")
+                self.auth_identity = {"account": username} if username else {}
+                self.auth_error = None
                 return True
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                logger.warning("Terraform binary not found on PATH or failed to execute.")
+            except (urllib.error.URLError, json.JSONDecodeError) as exc:
+                self.auth_identity = {}
+                self.auth_error = str(exc)
                 return False
+
+        path = Path(self.state_path).expanduser().resolve()
+        state_file = path if path.is_file() else path / "terraform.tfstate"
+        try:
+            with state_file.open("r", encoding="utf-8") as handle:
+                state = json.load(handle)
+            resources = state.get("resources", [])
+            self.auth_identity = {"resource_count": len(resources), "state": str(state_file)}
+            self.auth_error = None
+            return True
+        except (OSError, json.JSONDecodeError) as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
+            return False
 
     def locate(self, resource: str) -> Dict[str, Any]:
         """Resolve a human-readable resource id (directory or workspace) to a handle."""

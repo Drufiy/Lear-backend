@@ -47,29 +47,56 @@ class GCPConnector(Connector):
             return self._authenticated
 
         if not self.project_id:
+            self.auth_error = "GCP project ID is required"
             self._authenticated = False
             return False
 
+        explicit_service_credentials = bool(self.credentials_path)
+        sdk_error = None
         if _HAS_GCP:
             try:
-                if self.credentials_path and os.path.exists(self.credentials_path):
+                if explicit_service_credentials:
+                    if not os.path.isfile(self.credentials_path):
+                        raise FileNotFoundError(f"GCP service account file not found: {self.credentials_path}")
                     self._creds = service_account.Credentials.from_service_account_file(self.credentials_path)
                 else:
                     self._creds, _ = google.auth.default()
+                compute = discovery.build("compute", "v1", credentials=self._creds, cache_discovery=False)
+                project = compute.projects().get(project=self.project_id).execute()
+                project_identity = project.get("name") or self.project_id
+                self.auth_identity = {"project": project_identity}
+                self.auth_error = None
                 self._authenticated = True
                 return True
-            except Exception:
-                pass
+            except Exception as exc:
+                sdk_error = exc
+                if explicit_service_credentials:
+                    self.auth_identity = {}
+                    self.auth_error = str(exc)
+                    self._authenticated = False
+                    return False
 
-        # Fallback to gcloud
+        if explicit_service_credentials:
+            self.auth_error = str(sdk_error or "GCP SDK is required to validate service account credentials")
+            self._authenticated = False
+            return False
+
+        # Fallback to gcloud only when no service account file was supplied.
         try:
-            subprocess.run(
-                ["gcloud", "auth", "print-access-token"],
+            result = subprocess.run(
+                ["gcloud", "projects", "describe", self.project_id, "--format", "json"],
                 capture_output=True,
+                text=True,
                 check=True
             )
+            project = json.loads(result.stdout or "{}")
+            project_identity = project.get("name") or project.get("projectId")
+            self.auth_identity = {"project": project_identity} if project_identity else {}
+            self.auth_error = None
             self._authenticated = True
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc if not sdk_error else sdk_error)
             self._authenticated = False
 
         return self._authenticated

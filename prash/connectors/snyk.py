@@ -76,11 +76,22 @@ class SnykConnector(Connector):
 
     def authenticate(self) -> bool:
         if not self.api_token:
+            self.auth_error = "Snyk API token is required"
+            return False
+        if not self.org_id:
+            self.auth_error = "Snyk org ID is required"
             return False
         try:
-            self._request("GET", "/v1/user/me")
+            # Verify the token against Snyk's self endpoint, then inspect the
+            # configured org because /rest/self does not return an org name.
+            self._request("GET", "/rest/self?version=2024-10-15")
+            org = self._request("GET", f"/v1/org/{urllib.parse.quote(self.org_id)}")
+            self.auth_identity = {"org": org.get("name") or org.get("slug")} if (org.get("name") or org.get("slug")) else {}
+            self.auth_error = None
             return True
-        except SnykError:
+        except SnykError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

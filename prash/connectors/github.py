@@ -67,6 +67,7 @@ class GitHubConnector(Connector):
         }
         if self.token:
             self.headers["Authorization"] = f"Bearer {self.token}"
+        self._last_response_headers: Any = {}
 
     @staticmethod
     def _backoff_seconds(attempt: int, exc: urllib.error.HTTPError) -> float:
@@ -108,6 +109,7 @@ class GitHubConnector(Connector):
             req = urllib.request.Request(url, data=data, headers=self.headers, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=30) as resp:
+                    self._last_response_headers = getattr(resp, "headers", {})
                     raw = resp.read()
                     return json.loads(raw) if raw else {}
             except urllib.error.HTTPError as exc:
@@ -127,11 +129,21 @@ class GitHubConnector(Connector):
 
     def authenticate(self) -> bool:
         if not self.token:
+            self.auth_error = "GitHub token is required"
             return False
         try:
-            self._request("GET", "/user")
+            user = self._request("GET", "/user")
+            scope_header = self._last_response_headers.get("X-OAuth-Scopes", "")
+            scopes = [scope.strip() for scope in scope_header.split(",") if scope.strip()]
+            self.auth_identity = {"login": user.get("login")} if user.get("login") else {}
+            # Fine-grained/app tokens may omit this response header; do not fabricate scopes.
+            if scopes:
+                self.auth_identity["scopes"] = scopes
+            self.auth_error = None
             return True
-        except GitHubError:
+        except GitHubError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
             return False
 
     def locate(self, resource: str) -> Dict[str, Any]:

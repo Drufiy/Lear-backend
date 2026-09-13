@@ -42,6 +42,16 @@ def test_authenticate_sends_private_token_header(monkeypatch):
     assert gl.authenticate() is True
     assert calls[0].get_header("Private-token") == "glpat-secret"
     assert calls[0].full_url == "https://gitlab.com/api/v4/user"
+    assert gl.auth_identity == {"username": "aradhya", "instance": "https://gitlab.com"}
+    assert gl.auth_error is None
+
+
+def test_configured_base_url_drives_api_and_identity(monkeypatch):
+    calls = _capture_urlopen(monkeypatch, b'{"username":"self-hosted"}')
+    gl = GitLabConnector({"GITLAB_TOKEN": "glpat-test", "GITLAB_BASE_URL": "https://git.example.test/"})
+    assert gl.authenticate() is True
+    assert calls[0].full_url == "https://git.example.test/api/v4/user"
+    assert gl.auth_identity == {"username": "self-hosted", "instance": "https://git.example.test"}
 
 
 def test_authenticate_false_without_token():

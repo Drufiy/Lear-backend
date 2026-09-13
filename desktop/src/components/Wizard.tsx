@@ -1,6 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { Cloud, GitBranch, Activity, Shield, Layers, CheckCircle2, Loader2, ArrowRight, Sparkles } from 'lucide-react';
-import ConnectorForm, { ConnectorModel } from './ConnectorForm';
+import ConnectorForm, { type AuthField } from './ConnectorForm';
+
+interface Connector {
+  id: string;
+  name: string;
+  category: string;
+  icon: string;
+  color: string;
+  description: string;
+  status: 'configured' | 'unconfigured';
+  auth_fields: AuthField[];
+}
 
 const CATEGORY_META: Record<string, { label: string; icon: any }> = {
   infrastructure: { label: 'Infrastructure', icon: Cloud },
@@ -11,7 +22,7 @@ const CATEGORY_META: Record<string, { label: string; icon: any }> = {
 };
 
 export default function Wizard({ onComplete }: { onComplete: (config?: any) => void }) {
-  const [connectors, setConnectors] = useState<ConnectorModel[]>([]);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeCategory, setActiveCategory] = useState<string>('infrastructure');
   const [selectedConnectorId, setSelectedConnectorId] = useState<string>('aws');
@@ -20,7 +31,7 @@ export default function Wizard({ onComplete }: { onComplete: (config?: any) => v
     fetch('/api/connectors')
       .then(res => res.json())
       .then(data => {
-        const list: ConnectorModel[] = data.connectors || [];
+        const list: Connector[] = data.connectors || [];
         setConnectors(list);
         if (list.length > 0) {
           setSelectedConnectorId(list[0].id);
@@ -31,19 +42,15 @@ export default function Wizard({ onComplete }: { onComplete: (config?: any) => v
   }, []);
 
   const selectedConnector = connectors.find(c => c.id === selectedConnectorId);
-  const categories = Array.from(new Set(connectors.map(c => c.category || 'infrastructure')));
+  const categories = Array.from(new Set(connectors.map(c => c.category)));
 
-  const handleConnectSuccess = (connectorId: string) => {
-    setConnectors(prev =>
-      prev.map(c => (c.id === connectorId ? { ...c, status: 'configured' } : c))
-    );
-  };
-
-  const handleDisconnectSuccess = (connectorId: string) => {
-    setConnectors(prev =>
-      prev.map(c => (c.id === connectorId ? { ...c, status: 'unconfigured' } : c))
-    );
-  };
+  const handleConnectorStatus = useCallback((connectorId: string, status: string) => {
+    if (status !== 'CONNECTED' && status !== 'WATCHING' && status !== 'UNCONFIGURED') return;
+    const nextStatus = status === 'UNCONFIGURED' ? 'unconfigured' : 'configured';
+    setConnectors(previous => previous.map(connector => (
+      connector.id === connectorId && connector.status !== nextStatus ? { ...connector, status: nextStatus } : connector
+    )));
+  }, []);
 
   const handleFinish = async () => {
     try {
@@ -143,26 +150,46 @@ export default function Wizard({ onComplete }: { onComplete: (config?: any) => v
             </div>
           </div>
 
-          {/* Reusable Form Area */}
-          <div className="flex-1 space-y-4">
+          {/* Dynamic Form Area */}
+          <div className="flex-1 glass-card rounded-2xl p-8 flex flex-col justify-between">
             {selectedConnector ? (
-              <ConnectorForm
-                key={selectedConnector.id}
-                connector={selectedConnector}
-                onSuccess={handleConnectSuccess}
-                onDisconnect={handleDisconnectSuccess}
-              />
+              <div className="space-y-6">
+                <div className="flex items-center justify-between pb-4 border-b border-border-subtle">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="p-3 rounded-xl border border-white/10"
+                      style={{ backgroundColor: `${selectedConnector.color}20` }}
+                    >
+                      <Cloud size={24} style={{ color: selectedConnector.color }} />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-bold text-white">{selectedConnector.name}</h2>
+                      <p className="text-xs text-gray-400">{selectedConnector.description}</p>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                      selectedConnector.status === 'configured'
+                        ? 'bg-accent/15 text-accent border border-accent/30'
+                        : 'bg-surface text-gray-400 border border-border-subtle'
+                    }`}
+                  >
+                    {selectedConnector.status === 'configured' ? '● Configured' : '○ Not Configured'}
+                  </span>
+                </div>
+
+                <ConnectorForm connector={selectedConnector} onStatusChange={handleConnectorStatus} />
+              </div>
             ) : (
-              <div className="flex items-center justify-center py-20 text-gray-500 glass-card rounded-2xl">
+              <div className="flex items-center justify-center py-20 text-gray-500">
                 Select a service to configure credentials
               </div>
             )}
 
-            {/* Bottom Finish Bar */}
-            <div className="flex justify-end pt-2">
+            <div className="flex justify-end pt-6 border-t border-border-subtle mt-8">
               <button
                 onClick={handleFinish}
-                className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-accent hover:bg-accent-light text-gray-950 font-bold text-xs transition-all shadow-lg cursor-pointer"
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-semibold text-white transition-all cursor-pointer"
               >
                 <span>Continue to Dashboard</span>
                 <ArrowRight size={16} />
