@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 export interface WebSocketEvent {
+  id?: string;
   watch_id?: string;
   connector?: string;
   event_type: string;
   summary: string;
+  severity?: string;
   raw?: any;
   timestamp: string;
+  [key: string]: any;
 }
 
 export type ConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 'disconnected';

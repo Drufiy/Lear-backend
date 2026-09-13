@@ -830,5 +830,90 @@ def test_DASHBOARD_ACTIVITY_ENDPOINT(client):
     assert any(e["summary"] == "Instance status ok" for e in data["events"])
 
 
+def test_ACTIVITY_LOG_AGGREGATION_PAGINATION_AND_FILTERS(client, tmp_path, monkeypatch):
+    """Verifies that /api/activity aggregates events from memory and disk, with pagination and filters."""
+    from prash.server import _activity_log
+    from prash.audit import AuditLog
+    from prash.actions.contract import ActionResult, ActionResultStatus, RiskTier, Decision
+    from prash.permissions import PermissionMode
+
+    # Set up dedicated audit log
+    audit_file = tmp_path / "audit.log"
+    monkeypatch.setenv("PRASH_AUDIT_LOG_PATH", str(audit_file))
+    audit = AuditLog(path=audit_file)
+    audit.append(
+        action_id="aws-ec2-restart",
+        risk_tier=RiskTier.SAFE,
+        mode=PermissionMode.AUTO_SAFE,
+        decision=Decision.ALLOW,
+        result=ActionResult(status=ActionResultStatus.SUCCEEDED, summary="Restarted instance i-12345"),
+        extra={"service_context": {"connector_id": "aws"}},
+    )
+
+    # Ingest in-memory events
+    _activity_log.clear()
+    _activity_log.append({
+        "id": "act-live-1",
+        "connector": "github",
+        "event_type": "PUSH_EVENT",
+        "severity": "info",
+        "summary": "Pushed commit to main branch",
+        "timestamp": "2026-09-13T12:30:00Z",
+    })
+    _activity_log.append({
+        "id": "act-live-2",
+        "connector": "kubernetes",
+        "event_type": "POD_CRASH_LOOP",
+        "severity": "error",
+        "summary": "Pod api-gateway in CrashLoopBackOff",
+        "timestamp": "2026-09-13T12:35:00Z",
+    })
+
+    # 1. Test basic fetch: should include both in-memory and disk audit events
+    res = client.get("/api/activity")
+    assert res.status_code == 200
+    data = res.json()
+    assert "events" in data
+    assert "total" in data
+    assert data["total"] >= 3
+
+    # 2. Test pagination
+    res_page = client.get("/api/activity?limit=2&offset=0")
+    assert res_page.status_code == 200
+    p1 = res_page.json()
+    assert len(p1["events"]) == 2
+    assert p1["limit"] == 2
+    assert p1["offset"] == 0
+    assert p1["has_more"] is True
+
+    res_page2 = client.get("/api/activity?limit=2&offset=2")
+    assert res_page2.status_code == 200
+    p2 = res_page2.json()
+    assert len(p2["events"]) >= 1
+    assert p2["offset"] == 2
+
+    # 3. Test filter by connector
+    res_gh = client.get("/api/activity?connector=github")
+    assert res_gh.status_code == 200
+    gh_data = res_gh.json()
+    assert all(e["connector"] == "github" for e in gh_data["events"])
+    assert any(e["summary"] == "Pushed commit to main branch" for e in gh_data["events"])
+
+    # 4. Test filter by severity
+    res_err = client.get("/api/activity?severity=error")
+    assert res_err.status_code == 200
+    err_data = res_err.json()
+    assert all(e["severity"] == "error" for e in err_data["events"])
+    assert any("CrashLoopBackOff" in e["summary"] for e in err_data["events"])
+
+    # 5. Test search with q
+    res_search = client.get("/api/activity?q=CrashLoopBackOff")
+    assert res_search.status_code == 200
+    search_data = res_search.json()
+    assert len(search_data["events"]) == 1
+    assert search_data["events"][0]["connector"] == "kubernetes"
+
+
+
 
 

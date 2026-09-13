@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 13 — Activity & Event Log (`ActivityLog.tsx`, `prash/server.py`)**:
+  - *Dynamic Event Aggregation & Multi-Source Synthesis (`GET /api/activity`)*: Overhauled backend endpoint to aggregate recent in-memory operational events (`_activity_log`) with historical persistent records from disk (`AuditLog().read()`). Added automatic connector inference from action names, severity inference (`info`, `warning`, `error`), text search query `q`, and multi-dimensional filtering (`connector`, `event_type`, `severity`, `time_range`).
+  - *Pagination & Cursor Offsets*: Supported `limit` and `offset` pagination returning total matched event counts and a boolean `has_more` cursor flag for scalable audit trail exploration.
+  - *Eradication of Hardcoded Filter Buttons*: Eliminated static filter buttons (`['all', 'aws', 'github', 'datadog']`) in favor of dynamically loaded connectors from `/api/connectors` plus unique connectors extracted from incoming live stream events.
+  - *Event Grouping by Calendar Day*: Implemented intelligent day-based event grouping rendering clear timeline dividers for "TODAY", "YESTERDAY", and localized formatted dates.
+  - *Real-Time Filter Bar & Debounced Search*: Built dynamic dropdown filter controls for provider/service, event type, severity, and time range, alongside a 300ms debounced free-text search input with active search indicators and clear filters triggers.
+  - *Interactive Event Drawer & Copilot Routing*: Expanded event cards on click to inspect payload metadata, raw JSON diagnostics, and one-click contextual action links: "View in Dashboard" to navigate to service telemetry and "Investigate with Copilot" to trigger AI diagnostics with pre-scoped connector context.
+  - *Paginated Event Loading & WebSocket Merging*: Added "Load More Events" button showing progress (`Showing X of Y events`) with live WebSocket watcher event deduplication and real-time prepending.
 - **Desktop Feature 12 — Integrations Management Page (`Integrations.tsx`, `ConnectorForm.tsx`)**:
   - *Inline Expandable Card Connection Architecture*: Completely replaced modal popups and Wizard redirection (`setIsSetupComplete(false)`) with an inline card expansion flow (`expandedId` spanning full grid row width). Users can connect, reconfigure credentials, or cancel directly within the integrations catalog without losing context.
   - *Dynamic Connector Counts*: Eradicated static provider count string ("All 13 available providers") from the header subtitle, deriving dynamic provider count and active count directly from `connectors.length` and status metrics (`{configuredCount} / {connectors.length} Active`).

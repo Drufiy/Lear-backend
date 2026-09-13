@@ -985,19 +985,158 @@ def poll_active_watches():
     return {"events": all_events}
 
 
+def _infer_connector_from_action(action_id: Optional[str]) -> str:
+    if not action_id:
+        return "system"
+    act = str(action_id).lower()
+    for cid in (
+        "aws", "github", "kubernetes", "k8s", "vercel", "datadog",
+        "grafana", "snyk", "gitleaks", "terraform", "gitlab", "azure", "gcp", "pagerduty"
+    ):
+        if cid in act:
+            return "kubernetes" if cid == "k8s" else cid
+    return "system"
+
+
+def _infer_severity(ev: Dict[str, Any]) -> str:
+    if "severity" in ev and ev["severity"]:
+        return str(ev["severity"]).lower()
+    status = str(ev.get("status", "")).lower()
+    event_type = str(ev.get("event_type", "")).lower()
+    risk = str(ev.get("risk_tier", "")).lower()
+    if status in ("failed", "error") or "error" in event_type or "fail" in event_type:
+        return "error"
+    if status in ("degraded", "warning") or risk in ("destructive", "disruptive") or "warn" in event_type or "degrade" in event_type:
+        return "warning"
+    return "info"
+
+
 @app.get("/api/activity")
-def get_activity_log(q: Optional[str] = Query(None), connector: Optional[str] = Query(None)):
-    """Return historical events from the in-memory activity log."""
-    results = _activity_log
-    
+def get_activity_log(
+    q: Optional[str] = Query(None, description="Free text search query"),
+    connector: Optional[str] = Query(None, description="Filter by connector ID"),
+    event_type: Optional[str] = Query(None, alias="type", description="Filter by event type"),
+    severity: Optional[str] = Query(None, description="Filter by severity: info, warning, error"),
+    time_range: Optional[str] = Query(None, description="Time range: 1h, 24h, 7d, 30d, all"),
+    limit: int = Query(50, ge=1, le=500, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+):
+    """Return aggregated historical and live events across active watches and persistent audit log records.
+    Supports filtering, text search, and pagination.
+    """
+    all_events_map: Dict[str, Dict[str, Any]] = {}
+
+    # 1. Ingest live/in-memory events
+    for ev in _activity_log:
+        norm = dict(ev)
+        ev_id = str(norm.get("id") or f"{norm.get('watch_id', 'live')}_{norm.get('timestamp', '')}")
+        norm["id"] = ev_id
+        norm["severity"] = _infer_severity(norm)
+        norm["connector"] = str(norm.get("connector", "system"))
+        norm["event_type"] = str(norm.get("event_type", "event"))
+        norm["timestamp"] = norm.get("timestamp") or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        norm["summary"] = str(norm.get("summary") or norm.get("event_type", "System event"))
+        all_events_map[ev_id] = norm
+
+    # 2. Ingest disk-persisted audit log entries
+    try:
+        from prash.audit import AuditLog
+        audit = AuditLog()
+        for entry in audit.read(limit=500):
+            entry_id = str(entry.get("id") or entry.get("seq") or f"audit_{entry.get('ts')}")
+            # If already ingested via live activity log, keep the live one or merge
+            if entry_id not in all_events_map:
+                cid = entry.get("extra", {}).get("service_context", {}).get("connector_id") or _infer_connector_from_action(entry.get("action"))
+                sev = "error" if entry.get("status") == "failed" else ("warning" if entry.get("risk_tier") in ("destructive", "disruptive") else "info")
+                all_events_map[entry_id] = {
+                    "id": entry_id,
+                    "timestamp": entry.get("ts") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "connector": cid,
+                    "event_type": "ACTION_EXECUTED",
+                    "severity": sev,
+                    "summary": f"Executed action {entry.get('action')}: {entry.get('summary', 'Action completed')}",
+                    "details": entry,
+                    "action": entry.get("action"),
+                    "status": entry.get("status"),
+                }
+    except Exception as e:
+        logger.warning(f"Error loading disk audit log in get_activity_log: {e}")
+
+    # 3. Sort all events chronologically descending
+    results = list(all_events_map.values())
+    results.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+
+    # 4. Filter by connector
     if connector and connector.lower() != "all":
-        results = [ev for ev in results if ev.get("connector", "").lower() == connector.lower()]
-        
+        conn_lower = connector.lower()
+        results = [ev for ev in results if str(ev.get("connector", "")).lower() == conn_lower]
+
+    # 5. Filter by event type
+    if event_type and event_type.lower() != "all":
+        type_lower = event_type.lower()
+        results = [ev for ev in results if type_lower in str(ev.get("event_type", "")).lower()]
+
+    # 6. Filter by severity
+    if severity and severity.lower() != "all":
+        sev_lower = severity.lower()
+        results = [ev for ev in results if str(ev.get("severity", "")).lower() == sev_lower]
+
+    # 7. Filter by time range
+    if time_range and time_range.lower() != "all":
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        delta = None
+        tr = time_range.lower()
+        if tr == "1h":
+            delta = datetime.timedelta(hours=1)
+        elif tr == "24h":
+            delta = datetime.timedelta(hours=24)
+        elif tr == "7d":
+            delta = datetime.timedelta(days=7)
+        elif tr == "30d":
+            delta = datetime.timedelta(days=30)
+
+        if delta:
+            cutoff = now_dt - delta
+            filtered_tr = []
+            for ev in results:
+                ts_str = ev.get("timestamp") or ev.get("ts")
+                if ts_str:
+                    try:
+                        clean_ts = str(ts_str).replace("Z", "+00:00")
+                        ev_dt = datetime.datetime.fromisoformat(clean_ts)
+                        if ev_dt.tzinfo is None:
+                            ev_dt = ev_dt.replace(tzinfo=datetime.timezone.utc)
+                        if ev_dt >= cutoff:
+                            filtered_tr.append(ev)
+                    except Exception:
+                        filtered_tr.append(ev)
+                else:
+                    filtered_tr.append(ev)
+            results = filtered_tr
+
+    # 8. Text search
     if q:
         q_lower = q.lower()
-        results = [ev for ev in results if q_lower in ev.get("summary", "").lower() or q_lower in ev.get("event_type", "").lower()]
-        
-    return {"events": results}
+        results = [
+            ev for ev in results
+            if q_lower in str(ev.get("summary", "")).lower()
+            or q_lower in str(ev.get("event_type", "")).lower()
+            or q_lower in str(ev.get("connector", "")).lower()
+            or q_lower in str(ev.get("id", "")).lower()
+        ]
+
+    # 9. Pagination
+    total = len(results)
+    paged = results[offset : offset + limit]
+    has_more = (offset + len(paged)) < total
+
+    return {
+        "events": paged,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+    }
 
 
 @app.get("/api/dashboard/summary")
