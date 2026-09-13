@@ -9,7 +9,8 @@ import {
   Trash2,
   RotateCw,
   HelpCircle,
-  KeyRound
+  KeyRound,
+  Clock,
 } from 'lucide-react';
 import { useConnectorStatus } from '../hooks/useConnectorStatus';
 
@@ -34,6 +35,8 @@ export interface ConnectorModel {
   docs_url?: string;
   auth_fields: AuthField[];
   masked_credentials?: Record<string, string>;
+  last_verified?: string | null;
+  identity?: string | null;
 }
 
 interface ConnectorFormProps {
@@ -42,6 +45,17 @@ interface ConnectorFormProps {
   onCancel?: () => void;
   onDisconnect?: (connectorId: string) => void;
   inline?: boolean;
+}
+
+function formatTimestamp(isoString?: string | null): string {
+  if (!isoString) return 'Never';
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return isoString;
+  }
 }
 
 export const ConnectorForm: React.FC<ConnectorFormProps> = ({
@@ -55,6 +69,7 @@ export const ConnectorForm: React.FC<ConnectorFormProps> = ({
     status,
     identity,
     maskedCredentials,
+    lastVerified,
     loading,
     error,
     connect,
@@ -142,33 +157,41 @@ export const ConnectorForm: React.FC<ConnectorFormProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {isConfigured && (
-              <button
-                type="button"
-                onClick={() => checkHealth()}
-                className="p-2 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle text-gray-400 hover:text-white transition-colors cursor-pointer"
-                title="Verify connection liveness"
-              >
-                <RotateCw size={14} className={loading ? 'animate-spin text-accent' : ''} />
-              </button>
-            )}
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-2">
+              {isConfigured && (
+                <button
+                  type="button"
+                  onClick={() => checkHealth()}
+                  className="p-2 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle text-gray-400 hover:text-white transition-colors cursor-pointer"
+                  title="Verify connection liveness"
+                >
+                  <RotateCw size={14} className={loading ? 'animate-spin text-accent' : ''} />
+                </button>
+              )}
 
-            <span
-              className={`text-xs px-2.5 py-1 rounded-full font-medium border ${
-                status === 'connected'
-                  ? 'bg-accent/15 text-accent border-accent/30'
+              <span
+                className={`text-xs px-2.5 py-1 rounded-full font-medium border ${
+                  status === 'connected'
+                    ? 'bg-accent/15 text-accent border-accent/30'
+                    : status === 'expired'
+                    ? 'bg-amber-400/15 text-amber-400 border-amber-400/30'
+                    : 'bg-surface text-gray-400 border-border-subtle'
+                }`}
+              >
+                {status === 'connected'
+                  ? '● Connected'
                   : status === 'expired'
-                  ? 'bg-amber-400/15 text-amber-400 border-amber-400/30'
-                  : 'bg-surface text-gray-400 border-border-subtle'
-              }`}
-            >
-              {status === 'connected'
-                ? '● Connected'
-                : status === 'expired'
-                ? '▲ Expired'
-                : '○ Not Configured'}
-            </span>
+                  ? '▲ Expired'
+                  : '○ Not Configured'}
+              </span>
+            </div>
+            {(lastVerified || connector.last_verified) && (
+              <span className="text-[10px] text-gray-400 font-mono flex items-center gap-1">
+                <Clock size={10} className="text-accent" />
+                Verified: {formatTimestamp(lastVerified || connector.last_verified)}
+              </span>
+            )}
           </div>
         </div>
 

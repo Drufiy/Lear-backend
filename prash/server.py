@@ -350,11 +350,17 @@ async def _poll_watches_loop():
 # Connector Endpoints
 # ---------------------------------------------------------------------------
 
+_last_verified: Dict[str, str] = {}
+
+
 @app.get("/api/connectors")
 def list_connectors():
     """Returns all registered connectors with live configuration status."""
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
-    return {"connectors": registry_to_json(env_config)}
+    connectors = registry_to_json(env_config)
+    for c in connectors:
+        c["last_verified"] = _last_verified.get(c["id"])
+    return {"connectors": connectors}
 
 
 @app.get("/api/connectors/{connector_id}")
@@ -363,7 +369,9 @@ def get_connector_info(connector_id: str):
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
-    return connector_detail_to_json(connector_id, env_config)
+    info = connector_detail_to_json(connector_id, env_config)
+    info["last_verified"] = _last_verified.get(connector_id)
+    return info
 
 
 def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[str, str]) -> str:
@@ -462,10 +470,13 @@ def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)
             )
         entry = CONNECTOR_REGISTRY[connector_id]
         identity = _get_provider_identity(connector_id, connector, env_config)
+        now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _last_verified[connector_id] = now_ts
         return {
             "success": True,
             "message": f"{entry.name} authenticated successfully",
             "identity": identity,
+            "last_verified": now_ts,
         }
     except APIBridgeException:
         raise
@@ -502,8 +513,9 @@ def disconnect_connector(connector_id: str):
                 except Exception as e:
                     logger.warning(f"Error stopping watch {wid} on disconnect: {e}")
 
-    # 3. Clear cached connector instance
+    # 3. Clear cached connector instance and last verified timestamp
     clear_connector_cache(connector_id)
+    _last_verified.pop(connector_id, None)
 
     return {
         "success": True,
@@ -533,11 +545,14 @@ def validate_connector(connector_id: str):
         is_authenticated = connector.authenticate()
         if is_authenticated:
             identity = _get_provider_identity(connector_id, connector, env_config)
+            now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            _last_verified[connector_id] = now_ts
             return {
                 "valid": True,
                 "status": "connected",
                 "message": f"{entry.name} credentials are active",
                 "identity": identity,
+                "last_verified": now_ts,
             }
         else:
             return {

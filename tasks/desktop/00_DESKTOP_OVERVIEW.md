@@ -65,12 +65,12 @@
 | 09 | **Watcher Status & Live Monitoring** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/09_WATCHER_STATUS.md) | P0 |
 | 10 | **Per-Service AI Chatbox** | [`10_AI_CHATBOX.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/10_AI_CHATBOX.md) | P0 |
 | 11 | **Dashboard Overview** | [`11_DASHBOARD_OVERVIEW.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/11_DASHBOARD_OVERVIEW.md) | P1 |
+| 12 | **Integrations Management** | [`12_INTEGRATIONS_PAGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/12_INTEGRATIONS_PAGE.md) | P1 |
 
 ### 🟡 In Progress → `tasks/desktop/`
 
 | # | Feature | Spec File | Priority | Status |
 |---|---|---|---|---|
-| 12 | **Integrations Management** | [`12_INTEGRATIONS_PAGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/12_INTEGRATIONS_PAGE.md) | P1 | Mostly done, inline connect missing |
 | 13 | **Activity & Event Log** | [`13_ACTIVITY_LOG.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/13_ACTIVITY_LOG.md) | P1 | Basic list, hardcoded filters |
 | 14 | **Settings & Configuration** | [`14_SETTINGS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/14_SETTINGS.md) | P2 | UI exists, save is fake |
 | 16 | **AI Widget Generation** | [`16_AI_WIDGET_GENERATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/16_AI_WIDGET_GENERATION.md) | P1 | Button exists, generated config not rendered |

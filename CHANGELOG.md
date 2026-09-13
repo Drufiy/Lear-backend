@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 12 — Integrations Management Page (`Integrations.tsx`, `ConnectorForm.tsx`)**:
+  - *Inline Expandable Card Connection Architecture*: Completely replaced modal popups and Wizard redirection (`setIsSetupComplete(false)`) with an inline card expansion flow (`expandedId` spanning full grid row width). Users can connect, reconfigure credentials, or cancel directly within the integrations catalog without losing context.
+  - *Dynamic Connector Counts*: Eradicated static provider count string ("All 13 available providers") from the header subtitle, deriving dynamic provider count and active count directly from `connectors.length` and status metrics (`{configuredCount} / {connectors.length} Active`).
+  - *Manual Health Check Verification (`GET /api/connectors/{id}/validate`)*: Added a manual "Check" button on each configured card triggering live authentication verification against upstream provider APIs, displaying spinning feedback, updating status badges (`● Configured`, `▲ Expired`), and updating the last verified timestamp.
+  - *In-Memory Last Verified Timestamp Tracking (`_last_verified`)*: Enriched `prash/server.py` to maintain UTC ISO timestamps per connector upon validation or connection, exposing `last_verified` across `/api/connectors`, `/api/connectors/{id}`, `/connect`, and `/validate`. Displayed in both collapsed cards and `ConnectorForm` headers via formatted time strings ("Today at 5:30 PM", "Verified just now").
+  - *Inline Disconnection with Safe Confirmation (`POST /api/connectors/{id}/disconnect`)*: Added one-click inline confirmation dialogs to cards and form footers, clearing credentials from `.env`, halting active background watches, clearing cached instances, and resetting state to `unconfigured`.
+  - *Interactive Search & Filter Bar*: Added instant search filter (matching provider name, ID, category, or description) and status filter pills ("All", "Configured", "Unconfigured") with dynamic category headers and clean empty states.
 - **Desktop Feature 11 — Dashboard Overview & Mission Control Architecture (`Dashboard.tsx`)**:
   - *Backend Health Aggregation & 10s Caching (`GET /api/dashboard/summary`)*: Implemented an aggregate health summary endpoint calculating dynamic system health scores (0-100), overall infrastructure health status, project counts, active watches, and connector breakdowns with an in-memory 10s TTL cache to eliminate redundant polling.
   - *Cross-Service Activity Stream (`GET /api/dashboard/activity`)*: Added an endpoint returning cross-service recent events merged from active watches and audit log records.

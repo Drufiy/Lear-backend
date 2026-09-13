@@ -6,9 +6,10 @@ export interface UseConnectorStatusReturn {
   status: ConnectorConnectionStatus;
   identity: string | null;
   maskedCredentials: Record<string, string>;
+  lastVerified: string | null;
   loading: boolean;
   error: string | null;
-  connect: (credentials: Record<string, string>) => Promise<{ success: boolean; message: string; identity?: string }>;
+  connect: (credentials: Record<string, string>) => Promise<{ success: boolean; message: string; identity?: string; last_verified?: string }>;
   disconnect: () => Promise<{ success: boolean; message: string }>;
   checkHealth: () => Promise<void>;
 }
@@ -19,6 +20,7 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
   );
   const [identity, setIdentity] = useState<string | null>(null);
   const [maskedCredentials, setMaskedCredentials] = useState<Record<string, string>>({});
+  const [lastVerified, setLastVerified] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,6 +36,7 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
         if (data.status === 'connected') {
           setStatus('connected');
           setIdentity(data.identity || null);
+          setLastVerified(data.last_verified || new Date().toISOString());
           setError(null);
         } else if (data.status === 'expired') {
           setStatus('expired');
@@ -62,6 +65,12 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
             setStatus('connected');
           } else {
             setStatus('unconfigured');
+          }
+          if (data.identity) {
+            setIdentity(data.identity);
+          }
+          if (data.last_verified) {
+            setLastVerified(data.last_verified);
           }
           setMaskedCredentials(data.masked_credentials || {});
         }
@@ -101,15 +110,22 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
 
         const data = await res.json();
         if (res.ok && data.success) {
+          const verifiedAt = data.last_verified || new Date().toISOString();
           setStatus('connected');
           setIdentity(data.identity || null);
+          setLastVerified(verifiedAt);
           // Refresh masked credentials
           const resDetail = await fetch(`/api/connectors/${connectorId}`);
           if (resDetail.ok) {
             const detail = await resDetail.json();
             setMaskedCredentials(detail.masked_credentials || {});
           }
-          return { success: true, message: data.message || 'Connected successfully', identity: data.identity };
+          return {
+            success: true,
+            message: data.message || 'Connected successfully',
+            identity: data.identity,
+            last_verified: verifiedAt,
+          };
         } else {
           setStatus('error');
           const errMsg = typeof data.message === 'string' && data.message
@@ -148,6 +164,7 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
         setStatus('unconfigured');
         setIdentity(null);
         setMaskedCredentials({});
+        setLastVerified(null);
         return { success: true, message: data.message || 'Disconnected successfully' };
       } else {
         const errMsg = typeof data.message === 'string' && data.message
@@ -173,6 +190,7 @@ export function useConnectorStatus(connectorId: string, initialStatus?: string):
     status,
     identity,
     maskedCredentials,
+    lastVerified,
     loading,
     error,
     connect,

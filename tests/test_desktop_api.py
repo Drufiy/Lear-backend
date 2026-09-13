@@ -443,6 +443,8 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     assert data_conn["success"] is True
     assert "identity" in data_conn
     assert "AWS" in data_conn["identity"]
+    assert "last_verified" in data_conn
+    assert data_conn["last_verified"] is not None
 
     # 3. Verify masked credentials are returned, not raw secrets
     res_detail = client.get("/api/connectors/aws")
@@ -450,6 +452,8 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     detail_data = res_detail.json()
     assert detail_data["status"] == "configured"
     assert "masked_credentials" in detail_data
+    assert "last_verified" in detail_data
+    assert detail_data["last_verified"] is not None
     masked_key = detail_data["masked_credentials"]["AWS_ACCESS_KEY_ID"]
     assert masked_key.startswith("AKI")
     assert masked_key.endswith("PLE")
@@ -460,6 +464,7 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     assert res_val.status_code == 200
     assert res_val.json()["valid"] is True
     assert res_val.json()["status"] == "connected"
+    assert res_val.json()["last_verified"] is not None
 
     # 5. When auth fails (e.g. expired)
     mock_conn.authenticate.return_value = False
@@ -477,7 +482,61 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     res_unconf = client.get("/api/connectors/aws")
     assert res_unconf.status_code == 200
     assert res_unconf.json()["status"] == "unconfigured"
+    assert res_unconf.json()["last_verified"] is None
     assert len(res_unconf.json()["masked_credentials"]) == 0
+
+
+def test_integrations_management_and_last_verified(client, monkeypatch, tmp_path):
+    """Verifies that connector listing, connection, validation, and disconnection properly maintain last_verified timestamps."""
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("")
+    monkeypatch.setattr("prash.server.ENV_PATH", str(mock_env))
+
+    # 1. Initial list returns all connectors with last_verified key
+    res_list = client.get("/api/connectors")
+    assert res_list.status_code == 200
+    connectors = res_list.json()["connectors"]
+    assert len(connectors) > 0
+    for c in connectors:
+        assert "last_verified" in c
+        assert "status" in c
+        assert "auth_fields" in c
+
+    # 2. Connect mock connector
+    mock_conn = MagicMock()
+    mock_conn.authenticate.return_value = True
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    res_connect = client.post("/api/connectors/github/connect", json={
+        "GITHUB_TOKEN": "ghp_mockSecretTokenForTesting12345",
+        "GITHUB_REPO": "testorg/testrepo"
+    })
+    assert res_connect.status_code == 200
+    data_conn = res_connect.json()
+    assert data_conn["success"] is True
+    assert data_conn["last_verified"] is not None
+
+    # Verify /api/connectors list reflects last_verified for github
+    res_list2 = client.get("/api/connectors")
+    assert res_list2.status_code == 200
+    gh = next(c for c in res_list2.json()["connectors"] if c["id"] == "github")
+    assert gh["status"] == "configured"
+    assert gh["last_verified"] is not None
+
+    # 3. Manual validation updates last_verified
+    res_val = client.get("/api/connectors/github/validate")
+    assert res_val.status_code == 200
+    assert res_val.json()["valid"] is True
+    assert res_val.json()["last_verified"] is not None
+
+    # 4. Disconnect clears last_verified
+    res_disc = client.post("/api/connectors/github/disconnect")
+    assert res_disc.status_code == 200
+
+    res_list3 = client.get("/api/connectors")
+    gh_after = next(c for c in res_list3.json()["connectors"] if c["id"] == "github")
+    assert gh_after["status"] == "unconfigured"
+    assert gh_after["last_verified"] is None
 
 
 def test_WATCH_LIFECYCLE_AND_CONTROLS(client, monkeypatch, tmp_path):
