@@ -273,7 +273,7 @@ def run_watchhandle_loop(
     console whose codepage can't render the alert) warns and moves on for the
     same reason. max_iterations is None for the real `prash watch` command
     (runs until Ctrl+C); set to a small int in tests."""
-    interval = interval or _interval_from_env()
+    interval = _interval_from_env() if interval is None else interval
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
         for handle in handles:

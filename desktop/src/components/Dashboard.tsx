@@ -24,9 +24,12 @@ export default function Dashboard({
     isConnected,
     watcherState,
     activeWatches,
+    activeWatchDetails,
     events,
     startWatch,
     stopWatch,
+    pauseWatch,
+    resumeWatch,
   } = useWatcher();
 
   // Extract services for the active environment
@@ -141,7 +144,11 @@ export default function Dashboard({
         activeCount={activeWatches.length}
         eventCount={events.length}
         isConnected={isConnected}
+        activeDetails={activeWatchDetails}
         onToggleWatch={handleToggleWatchAll}
+        onPauseWatch={pauseWatch}
+        onResumeWatch={resumeWatch}
+        onStopWatch={stopWatch}
       />
 
       {/* 2. Services Metric Widgets */}

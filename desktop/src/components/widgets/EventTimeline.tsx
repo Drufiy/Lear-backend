@@ -7,6 +7,7 @@ export interface TimelineEvent {
   event_type: string;
   summary: string;
   severity?: 'info' | 'warning' | 'error' | 'success';
+  raw?: any;
 }
 
 interface EventTimelineProps {

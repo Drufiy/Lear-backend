@@ -62,12 +62,12 @@
 | 06 | **Sidebar & Navigation** | [`06_SIDEBAR_NAVIGATION.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/06_SIDEBAR_NAVIGATION.md) | P0 |
 | 07 | **Project System** | [`07_PROJECT_SYSTEM.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/07_PROJECT_SYSTEM.md) | P0 |
 | 08 | **Dynamic Metric Widgets** | [`08_METRIC_WIDGETS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/08_METRIC_WIDGETS.md) | P0 |
+| 09 | **Watcher Status & Live Monitoring** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/completed/09_WATCHER_STATUS.md) | P0 |
 
 ### 🟡 In Progress → `tasks/desktop/`
 
 | # | Feature | Spec File | Priority | Status |
 |---|---|---|---|---|
-| 09 | **Watcher Status** | [`09_WATCHER_STATUS.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/09_WATCHER_STATUS.md) | P0 | Hooks + panel exist, integration gaps |
 | 10 | **Per-Service AI Chatbox** | [`10_AI_CHATBOX.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/10_AI_CHATBOX.md) | P0 | Chat works, execute is fake, greeting hardcoded |
 | 11 | **Dashboard Overview** | [`11_DASHBOARD_OVERVIEW.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/11_DASHBOARD_OVERVIEW.md) | P1 | Basic view, missing "mission control" layout |
 | 12 | **Integrations Management** | [`12_INTEGRATIONS_PAGE.md`](file:///c:/Users/anant/Downloads/Lear-Backend/Lear-Backend/tasks/desktop/12_INTEGRATIONS_PAGE.md) | P1 | Mostly done, inline connect missing |
@@ -125,7 +125,7 @@ Phase 2 — Core Experience (IN PROGRESS)
   04_ONBOARDING_WIZARD ✅ → 05_SERVICE_CONNECTIONS 🟡 → 06_SIDEBAR_NAVIGATION ✅
 
 Phase 3 — The Demo (IN PROGRESS)
-  07_PROJECT_SYSTEM ✅ → 08_METRIC_WIDGETS 🟡 → 09_WATCHER_STATUS 🟡 → 10_AI_CHATBOX 🟡
+  07_PROJECT_SYSTEM ✅ → 08_METRIC_WIDGETS ✅ → 09_WATCHER_STATUS ✅ → 10_AI_CHATBOX 🟡
 
 Phase 4 — Polish (IN PROGRESS)
   11_DASHBOARD_OVERVIEW 🟡 → 12_INTEGRATIONS_PAGE 🟡 → 13_ACTIVITY_LOG 🟡 → 14_SETTINGS 🟡 → 15_NOTIFICATIONS 🟡 → 16_AI_WIDGET_GENERATION 🟡

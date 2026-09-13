@@ -41,8 +41,67 @@ YAML_PATH = os.path.join(os.path.dirname(__file__), "..", "prash.yaml")
 
 dotenv.load_dotenv(ENV_PATH, override=True)
 
-# In-memory watch handles and active websocket clients
+def _read_prash_yaml() -> Dict[str, Any]:
+    if not os.path.exists(YAML_PATH):
+        return {"projects": [], "active_watches": []}
+    try:
+        with open(YAML_PATH, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+            if isinstance(data, dict):
+                if "projects" not in data:
+                    data["projects"] = []
+                if "active_watches" not in data:
+                    data["active_watches"] = []
+                return data
+            return {"projects": [], "active_watches": []}
+    except Exception as e:
+        logger.error(f"Error reading prash.yaml: {e}")
+        return {"projects": [], "active_watches": []}
+
+
+def _write_prash_yaml(data: Dict[str, Any]) -> None:
+    with open(YAML_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f)
+
+
+def _persist_watch_to_yaml(connector_id: str, target: str, interval: int):
+    try:
+        data = _read_prash_yaml()
+        watches = data.get("active_watches", [])
+        if not isinstance(watches, list):
+            watches = []
+        wid = f"{connector_id}:{target}"
+        watches = [w for w in watches if isinstance(w, dict) and w.get("watch_id") != wid]
+        watches.append({
+            "watch_id": wid,
+            "connector": connector_id,
+            "target": target,
+            "interval": interval,
+        })
+        data["active_watches"] = watches
+        _write_prash_yaml(data)
+    except Exception as e:
+        logger.warning(f"Error persisting watch to prash.yaml: {e}")
+
+
+def _remove_watch_from_yaml(watch_id: str):
+    try:
+        data = _read_prash_yaml()
+        watches = data.get("active_watches", [])
+        if not isinstance(watches, list):
+            return
+        new_watches = [w for w in watches if isinstance(w, dict) and w.get("watch_id") != watch_id]
+        if len(new_watches) != len(watches):
+            data["active_watches"] = new_watches
+            _write_prash_yaml(data)
+    except Exception as e:
+        logger.warning(f"Error removing watch from prash.yaml: {e}")
+
+
+# In-memory watch handles, metadata, paused state, and active websocket clients
 _active_watches: Dict[str, WatchHandle] = {}
+_watch_metadata: Dict[str, Dict[str, Any]] = {}
+_paused_watches: Set[str] = set()
 _ws_clients: Set[WebSocket] = set()
 _ws_polling_task: Optional[asyncio.Task] = None
 _notifications: List[Dict[str, Any]] = []
@@ -54,16 +113,22 @@ _activity_log: List[Dict[str, Any]] = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _ws_polling_task
+    try:
+        _restore_persisted_watches()
+    except Exception as e:
+        logger.warning(f"Error restoring persisted watches on startup: {e}")
     _ws_polling_task = asyncio.create_task(_poll_watches_loop())
     yield
     if _ws_polling_task:
         _ws_polling_task.cancel()
-    for handle in _active_watches.values():
+    for handle in list(_active_watches.values()):
         try:
             handle.stop()
         except Exception:
             pass
     _active_watches.clear()
+    _watch_metadata.clear()
+    _paused_watches.clear()
 
 
 app = FastAPI(title="Prash Desktop API", version="2.0.0", lifespan=lifespan)
@@ -169,24 +234,53 @@ async def save_settings(settings: SettingsModel):
 # ---------------------------------------------------------------------------
 
 async def _poll_watches_loop():
-    """Polls active watch handles and pushes real events to connected clients."""
+    """Polls active watch handles according to per-handle interval cadence and pushes real events."""
     while True:
         try:
-            await asyncio.sleep(2)
-            if not _ws_clients or not _active_watches:
+            await asyncio.sleep(1)
+            if not _active_watches:
                 continue
 
+            now = time.time()
             events_to_broadcast: List[Dict[str, Any]] = []
+
             for watch_id, handle in list(_active_watches.items()):
+                if watch_id in _paused_watches:
+                    continue
+
+                meta = _watch_metadata.get(watch_id, {})
+                interval = meta.get("interval", getattr(handle, "interval", 5))
+                last_poll = meta.get("last_poll_time", 0.0)
+
+                # Honor per-handle interval
+                if now - last_poll < interval:
+                    continue
+
+                meta["last_poll_time"] = now
+
                 try:
                     new_events = handle.poll()
+                    # If recovered from failure, restore healthy status
+                    if meta.get("consecutive_failures", 0) > 0:
+                        meta["consecutive_failures"] = 0
+                        meta["status"] = "healthy"
+                        meta["last_error"] = None
+                        events_to_broadcast.append({
+                            "watch_id": watch_id,
+                            "connector": meta.get("connector", getattr(handle, "connector", "unknown")),
+                            "event_type": "watch_recovered",
+                            "summary": f"Watch connection recovered for {watch_id}",
+                            "raw": {"status": "healthy"},
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        })
+
                     for ev in new_events:
                         ts = ev.get("timestamp")
                         ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
                         
                         event_payload = {
                             "watch_id": watch_id,
-                            "connector": ev.get("connector"),
+                            "connector": ev.get("connector", meta.get("connector")),
                             "event_type": ev.get("event_type"),
                             "summary": ev.get("summary"),
                             "raw": ev.get("raw", {}),
@@ -200,11 +294,27 @@ async def _poll_watches_loop():
                             _activity_log.pop()
                 except Exception as e:
                     logger.error(f"Error polling watch {watch_id}: {e}")
+                    fails = meta.get("consecutive_failures", 0) + 1
+                    meta["consecutive_failures"] = fails
+                    meta["last_error"] = str(e)
+                    prev_status = meta.get("status", "healthy")
+                    new_status = "error" if fails >= 3 else "degraded"
+                    meta["status"] = new_status
+
+                    if prev_status != new_status:
+                        events_to_broadcast.append({
+                            "watch_id": watch_id,
+                            "connector": meta.get("connector", getattr(handle, "connector", "unknown")),
+                            "event_type": f"watch_{new_status}",
+                            "summary": f"Watch {watch_id} {new_status}: {str(e)}",
+                            "raw": {"status": new_status, "error": str(e), "failures": fails},
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        })
 
             if events_to_broadcast:
                 for item in events_to_broadcast:
                     etype = (item.get("event_type") or "").lower()
-                    sev = "error" if "fail" in etype or "error" in etype or "crash" in etype else ("warning" if "spike" in etype or "alarm" in etype or "warn" in etype else "info")
+                    sev = "error" if "fail" in etype or "error" in etype or "crash" in etype else ("warning" if "spike" in etype or "alarm" in etype or "warn" in etype or "degraded" in etype else "info")
                     _notifications.insert(0, {
                         "id": f"notif_{int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)}_{item.get('connector')}",
                         "title": item.get("summary") or f"{item.get('connector')} update",
@@ -500,11 +610,7 @@ def get_connector_metrics(
             except Exception:
                 pass
 
-        events = []
-        try:
-            events = connector.get_stats(target=target)
-        except Exception:
-            events = []
+        events = connector.get_stats(target=target)
 
         # Normalize metrics from real events
         normalized_metrics = []
@@ -685,14 +791,9 @@ def get_connector_resources(connector_id: str):
 # Watch System
 # ---------------------------------------------------------------------------
 
-@app.post("/api/connectors/{connector_id}/watch")
-def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
-    """Start watching a resource via the connector's watch() handle."""
+def _start_watch_internal(connector_id: str, target: str, interval: int = 5, persist: bool = True) -> Dict[str, Any]:
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
-
-    target = body.get("target")
-    interval = body.get("interval", 5) # Default 5s if not provided
 
     if not target:
         raise APIBridgeException("BAD_REQUEST", "Field 'target' is required", 400)
@@ -705,29 +806,136 @@ def start_watch(connector_id: str, body: Dict[str, str] = Body(...)):
     connector = get_connector(connector_id, env_config)
 
     try:
-        handle = connector.watch(target)
+        import inspect
+        sig = inspect.signature(connector.watch)
+        if "interval" in sig.parameters:
+            handle = connector.watch(target, interval=interval)
+        else:
+            handle = connector.watch(target)
+
+        # Adapt iterator or generator if connector.watch() yields directly
+        if not isinstance(handle, WatchHandle):
+            class _WatchHandleAdapter(WatchHandle):
+                def __init__(self, raw_handle, conn_name: str, tgt: str, poll_int: int):
+                    self.raw = raw_handle
+                    self.connector = conn_name
+                    self.target = tgt
+                    self.interval = poll_int
+                    self._active = True
+                def poll(self):
+                    if not self._active:
+                        return []
+                    if hasattr(self.raw, "poll"):
+                        return self.raw.poll()
+                    return []
+                def stop(self):
+                    self._active = False
+                    if hasattr(self.raw, "stop"):
+                        self.raw.stop()
+            handle = _WatchHandleAdapter(handle, connector_id, target, interval)
+
         _active_watches[watch_id] = handle
-        return {"watch_id": watch_id, "target": target}
+        _watch_metadata[watch_id] = {
+            "connector": connector_id,
+            "target": target,
+            "interval": max(1, interval),
+            "last_poll_time": 0.0,
+            "status": "healthy",
+            "consecutive_failures": 0,
+            "last_error": None,
+            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        _paused_watches.discard(watch_id)
+
+        if persist:
+            _persist_watch_to_yaml(connector_id, target, interval)
+
+        return {"watch_id": watch_id, "target": target, "status": "active", "interval": interval}
     except NotImplementedError:
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Watch not supported by {connector_id}", 400)
     except Exception as e:
         raise APIBridgeException("CONNECTOR_API_ERROR", f"Failed to start watch: {str(e)}", 500)
 
 
-@app.delete("/api/connectors/{connector_id}/watch")
-def stop_watch(connector_id: str, target: Optional[str] = Query(None), watch_id: Optional[str] = Query(None)):
-    """Stop an active watch handle."""
+def _stop_watch_internal(connector_id: str, target: Optional[str] = None, watch_id: Optional[str] = None, persist: bool = True) -> bool:
     wid = watch_id or (f"{connector_id}:{target}" if target else None)
     if not wid or wid not in _active_watches:
         raise APIBridgeException("RESOURCE_NOT_FOUND", f"No active watch found for {wid}", 404)
 
-    handle = _active_watches.pop(wid)
-    try:
-        handle.stop()
-    except Exception as e:
-        logger.warning(f"Error stopping watch handle {wid}: {e}")
+    handle = _active_watches.pop(wid, None)
+    _watch_metadata.pop(wid, None)
+    _paused_watches.discard(wid)
 
+    if handle:
+        try:
+            handle.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping watch handle {wid}: {e}")
+
+    if persist:
+        _remove_watch_from_yaml(wid)
+
+    return True
+
+
+def _restore_persisted_watches():
+    try:
+        data = _read_prash_yaml()
+        watches = data.get("active_watches", [])
+        if not isinstance(watches, list):
+            return
+        for item in watches:
+            if not isinstance(item, dict):
+                continue
+            cid = item.get("connector")
+            target = item.get("target")
+            interval = item.get("interval", 5)
+            if cid and target:
+                try:
+                    _start_watch_internal(cid, target, interval=interval, persist=False)
+                except Exception as e:
+                    logger.debug(f"Could not restore watch {cid}:{target}: {e}")
+    except Exception as e:
+        logger.warning(f"Error restoring watches from prash.yaml: {e}")
+
+
+@app.post("/api/connectors/{connector_id}/watch")
+def start_watch(connector_id: str, body: Dict[str, Any] = Body(...)):
+    """Start watching a resource via the connector's watch() handle."""
+    target = body.get("target")
+    interval = int(body.get("interval", 5))
+    return _start_watch_internal(connector_id, target, interval=interval, persist=True)
+
+
+@app.delete("/api/connectors/{connector_id}/watch")
+def stop_watch(connector_id: str, target: Optional[str] = Query(None), watch_id: Optional[str] = Query(None)):
+    """Stop an active watch handle."""
+    _stop_watch_internal(connector_id, target=target, watch_id=watch_id, persist=True)
     return {"success": True}
+
+
+@app.post("/api/connectors/{connector_id}/watch/pause")
+def pause_watch(connector_id: str, body: Dict[str, Any] = Body(...)):
+    """Pause an active watch handle without destroying it."""
+    wid = body.get("watch_id") or (f"{connector_id}:{body.get('target')}" if body.get("target") else None)
+    if not wid or wid not in _active_watches:
+        raise APIBridgeException("RESOURCE_NOT_FOUND", f"No active watch found for {wid}", 404)
+    _paused_watches.add(wid)
+    if wid in _watch_metadata:
+        _watch_metadata[wid]["status"] = "paused"
+    return {"success": True, "watch_id": wid, "status": "paused"}
+
+
+@app.post("/api/connectors/{connector_id}/watch/resume")
+def resume_watch(connector_id: str, body: Dict[str, Any] = Body(...)):
+    """Resume a paused watch handle."""
+    wid = body.get("watch_id") or (f"{connector_id}:{body.get('target')}" if body.get("target") else None)
+    if not wid or wid not in _active_watches:
+        raise APIBridgeException("RESOURCE_NOT_FOUND", f"No active watch found for {wid}", 404)
+    _paused_watches.discard(wid)
+    if wid in _watch_metadata:
+        _watch_metadata[wid]["status"] = "healthy"
+    return {"success": True, "watch_id": wid, "status": "active"}
 
 
 @app.get("/api/watch/poll")
@@ -735,6 +943,8 @@ def poll_active_watches():
     """Polls all active watch handles for new events. Returns empty if idle."""
     all_events: List[Dict[str, Any]] = []
     for watch_id, handle in list(_active_watches.items()):
+        if watch_id in _paused_watches:
+            continue
         try:
             events = handle.poll()
             for ev in events:
@@ -768,18 +978,27 @@ def get_activity_log(q: Optional[str] = Query(None), connector: Optional[str] = 
         
     return {"events": results}
 
+
 @app.get("/api/watch/active")
 def get_active_watches():
-    """Returns list of currently active watch handles with target and connector metadata."""
+    """Returns list of currently active watch handles with target, connector, interval, and health status."""
     watches = []
     for wid, handle in list(_active_watches.items()):
-        connector_id = getattr(handle, "connector", wid.split(":")[0] if ":" in wid else "unknown")
-        target = getattr(handle, "target", wid.split(":", 1)[1] if ":" in wid else wid)
+        meta = _watch_metadata.get(wid, {})
+        connector_id = meta.get("connector") or getattr(handle, "connector", wid.split(":")[0] if ":" in wid else "unknown")
+        target = meta.get("target") or getattr(handle, "target", wid.split(":", 1)[1] if ":" in wid else wid)
+        interval = meta.get("interval") or getattr(handle, "interval", 5)
+        status = "paused" if wid in _paused_watches else meta.get("status", "healthy")
+
         watches.append({
             "watch_id": wid,
             "connector": connector_id,
             "target": target,
-            "status": "healthy",
+            "interval": interval,
+            "status": status,
+            "consecutive_failures": meta.get("consecutive_failures", 0),
+            "last_error": meta.get("last_error"),
+            "started_at": meta.get("started_at"),
         })
     return {"watches": watches, "count": len(watches)}
 
@@ -792,13 +1011,60 @@ def get_system_version():
 
 @app.websocket("/ws/events")
 async def websocket_events_endpoint(websocket: WebSocket):
-    """Real-time event stream broadcasting watch events."""
+    """Real-time event stream broadcasting watch events and handling client control messages."""
     await websocket.accept()
     _ws_clients.add(websocket)
     try:
         while True:
-            # Keep connection open and await any client pings
-            await websocket.receive_text()
+            text = await websocket.receive_text()
+            if not text:
+                continue
+            try:
+                msg = json.loads(text)
+                action = msg.get("action") or msg.get("type")
+                if action == "ping":
+                    await websocket.send_text(json.dumps({
+                        "type": "pong",
+                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    }))
+                elif action == "pause":
+                    wid = msg.get("watch_id")
+                    if wid and wid in _active_watches:
+                        _paused_watches.add(wid)
+                        if wid in _watch_metadata:
+                            _watch_metadata[wid]["status"] = "paused"
+                        await websocket.send_text(json.dumps({
+                            "type": "control_ack",
+                            "action": "pause",
+                            "watch_id": wid,
+                            "success": True,
+                        }))
+                elif action == "resume":
+                    wid = msg.get("watch_id")
+                    if wid and wid in _active_watches:
+                        _paused_watches.discard(wid)
+                        if wid in _watch_metadata:
+                            _watch_metadata[wid]["status"] = "healthy"
+                        await websocket.send_text(json.dumps({
+                            "type": "control_ack",
+                            "action": "resume",
+                            "watch_id": wid,
+                            "success": True,
+                        }))
+                elif action == "stop":
+                    wid = msg.get("watch_id")
+                    cid = msg.get("connector_id") or (wid.split(":", 1)[0] if wid and ":" in wid else "")
+                    target = msg.get("target") or (wid.split(":", 1)[1] if wid and ":" in wid else "")
+                    if wid and wid in _active_watches:
+                        _stop_watch_internal(cid, target=target, watch_id=wid)
+                        await websocket.send_text(json.dumps({
+                            "type": "control_ack",
+                            "action": "stop",
+                            "watch_id": wid,
+                            "success": True,
+                        }))
+            except Exception as e:
+                logger.debug(f"Non-JSON or unhandled WS message: {e}")
     except WebSocketDisconnect:
         _ws_clients.discard(websocket)
     except Exception:
@@ -808,22 +1074,6 @@ async def websocket_events_endpoint(websocket: WebSocket):
 # ---------------------------------------------------------------------------
 # Project System (prash.yaml CRUD)
 # ---------------------------------------------------------------------------
-
-def _read_prash_yaml() -> Dict[str, Any]:
-    if not os.path.exists(YAML_PATH):
-        return {"projects": []}
-    try:
-        with open(YAML_PATH, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-            return data if isinstance(data, dict) and "projects" in data else {"projects": []}
-    except Exception as e:
-        logger.error(f"Error reading prash.yaml: {e}")
-        return {"projects": []}
-
-
-def _write_prash_yaml(data: Dict[str, Any]) -> None:
-    with open(YAML_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f)
 
 
 @app.get("/api/projects")

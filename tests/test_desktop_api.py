@@ -479,3 +479,110 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     assert res_unconf.json()["status"] == "unconfigured"
     assert len(res_unconf.json()["masked_credentials"]) == 0
 
+
+def test_WATCH_LIFECYCLE_AND_CONTROLS(client, monkeypatch, tmp_path):
+    """Validates complete watch lifecycle: start with interval, active list, pause, resume, and stop."""
+    mock_yaml = tmp_path / "prash.yaml"
+    monkeypatch.setattr("prash.server.YAML_PATH", str(mock_yaml))
+
+    mock_conn = MagicMock()
+    mock_handle = MagicMock()
+    mock_handle.connector = "aws"
+    mock_handle.target = "i-testpod"
+    mock_handle.interval = 15
+    mock_handle.poll.return_value = [
+        {
+            "connector": "aws",
+            "event_type": "cpu_spike",
+            "summary": "CPU reached 95%",
+            "raw": {"value": 95},
+            "timestamp": "2026-09-13T12:00:00Z",
+        }
+    ]
+    mock_conn.watch.return_value = mock_handle
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    # 1. Start Watch
+    res_start = client.post("/api/connectors/aws/watch", json={"target": "i-testpod", "interval": 15})
+    assert res_start.status_code == 200
+    data_start = res_start.json()
+    assert data_start["watch_id"] == "aws:i-testpod"
+    assert data_start["status"] == "active"
+    assert data_start["interval"] == 15
+
+    # 2. Inspect Active Watches
+    res_active = client.get("/api/watch/active")
+    assert res_active.status_code == 200
+    data_active = res_active.json()
+    assert data_active["count"] == 1
+    watch_entry = data_active["watches"][0]
+    assert watch_entry["watch_id"] == "aws:i-testpod"
+    assert watch_entry["interval"] == 15
+    assert watch_entry["status"] == "healthy"
+
+    # 3. Poll active watches returns events
+    res_poll = client.get("/api/watch/poll")
+    assert res_poll.status_code == 200
+    poll_data = res_poll.json()
+    assert len(poll_data["events"]) == 1
+    assert poll_data["events"][0]["event_type"] == "cpu_spike"
+
+    # 4. Duplicate start returns 409 Conflict
+    res_dup = client.post("/api/connectors/aws/watch", json={"target": "i-testpod"})
+    assert res_dup.status_code == 409
+    assert res_dup.json()["code"] == "WATCH_ALREADY_ACTIVE"
+
+    # 5. Pause Watch
+    res_pause = client.post("/api/connectors/aws/watch/pause", json={"watch_id": "aws:i-testpod"})
+    assert res_pause.status_code == 200
+    assert res_pause.json()["status"] == "paused"
+
+    res_active2 = client.get("/api/watch/active")
+    assert res_active2.json()["watches"][0]["status"] == "paused"
+
+    # 6. Resume Watch
+    res_resume = client.post("/api/connectors/aws/watch/resume", json={"watch_id": "aws:i-testpod"})
+    assert res_resume.status_code == 200
+    assert res_resume.json()["status"] == "active"
+
+    # 7. Stop Watch
+    res_stop = client.delete("/api/connectors/aws/watch?watch_id=aws:i-testpod")
+    assert res_stop.status_code == 200
+    assert res_stop.json()["success"] is True
+
+    # 8. Active watches now empty
+    res_empty = client.get("/api/watch/active")
+    assert res_empty.json()["count"] == 0
+
+
+def test_WATCH_YAML_PERSISTENCE(client, monkeypatch, tmp_path):
+    """Verifies that started watches are persisted to prash.yaml and removed on stop."""
+    mock_yaml = tmp_path / "prash.yaml"
+    monkeypatch.setattr("prash.server.YAML_PATH", str(mock_yaml))
+
+    mock_conn = MagicMock()
+    mock_handle = MagicMock()
+    mock_handle.connector = "github"
+    mock_handle.target = "main-repo"
+    mock_handle.interval = 5
+    mock_conn.watch.return_value = mock_handle
+    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+
+    # Start watch
+    client.post("/api/connectors/github/watch", json={"target": "main-repo", "interval": 5})
+
+    # Read yaml directly
+    import yaml
+    with open(mock_yaml, "r", encoding="utf-8") as f:
+        yaml_content = yaml.safe_load(f)
+    assert "active_watches" in yaml_content
+    assert len(yaml_content["active_watches"]) == 1
+    assert yaml_content["active_watches"][0]["watch_id"] == "github:main-repo"
+
+    # Stop watch
+    client.delete("/api/connectors/github/watch?target=main-repo")
+    with open(mock_yaml, "r", encoding="utf-8") as f:
+        yaml_content2 = yaml.safe_load(f)
+    assert len(yaml_content2.get("active_watches", [])) == 0
+
+
