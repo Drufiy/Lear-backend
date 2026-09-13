@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 11 — Dashboard Overview & Mission Control Architecture (`Dashboard.tsx`)**:
+  - *Backend Health Aggregation & 10s Caching (`GET /api/dashboard/summary`)*: Implemented an aggregate health summary endpoint calculating dynamic system health scores (0-100), overall infrastructure health status, project counts, active watches, and connector breakdowns with an in-memory 10s TTL cache to eliminate redundant polling.
+  - *Cross-Service Activity Stream (`GET /api/dashboard/activity`)*: Added an endpoint returning cross-service recent events merged from active watches and audit log records.
+  - *Mission Control UI Layout (`desktop/src/components/Dashboard.tsx`)*: Overhauled dashboard from a basic service widget list into a mission control view featuring an animated multi-segment health progress bar (healthy/degraded/error), KPI stats strip, integrated `WatcherPanel` with real controls, a live cross-service activity feed, quick action command bar, and one-click diagnostics launcher.
 - **Desktop Feature 10 — Per-Service AI Chatbox & Real Action Execution (`Chatbot.tsx`, `ChatMessage.tsx`)**:
   - *Dynamic Context-Aware Greeting (`GET /api/chat/greeting`)*: Eradicated static hardcoded greetings in `Chatbot.tsx`. The Copilot greeting now queries live connector telemetry (`poll_state`, `get_stats`) and returns real metrics (CPU %, memory %, state, healthy checks) and service-tailored suggested prompt chips with zero hardcoded numbers.
   - *Real Copilot Action Execution (`POST /api/chat/execute`)*: Upgraded action execution to parse commands through `prash.cli.build_parser()`, sanitize `prash` prefixes, route action names via `run`, execute safely, capture stdout/stderr, and append execution events to both disk-based `AuditLog` and desktop `_activity_log`.
