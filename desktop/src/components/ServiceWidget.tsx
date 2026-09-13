@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Cloud,
-  Sparkles,
   MessageSquare,
   Check,
   RefreshCw,
@@ -15,7 +14,8 @@ import {
   Play,
   Square,
   Pause,
-  Terminal
+  Terminal,
+  Sliders,
 } from 'lucide-react';
 import MetricGauge from './widgets/MetricGauge';
 import MetricLineChart, { TimeSeriesPoint } from './widgets/MetricLineChart';
@@ -23,6 +23,7 @@ import MetricCard from './widgets/MetricCard';
 import BarChart, { BarChartItem } from './widgets/BarChart';
 import EventTimeline, { TimelineEvent } from './widgets/EventTimeline';
 import StatusGrid, { StatusItem } from './widgets/StatusGrid';
+import WidgetConfigurator, { ConfigurableWidget } from './WidgetConfigurator';
 import useWebSocket from '../hooks/useWebSocket';
 
 export interface ServiceWidgetProps {
@@ -50,7 +51,6 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [generatingAI, setGeneratingAI] = useState(false);
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [expandedWidget, setExpandedWidget] = useState<ExpandedWidgetState | null>(null);
 
@@ -59,6 +59,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
   const [status, setStatus] = useState<string>('healthy');
   const [statusData, setStatusData] = useState<any>(null);
   const [customLayout, setCustomLayout] = useState<any[] | null>(null);
+  const [isConfiguratorOpen, setIsConfiguratorOpen] = useState<boolean>(false);
   const [connectorInfo, setConnectorInfo] = useState<any>(null);
 
   // Watcher and live monitoring integration
@@ -148,8 +149,51 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
     }
   };
 
+  const fetchSavedWidgets = async () => {
+    try {
+      const url = resourceId
+        ? `/api/connectors/${connectorId}/widgets?resource_id=${encodeURIComponent(resourceId)}`
+        : `/api/connectors/${connectorId}/widgets`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.custom && Array.isArray(data.widgets) && data.widgets.length > 0) {
+          setCustomLayout(data.widgets);
+        }
+      }
+    } catch (e) {
+      console.error('Error fetching custom widgets:', e);
+    }
+  };
+
+  const handleSaveCustomLayout = async (newWidgets: ConfigurableWidget[]) => {
+    const res = await fetch(`/api/connectors/${connectorId}/widgets`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: resourceId || '', widgets: newWidgets }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.detail || 'Failed to save widget layout');
+    }
+    setCustomLayout(newWidgets);
+  };
+
+  const handleResetCustomLayout = async () => {
+    const url = resourceId
+      ? `/api/connectors/${connectorId}/widgets?resource_id=${encodeURIComponent(resourceId)}`
+      : `/api/connectors/${connectorId}/widgets`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.detail || 'Failed to reset layout');
+    }
+    setCustomLayout(null);
+  };
+
   useEffect(() => {
     fetchTelemetry();
+    fetchSavedWidgets();
     const interval = setInterval(() => fetchTelemetry(false), 30000); // 30s auto-refresh
     return () => clearInterval(interval);
   }, [connectorId, resourceId]);
@@ -291,25 +335,6 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
       }
     } catch (e) {
       console.error('Failed to toggle pause:', e);
-    }
-  };
-
-  const handleGenerateAIWidgets = async () => {
-    setGeneratingAI(true);
-    try {
-      const res = await fetch(`/api/connectors/${connectorId}/generate-widgets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ resource_id: resourceId, prompt: 'Synthesize optimal telemetry layout' }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setCustomLayout(data.widgets || []);
-      }
-    } catch (e) {
-      console.error('Error generating AI widgets:', e);
-    } finally {
-      setGeneratingAI(false);
     }
   };
 
@@ -650,15 +675,14 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
             <RefreshCw size={14} className={refreshing ? 'animate-spin text-accent' : ''} />
           </button>
 
-          {/* AI Generate Widgets */}
+          {/* AI Customize / Configure Layout */}
           <button
-            onClick={handleGenerateAIWidgets}
-            disabled={generatingAI}
+            onClick={() => setIsConfiguratorOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-medium text-gray-200 transition-all cursor-pointer"
-            title="AI synthesizes customized widgets based on live telemetry"
+            title="Configure widget placements, reorder, or synthesize with AI"
           >
-            <Sparkles size={14} className={generatingAI ? 'animate-spin text-accent' : 'text-accent'} />
-            {generatingAI ? 'Synthesizing...' : 'AI Generate'}
+            <Sliders size={14} className="text-accent" />
+            Customize Layout
           </button>
 
           {/* Ask Copilot */}
@@ -838,9 +862,27 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
         /* Dynamic Widget Grid */
         <div className="space-y-6 pt-6">
           {customLayout && (
-            <div className="flex items-center gap-2 text-xs text-accent font-medium bg-accent/10 border border-accent/25 px-3 py-1.5 rounded-xl">
-              <Check size={14} />
-              AI synthesized custom widget configuration ({customLayout.length} widgets active)
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-accent font-medium bg-accent/10 border border-accent/25 px-4 py-2.5 rounded-xl">
+              <div className="flex items-center gap-2">
+                <Check size={15} />
+                <span>
+                  Custom Layout Active: <strong>{customLayout.length}</strong> widgets configured for this service
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsConfiguratorOpen(true)}
+                  className="px-2.5 py-1 rounded-lg bg-accent/20 hover:bg-accent/30 text-accent text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Configure Layout
+                </button>
+                <button
+                  onClick={handleResetCustomLayout}
+                  className="px-2.5 py-1 rounded-lg bg-surface hover:bg-surface-elevated text-gray-400 hover:text-white border border-border-subtle text-xs transition-colors cursor-pointer"
+                >
+                  Reset to Defaults
+                </button>
+              </div>
             </div>
           )}
 
@@ -850,12 +892,14 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               const keys: string[] = widget.metric_keys || [];
               const unit = widget.unit || '';
               const widgetLabel = widget.label || 'Telemetry';
+              const span = widget.position?.span || (wType === 'status_grid' ? 3 : (wType === 'line_chart' || wType === 'bar_chart' || wType === 'event_timeline' ? 2 : 1));
+              const colSpanClass = span === 3 ? 'col-span-1 md:col-span-2 lg:col-span-3' : (span === 2 ? 'col-span-1 md:col-span-2 lg:col-span-2' : 'col-span-1');
 
               // 1. Radial Gauge
               if (wType === 'gauge') {
                 const cardData = adaptMetricCardData(keys);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl flex items-center justify-center p-4 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl flex items-center justify-center p-4 relative group ${colSpanClass}`}>
                     <MetricGauge
                       value={cardData.rawVal}
                       label={widgetLabel}
@@ -878,7 +922,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               if (wType === 'line_chart') {
                 const chartData = adaptTimeSeriesData(keys);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl relative group ${colSpanClass}`}>
                     <MetricLineChart
                       data={chartData}
                       label={widgetLabel}
@@ -910,7 +954,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               if (wType === 'bar_chart') {
                 const barData = adaptBarData(keys, unit);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl relative group ${colSpanClass}`}>
                     <BarChart
                       data={barData}
                       label={widgetLabel}
@@ -942,7 +986,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               if (wType === 'metric_card') {
                 const cardData = adaptMetricCardData(keys);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl flex flex-col justify-center gap-3 p-4 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl flex flex-col justify-center gap-3 p-4 relative group ${colSpanClass}`}>
                     <MetricCard
                       label={widgetLabel}
                       value={cardData.value}
@@ -969,7 +1013,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                   keys.length === 0 || keys.some(k => (ev.event_type || '').toLowerCase().includes(k.toLowerCase()))
                 );
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl ${colSpanClass}`}>
                     <EventTimeline
                       events={matchedEvents.length > 0 ? matchedEvents : events}
                       label={widgetLabel}
@@ -981,7 +1025,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               // 6. Health Checks Status Grid
               if (wType === 'status_grid') {
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-3">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl ${colSpanClass}`}>
                     <StatusGrid
                       items={statusItems}
                       label={widgetLabel}
@@ -992,7 +1036,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
 
               // Fallback
               return (
-                <div key={widget.id || idx} className="glass-panel rounded-xl p-4 flex flex-col justify-between">
+                <div key={widget.id || idx} className={`glass-panel rounded-xl p-4 flex flex-col justify-between ${colSpanClass}`}>
                   <span className="text-xs font-semibold uppercase tracking-wider text-gray-400 block mb-2">{widgetLabel}</span>
                   <div className="flex items-baseline gap-2">
                     <span className="text-2xl font-bold text-white">—</span>
@@ -1119,6 +1163,18 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Widget Layout Configurator Modal */}
+      <WidgetConfigurator
+        isOpen={isConfiguratorOpen}
+        onClose={() => setIsConfiguratorOpen(false)}
+        connectorId={connectorId}
+        connectorName={displayName || connectorInfo?.name}
+        resourceId={resourceId}
+        currentWidgets={activeWidgets}
+        onSaveLayout={handleSaveCustomLayout}
+        onResetLayout={handleResetCustomLayout}
+      />
     </motion.div>
   );
 };

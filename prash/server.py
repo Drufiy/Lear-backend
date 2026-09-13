@@ -34,6 +34,13 @@ from prash.connector_registry import (
     registry_to_json,
 )
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
+from prash.widget_generator import (
+    delete_widget_layout_from_yaml,
+    load_widget_layout_from_yaml,
+    save_widget_layout_to_yaml,
+    synthesize_widgets,
+    validate_widget_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2302,7 +2309,7 @@ def clear_notifications():
 
 
 # ---------------------------------------------------------------------------
-# AI Widget Generation
+# AI Widget Generation & Layout Persistence
 # ---------------------------------------------------------------------------
 
 @app.post("/api/connectors/{connector_id}/generate-widgets")
@@ -2310,13 +2317,14 @@ def generate_widgets(
     connector_id: str,
     payload: Dict[str, Any] = Body(default_factory=dict),
 ):
-    """Dynamically generates custom widget configurations tailored to the connector and resource."""
+    """Dynamically generates custom widget configurations tailored to the connector, live telemetry, and prompt."""
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
     entry = CONNECTOR_REGISTRY[connector_id]
     resource_id = payload.get("resource_id", "")
     prompt = payload.get("prompt", "")
+    save_to_yaml = payload.get("save_to_yaml", False)
 
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
     available_metrics = []
@@ -2339,12 +2347,53 @@ def generate_widgets(
         except Exception:
             pass
 
-    # Synthesize widget configuration from registry templates and active metrics
-    generated_widgets = []
+    # Synthesize widget configuration via dedicated widget_generator
+    layout = synthesize_widgets(
+        connector_id=connector_id,
+        connector_name=entry.name,
+        category=entry.category,
+        capabilities=["metrics", "status", "watch"] if entry.supports_watch else ["metrics", "status"],
+        available_metrics=available_metrics,
+        current_status=current_status,
+        templates=entry.widget_templates,
+        resource_id=resource_id,
+        prompt=prompt,
+    )
+
+    out_data = layout.to_dict()
+
+    if save_to_yaml:
+        save_widget_layout_to_yaml(connector_id, resource_id, out_data["widgets"], yaml_path=YAML_PATH)
+
+    return out_data
+
+
+@app.get("/api/connectors/{connector_id}/widgets")
+def get_connector_widgets(
+    connector_id: str,
+    resource_id: str = Query(default=""),
+):
+    """Returns saved custom widget layout if present, otherwise returns registry default templates."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    entry = CONNECTOR_REGISTRY[connector_id]
+    custom_layout = load_widget_layout_from_yaml(connector_id, resource_id, yaml_path=YAML_PATH)
+
+    if custom_layout:
+        return {
+            "connector_id": connector_id,
+            "resource_id": resource_id,
+            "custom": True,
+            "widgets": custom_layout,
+        }
+
+    # Transform default templates to consistent widget dict shape
+    default_widgets = []
     row, col = 0, 0
     for idx, template in enumerate(entry.widget_templates):
-        span = 2 if template.type in ("line_chart", "event_timeline") else 1
-        widget_cfg = {
+        span = 2 if template.type in ("line_chart", "event_timeline", "bar_chart") else (3 if template.type == "status_grid" else 1)
+        default_widgets.append({
             "id": f"{connector_id}_{template.id}",
             "type": template.type,
             "label": template.label,
@@ -2353,10 +2402,8 @@ def generate_widgets(
             "description": template.description,
             "refresh_interval": template.refresh_interval,
             "position": {"row": row, "col": col, "span": span},
-            "ai_generated": True,
-            "rationale": f"Configured for {entry.name} based on capabilities and active telemetry.",
-        }
-        generated_widgets.append(widget_cfg)
+            "ai_generated": False,
+        })
         col += span
         if col >= 3:
             col = 0
@@ -2365,10 +2412,57 @@ def generate_widgets(
     return {
         "connector_id": connector_id,
         "resource_id": resource_id,
-        "widgets": generated_widgets,
-        "status": current_status,
-        "detected_metrics": available_metrics,
+        "custom": False,
+        "widgets": default_widgets,
     }
+
+
+@app.put("/api/connectors/{connector_id}/widgets")
+def save_connector_widgets(
+    connector_id: str,
+    payload: Dict[str, Any] = Body(...),
+):
+    """Persists a custom or manually customized widget layout for a connector/resource."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    resource_id = payload.get("resource_id", "")
+    widgets = payload.get("widgets", [])
+    if not isinstance(widgets, list):
+        raise APIBridgeException("INVALID_PAYLOAD", "Expected 'widgets' to be a list", 400)
+
+    # Validate each widget
+    valid_widgets = []
+    for w in widgets:
+        if validate_widget_config(w):
+            valid_widgets.append(w)
+
+    success = save_widget_layout_to_yaml(connector_id, resource_id, valid_widgets, yaml_path=YAML_PATH)
+    return {
+        "success": success,
+        "connector_id": connector_id,
+        "resource_id": resource_id,
+        "count": len(valid_widgets),
+    }
+
+
+@app.delete("/api/connectors/{connector_id}/widgets")
+def reset_connector_widgets(
+    connector_id: str,
+    resource_id: str = Query(default=""),
+):
+    """Resets custom widget layout to connector registry defaults."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    delete_widget_layout_from_yaml(connector_id, resource_id, yaml_path=YAML_PATH)
+    return {
+        "success": True,
+        "connector_id": connector_id,
+        "resource_id": resource_id,
+        "reset": True,
+    }
+
 
 
 # ---------------------------------------------------------------------------
