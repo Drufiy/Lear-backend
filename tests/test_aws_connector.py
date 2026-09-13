@@ -350,10 +350,20 @@ def test_get_stats(mock_credentials):
         connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
         
         stats = connector.get_stats("i-123")
-        assert len(stats) == 2
+        # get_stats emits a raw per-datapoint event for every CloudWatch
+        # metric, PLUS a synthesized threshold-crossing event (e.g. cpu_spike)
+        # when a datapoint crosses that metric's threshold -- so the 95.0 CPU
+        # datapoint (>= the 90 threshold) produces two events, not one; the
+        # 40.0 datapoint produces just its raw event. 1 cloudtrail + 2 CPU
+        # raw + 1 cpu_spike = 4, chronologically ordered by timestamp.
+        assert len(stats) == 4
         assert stats[0]["event_type"] == "cloudtrail_event"
-        assert stats[1]["event_type"] == "cpu_spike"
-        assert stats[1]["summary"] == "CPU Spike: 95.00"
+        assert stats[1]["event_type"] == "CPUUtilization"
+        assert stats[1]["summary"] == "CPUUtilization: 95.00"
+        assert stats[2]["event_type"] == "cpu_spike"
+        assert stats[2]["summary"] == "CPU Spike: 95.00"
+        assert stats[3]["event_type"] == "CPUUtilization"
+        assert stats[3]["summary"] == "CPUUtilization: 40.00"
 
 
 def test_aws_alert_action(mock_credentials):
@@ -467,8 +477,11 @@ def test_get_stats_enhanced(mock_credentials):
         connector._get_boto_session = lambda: type("MockSession", (), {"client": lambda self, svc: mock_client(svc)})()
         
         stats = connector.get_stats("i-123")
-        assert len(stats) == 4
-        
+        # 3 threshold-crossing metrics here (CPU, DiskReadOps, StatusCheckFailed)
+        # each also emit their own raw per-datapoint event alongside the
+        # synthesized one -- 3 raw + 3 synthesized + 1 cloudwatch_alarm = 7.
+        assert len(stats) == 7
+
         types = [s["event_type"] for s in stats]
         assert "cpu_spike" in types
         assert "high_disk_read" in types

@@ -500,11 +500,15 @@ def get_connector_metrics(
             except Exception:
                 pass
 
-        events = []
-        try:
-            events = connector.get_stats(target=target)
-        except Exception:
-            events = []
+        # No per-call try/except here: every connector's get_stats(target, since=None)
+        # signature is now uniform (base.py's contract), so there's no signature
+        # mismatch left to retry around. Letting NotImplementedError and any real
+        # provider error propagate to this function's own try/except below is the
+        # point -- a broad `except Exception: events = []` here (2026-09-13) silently
+        # swallowed both, turning an unconfigured/broken connector into a fake 200
+        # with empty metrics instead of the unsupported=True or 500 the outer
+        # handler already returns correctly.
+        events = connector.get_stats(target=target)
 
         # Normalize metrics from real events
         normalized_metrics = []
