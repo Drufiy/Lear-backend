@@ -914,6 +914,114 @@ def test_ACTIVITY_LOG_AGGREGATION_PAGINATION_AND_FILTERS(client, tmp_path, monke
     assert search_data["events"][0]["connector"] == "kubernetes"
 
 
+def test_SETTINGS_LIFECYCLE_AND_PERSISTENCE(client, monkeypatch, tmp_path):
+    """Verifies that settings can be fetched, updated, and persisted to prash.yaml and .env."""
+    test_yaml = tmp_path / "prash.yaml"
+    test_env = tmp_path / ".env"
+    test_env.write_text("PRIMARY_MODEL=deepseek-v4-flash\nPRASH_PERMISSION_MODE=ask\n")
+    test_yaml.write_text("settings:\n  model: deepseek-v4-flash\n  permission_mode: ask\n")
+
+    monkeypatch.setattr("prash.server.YAML_PATH", str(test_yaml))
+    monkeypatch.setattr("prash.server.ENV_PATH", str(test_env))
+
+    # 1. GET initial settings
+    res = client.get("/api/settings")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["model"] == "deepseek-v4-flash"
+    assert data["permission_mode"] == "ask"
+    assert len(data["available_models"]) >= 3
+    assert len(data["available_permission_modes"]) == 3
+    assert "poll_interval" in data
+    assert "retention_days" in data
+    assert "desktop_notifications" in data
+
+    # 2. POST updated settings
+    payload = {
+        "model": "claude-3-5-sonnet",
+        "permission_mode": "auto-safe",
+        "poll_interval": 30,
+        "retention_days": 14,
+        "desktop_notifications": False,
+        "alert_on_degraded": False,
+        "slack_webhook": "https://hooks.slack.com/services/T00/B00/X00",
+        "discord_webhook": "https://discord.com/api/webhooks/123/abc",
+        "pagerduty_key": "pd-routing-key-test",
+    }
+    post_res = client.post("/api/settings", json=payload)
+    assert post_res.status_code == 200
+    res_data = post_res.json()
+    assert res_data["success"] is True
+    assert res_data["settings"]["model"] == "claude-3-5-sonnet"
+    assert res_data["settings"]["permission_mode"] == "auto-safe"
+    assert res_data["settings"]["poll_interval"] == 30
+    assert res_data["settings"]["retention_days"] == 14
+
+    # 3. Verify .env file updated
+    env_content = test_env.read_text()
+    assert "claude-3-5-sonnet" in env_content
+    assert "auto-safe" in env_content
+    assert "30" in env_content
+    assert "SLACK_WEBHOOK_URL=" in env_content
+
+    # 4. Re-fetch via GET to assert persistence
+    res_updated = client.get("/api/settings")
+    assert res_updated.status_code == 200
+    up_data = res_updated.json()
+    assert up_data["model"] == "claude-3-5-sonnet"
+    assert up_data["permission_mode"] == "auto-safe"
+    assert up_data["poll_interval"] == 30
+    assert up_data["retention_days"] == 14
+    assert up_data["desktop_notifications"] is False
+    assert up_data["alert_on_degraded"] is False
+    assert up_data["slack_webhook"] == "https://hooks.slack.com/services/T00/B00/X00"
+    assert up_data["pagerduty_key"] == "pd-routing-key-test"
+
+
+def test_CONFIG_MASKED_CREDENTIALS(client, monkeypatch, tmp_path):
+    """Verifies that GET /api/config returns masked credentials and never leaks raw secrets."""
+    test_env = tmp_path / ".env"
+    test_env.write_text(
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+        "GITHUB_TOKEN=ghp_secretTokenLongerValue123456\n"
+        "SHORT_KEY=1234\n"
+    )
+    monkeypatch.setattr("prash.server.ENV_PATH", str(test_env))
+
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    data = res.json()
+    assert "raw" in data
+    raw = data["raw"]
+
+    # Assert raw tokens are masked and not present verbatim
+    assert raw["AWS_ACCESS_KEY_ID"] == "AKI...PLE"
+    assert raw["AWS_SECRET_ACCESS_KEY"] == "wJa...KEY"
+    assert raw["GITHUB_TOKEN"] == "ghp...456"
+    assert raw["SHORT_KEY"] == "••••••••"
+
+    # Crucial security guarantee: raw secrets must never appear in response JSON
+    assert "AKIAIOSFODNN7EXAMPLE" not in res.text
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in res.text
+    assert "ghp_secretTokenLongerValue123456" not in res.text
+
+
+def test_SYSTEM_VERSION_DYNAMIC(client):
+    """Verifies that GET /api/system/version returns dynamic platform and connector statistics."""
+    res = client.get("/api/system/version")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["version"] == "2.4.0"
+    assert data["name"] == "Lear Desktop Console"
+    assert data["status"] == "operational"
+    assert "platform" in data
+    assert "python_version" in data
+    assert data["connectors_total"] == len(CONNECTOR_REGISTRY)
+    assert isinstance(data["connectors_configured"], int)
+
+
+
 
 
 

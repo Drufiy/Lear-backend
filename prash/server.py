@@ -13,6 +13,7 @@ import datetime
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict, List, Optional, Set
 
 import dotenv
@@ -188,51 +189,6 @@ async def generic_http_exception_handler(request: Request, exc: HTTPException):
         },
     )
 
-from pydantic import BaseModel
-import yaml
-import os
-
-class SettingsModel(BaseModel):
-    permission_mode: str
-    poll_interval: int
-    slack_webhook: str = ""
-    discord_webhook: str = ""
-    pagerduty_key: str = ""
-
-SETTINGS_FILE = "prash.yaml"
-
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            data = yaml.safe_load(f)
-            if data and "settings" in data:
-                return data["settings"]
-    return {
-        "permission_mode": "ask",
-        "poll_interval": 15,
-        "slack_webhook": "",
-        "discord_webhook": "",
-        "pagerduty_key": ""
-    }
-
-def save_settings_to_file(settings_dict):
-    data = {}
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            data = yaml.safe_load(f) or {}
-    data["settings"] = settings_dict
-    with open(SETTINGS_FILE, "w") as f:
-        yaml.dump(data, f)
-
-@app.get("/api/settings")
-async def get_settings():
-    return load_settings()
-
-@app.post("/api/settings")
-async def save_settings(settings: SettingsModel):
-    settings_dict = settings.dict()
-    save_settings_to_file(settings_dict)
-    return {"status": "success", "settings": settings_dict}
 
 
 # ---------------------------------------------------------------------------
@@ -1296,8 +1252,19 @@ def get_active_watches():
 
 @app.get("/api/system/version")
 def get_system_version():
-    """Returns application name and version."""
-    return {"name": "Lear", "version": "2.0.0", "engine": "FastAPI + Prash Core"}
+    """Returns dynamic system version, environment, and connector statistics."""
+    env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    configured_count = sum(1 for cid in CONNECTOR_REGISTRY if is_connector_configured(cid, env_config))
+    return {
+        "version": "2.4.0",
+        "name": "Lear Desktop Console",
+        "engine": "FastAPI + Prash Core",
+        "status": "operational",
+        "platform": sys.platform,
+        "python_version": sys.version.split()[0],
+        "connectors_total": len(CONNECTOR_REGISTRY),
+        "connectors_configured": configured_count,
+    }
 
 
 @app.websocket("/ws/events")
@@ -1621,9 +1588,11 @@ def get_config():
 
     config = dotenv.dotenv_values(ENV_PATH)
 
-    def mask(val: str) -> str:
-        if not val or len(val) < 4:
+    def mask(val: Optional[str]) -> str:
+        if not val:
             return ""
+        if len(val) <= 6:
+            return "••••••••"
         return f"{val[:3]}...{val[-3:]}"
 
     services = {}
@@ -1653,54 +1622,184 @@ def update_config(updates: Dict[str, str] = Body(...)):
 
 
 # ---------------------------------------------------------------------------
-# Platform Settings
+# Platform Settings & System Version
 # ---------------------------------------------------------------------------
+
+AVAILABLE_AI_MODELS = [
+    {
+        "id": "deepseek-v4-flash",
+        "name": "DeepSeek Flash",
+        "desc": "Ultra-fast intent resolution & real-time telemetry diagnostics",
+        "provider": "DeepSeek",
+    },
+    {
+        "id": "kimi-k2.6",
+        "name": "Kimi K2.6",
+        "desc": "Deep technical reasoning & large log context synthesis",
+        "provider": "Moonshot",
+    },
+    {
+        "id": "gemini-1.5-pro",
+        "name": "Gemini 1.5 Pro",
+        "desc": "High-capability multi-modal reasoning & architecture analysis",
+        "provider": "Google",
+    },
+    {
+        "id": "claude-3-5-sonnet",
+        "name": "Claude 3.5 Sonnet",
+        "desc": "Industry standard for systems diagnosis and code generation",
+        "provider": "Anthropic",
+    },
+    {
+        "id": "gpt-4o",
+        "name": "GPT-4o",
+        "desc": "Advanced multi-modal reasoning & operational action routing",
+        "provider": "OpenAI",
+    },
+]
+
+AVAILABLE_PERMISSION_MODES = [
+    {
+        "id": "ask",
+        "label": "Ask First (Recommended)",
+        "desc": "Always request user confirmation before modifying cloud or infrastructure resources.",
+    },
+    {
+        "id": "auto-safe",
+        "label": "Auto-Safe Tier",
+        "desc": "Execute read-only diagnostics and safe remediation automatically; prompt for write actions.",
+    },
+    {
+        "id": "bypass",
+        "label": "Bypass (Autonomous)",
+        "desc": "Allow autonomous remediation for verified health degradation without interactive prompts.",
+    },
+]
+
+DEFAULT_POLL_INTERVAL = 15
+DEFAULT_RETENTION_DAYS = 30
+
 
 @app.get("/api/settings")
 def get_settings():
-    """Returns current AI model, permission mode, and available models."""
+    """Returns current AI model, permission mode, watcher settings, and available options."""
     yaml_data = _read_prash_yaml()
     settings = yaml_data.get("settings", {})
+    if not isinstance(settings, dict):
+        settings = {}
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
 
     current_model = settings.get("model") or env_config.get("PRIMARY_MODEL") or "deepseek-v4-flash"
     current_perm = settings.get("permission_mode") or env_config.get("PRASH_PERMISSION_MODE") or "ask"
 
-    available_models = [
-        {"id": "deepseek-v4-flash", "name": "DeepSeek Flash", "desc": "Ultra-fast intent resolution & diagnostics"},
-        {"id": "kimi-k2.6", "name": "Kimi K2.6", "desc": "Deep technical reasoning & large log contexts"},
-        {"id": "gemini-1.5-pro", "name": "Gemini Pro", "desc": "High capability multi-modal analysis"},
-    ]
+    poll_interval_str = env_config.get("PRASH_WATCH_INTERVAL_SECONDS")
+    try:
+        default_poll = int(poll_interval_str) if poll_interval_str else DEFAULT_POLL_INTERVAL
+    except Exception:
+        default_poll = DEFAULT_POLL_INTERVAL
+    poll_interval = settings.get("poll_interval", default_poll)
+
+    retention_days = settings.get("retention_days", DEFAULT_RETENTION_DAYS)
+    desktop_notifications = settings.get("desktop_notifications", True)
+    alert_on_degraded = settings.get("alert_on_degraded", True)
+
+    slack_webhook = settings.get("slack_webhook") or env_config.get("SLACK_WEBHOOK_URL") or ""
+    discord_webhook = settings.get("discord_webhook") or env_config.get("DISCORD_WEBHOOK_URL") or ""
+    pagerduty_key = settings.get("pagerduty_key") or env_config.get("PAGERDUTY_ROUTING_KEY") or ""
+
     return {
         "model": current_model,
         "permission_mode": current_perm,
-        "available_models": available_models,
+        "available_models": AVAILABLE_AI_MODELS,
+        "available_permission_modes": AVAILABLE_PERMISSION_MODES,
+        "poll_interval": poll_interval,
+        "retention_days": retention_days,
+        "desktop_notifications": desktop_notifications,
+        "alert_on_degraded": alert_on_degraded,
+        "slack_webhook": slack_webhook,
+        "discord_webhook": discord_webhook,
+        "pagerduty_key": pagerduty_key,
+        "status": "success",
     }
 
 
 @app.post("/api/settings")
 def save_settings(payload: Dict[str, Any] = Body(...)):
-    """Persists model and permission mode to prash.yaml and .env."""
+    """Persists model, permission mode, watcher cadence, and alerting to prash.yaml and .env."""
     yaml_data = _read_prash_yaml()
     if "settings" not in yaml_data or not isinstance(yaml_data["settings"], dict):
         yaml_data["settings"] = {}
 
-    model = payload.get("model")
-    permission_mode = payload.get("permission_mode")
+    settings_dict = yaml_data["settings"]
 
     if not os.path.exists(ENV_PATH):
         open(ENV_PATH, "w").close()
 
-    if model:
-        yaml_data["settings"]["model"] = model
+    if "model" in payload and payload["model"]:
+        model = str(payload["model"])
+        settings_dict["model"] = model
         dotenv.set_key(ENV_PATH, "PRIMARY_MODEL", model)
-    if permission_mode:
-        yaml_data["settings"]["permission_mode"] = permission_mode
-        dotenv.set_key(ENV_PATH, "PRASH_PERMISSION_MODE", permission_mode)
+
+    if "permission_mode" in payload and payload["permission_mode"]:
+        perm = str(payload["permission_mode"])
+        settings_dict["permission_mode"] = perm
+        dotenv.set_key(ENV_PATH, "PRASH_PERMISSION_MODE", perm)
+
+    if "poll_interval" in payload:
+        try:
+            val = int(payload["poll_interval"])
+            settings_dict["poll_interval"] = val
+            dotenv.set_key(ENV_PATH, "PRASH_WATCH_INTERVAL_SECONDS", str(val))
+        except (ValueError, TypeError):
+            pass
+
+    if "retention_days" in payload:
+        try:
+            settings_dict["retention_days"] = int(payload["retention_days"])
+        except (ValueError, TypeError):
+            pass
+
+    if "desktop_notifications" in payload:
+        settings_dict["desktop_notifications"] = bool(payload["desktop_notifications"])
+        dotenv.set_key(ENV_PATH, "PRASH_DESKTOP_NOTIFICATIONS", "true" if payload["desktop_notifications"] else "false")
+
+    if "alert_on_degraded" in payload:
+        settings_dict["alert_on_degraded"] = bool(payload["alert_on_degraded"])
+
+    if "slack_webhook" in payload:
+        slack_val = str(payload["slack_webhook"]).strip()
+        settings_dict["slack_webhook"] = slack_val
+        if slack_val:
+            dotenv.set_key(ENV_PATH, "SLACK_WEBHOOK_URL", slack_val)
+        else:
+            dotenv.unset_key(ENV_PATH, "SLACK_WEBHOOK_URL")
+
+    if "discord_webhook" in payload:
+        discord_val = str(payload["discord_webhook"]).strip()
+        settings_dict["discord_webhook"] = discord_val
+        if discord_val:
+            dotenv.set_key(ENV_PATH, "DISCORD_WEBHOOK_URL", discord_val)
+        else:
+            dotenv.unset_key(ENV_PATH, "DISCORD_WEBHOOK_URL")
+
+    if "pagerduty_key" in payload:
+        pd_val = str(payload["pagerduty_key"]).strip()
+        settings_dict["pagerduty_key"] = pd_val
+        if pd_val:
+            dotenv.set_key(ENV_PATH, "PAGERDUTY_ROUTING_KEY", pd_val)
+        else:
+            dotenv.unset_key(ENV_PATH, "PAGERDUTY_ROUTING_KEY")
 
     _write_prash_yaml(yaml_data)
     dotenv.load_dotenv(ENV_PATH, override=True)
-    return {"success": True, "settings": yaml_data["settings"]}
+
+    return {
+        "success": True,
+        "status": "success",
+        "settings": settings_dict,
+    }
+
+
 
 
 # ---------------------------------------------------------------------------

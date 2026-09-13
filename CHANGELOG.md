@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 14 — Settings & Configuration (`Settings.tsx`, `prash/server.py`)**:
+  - *Consolidated Settings & Dual Persistence (`GET`/`POST /api/settings`)*: Removed the legacy duplicate route in `prash/server.py` that caused 422 errors and consolidated into a unified endpoint. Persists AI model preferences, permission safety modes, background watcher polling cadence, retention days, and notification webhooks directly to `prash.yaml` (`settings:` block) and `.env`.
+  - *Dynamic AI Model Provider Selection*: Eradicated hardcoded model options in `Settings.tsx`, dynamically loading supported models (`deepseek-v4-flash`, `kimi-k2.6`, `gemini-1.5-pro`, `claude-3-5-sonnet`, `gpt-4o`) with provider tags, descriptions, and active status indicators.
+  - *Watcher & Monitoring Cadence Configuration*: Added UI controls for background polling intervals (`5s`, `10s`, `15s`, `30s`, `60s`), event history retention periods (`7d`, `14d`, `30d`, `90d`), and native notification toggles ("Desktop OS Notifications" and "Alert on Degraded / Error States Only").
+  - *Masked Credential Overview (`GET /api/config`)*: Implemented a searchable credential table displaying all stored `.env` variables safely masked (`val[:3]...val[-3:]` or `••••••••`) with lock indicators and direct links to the Integrations management view.
+  - *Dynamic Platform Version & About Section (`GET /api/system/version`)*: Added dynamic system info cards displaying version (`v2.4.0`), real configured-vs-total connector counts (`{connectors_configured} / {connectors_total}`), Python runtime, OS platform, and core engine status.
 - **Desktop Feature 13 — Activity & Event Log (`ActivityLog.tsx`, `prash/server.py`)**:
   - *Dynamic Event Aggregation & Multi-Source Synthesis (`GET /api/activity`)*: Overhauled backend endpoint to aggregate recent in-memory operational events (`_activity_log`) with historical persistent records from disk (`AuditLog().read()`). Added automatic connector inference from action names, severity inference (`info`, `warning`, `error`), text search query `q`, and multi-dimensional filtering (`connector`, `event_type`, `severity`, `time_range`).
   - *Pagination & Cursor Offsets*: Supported `limit` and `offset` pagination returning total matched event counts and a boolean `has_more` cursor flag for scalable audit trail exploration.
