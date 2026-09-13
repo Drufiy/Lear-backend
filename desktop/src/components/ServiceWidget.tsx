@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Cloud,
-  Sparkles,
   MessageSquare,
   Check,
   RefreshCw,
@@ -10,7 +9,13 @@ import {
   X,
   Activity,
   Maximize2,
-  Table as TableIcon
+  Table as TableIcon,
+  Radio,
+  Play,
+  Square,
+  Pause,
+  Terminal,
+  Sliders,
 } from 'lucide-react';
 import MetricGauge from './widgets/MetricGauge';
 import MetricLineChart, { TimeSeriesPoint } from './widgets/MetricLineChart';
@@ -18,6 +23,8 @@ import MetricCard from './widgets/MetricCard';
 import BarChart, { BarChartItem } from './widgets/BarChart';
 import EventTimeline, { TimelineEvent } from './widgets/EventTimeline';
 import StatusGrid, { StatusItem } from './widgets/StatusGrid';
+import WidgetConfigurator, { ConfigurableWidget } from './WidgetConfigurator';
+import useWebSocket from '../hooks/useWebSocket';
 
 export interface ServiceWidgetProps {
   connectorId: string;
@@ -44,7 +51,6 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [generatingAI, setGeneratingAI] = useState(false);
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [expandedWidget, setExpandedWidget] = useState<ExpandedWidgetState | null>(null);
 
@@ -53,7 +59,18 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
   const [status, setStatus] = useState<string>('healthy');
   const [statusData, setStatusData] = useState<any>(null);
   const [customLayout, setCustomLayout] = useState<any[] | null>(null);
+  const [isConfiguratorOpen, setIsConfiguratorOpen] = useState<boolean>(false);
   const [connectorInfo, setConnectorInfo] = useState<any>(null);
+
+  // Watcher and live monitoring integration
+  const { lastEvent } = useWebSocket();
+  const [isWatching, setIsWatching] = useState<boolean>(false);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
+  const [watchInterval, setWatchInterval] = useState<number>(5);
+  const [livePulse, setLivePulse] = useState<boolean>(false);
+  const [liveStreamOpen, setLiveStreamOpen] = useState<boolean>(false);
+  const [liveFeed, setLiveFeed] = useState<any[]>([]);
+  const [expandedRawId, setExpandedRawId] = useState<string | null>(null);
 
   // Rolling metric cache across polls: key -> TimeSeriesPoint[]
   const rollingHistoryRef = useRef<Map<string, TimeSeriesPoint[]>>(new Map());
@@ -132,28 +149,192 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
     }
   };
 
+  const fetchSavedWidgets = async () => {
+    try {
+      const url = resourceId
+        ? `/api/connectors/${connectorId}/widgets?resource_id=${encodeURIComponent(resourceId)}`
+        : `/api/connectors/${connectorId}/widgets`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.custom && Array.isArray(data.widgets) && data.widgets.length > 0) {
+          setCustomLayout(data.widgets);
+        }
+      }
+    } catch (e) {
+      console.error('Error fetching custom widgets:', e);
+    }
+  };
+
+  const handleSaveCustomLayout = async (newWidgets: ConfigurableWidget[]) => {
+    const res = await fetch(`/api/connectors/${connectorId}/widgets`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: resourceId || '', widgets: newWidgets }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.detail || 'Failed to save widget layout');
+    }
+    setCustomLayout(newWidgets);
+  };
+
+  const handleResetCustomLayout = async () => {
+    const url = resourceId
+      ? `/api/connectors/${connectorId}/widgets?resource_id=${encodeURIComponent(resourceId)}`
+      : `/api/connectors/${connectorId}/widgets`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || err.detail || 'Failed to reset layout');
+    }
+    setCustomLayout(null);
+  };
+
   useEffect(() => {
     fetchTelemetry();
+    fetchSavedWidgets();
     const interval = setInterval(() => fetchTelemetry(false), 30000); // 30s auto-refresh
     return () => clearInterval(interval);
   }, [connectorId, resourceId]);
 
-  const handleGenerateAIWidgets = async () => {
-    setGeneratingAI(true);
+  // Check active watch status for this service
+  const checkServiceWatchStatus = async () => {
     try {
-      const res = await fetch(`/api/connectors/${connectorId}/generate-widgets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ resource_id: resourceId, prompt: 'Synthesize optimal telemetry layout' }),
-      });
+      const res = await fetch('/api/watch/active');
       if (res.ok) {
         const data = await res.json();
-        setCustomLayout(data.widgets || []);
+        const found = (data.watches || []).find((w: any) =>
+          w.connector.toLowerCase() === connectorId.toLowerCase() &&
+          (!resourceId || (w.target && w.target.toLowerCase().includes(resourceId.toLowerCase())))
+        );
+        if (found) {
+          setIsWatching(true);
+          setIsPaused(found.status === 'paused');
+          if (found.interval) setWatchInterval(found.interval);
+        } else {
+          setIsWatching(false);
+          setIsPaused(false);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  };
+
+  useEffect(() => {
+    checkServiceWatchStatus();
+  }, [connectorId, resourceId]);
+
+  // Real-time integration: listen to WebSocket events for this service
+  useEffect(() => {
+    if (!lastEvent) return;
+
+    const matchesConnector = !lastEvent.connector || lastEvent.connector.toLowerCase() === connectorId.toLowerCase();
+    const matchesTarget = !resourceId || !lastEvent.watch_id || lastEvent.watch_id.toLowerCase().includes(resourceId.toLowerCase());
+
+    if (matchesConnector && matchesTarget) {
+      // 1. Append to timeline & live stream
+      const newEv: TimelineEvent = {
+        timestamp: lastEvent.timestamp || new Date().toISOString(),
+        event_type: lastEvent.event_type || 'event',
+        summary: lastEvent.summary || 'Live Telemetry Event',
+        raw: lastEvent.raw,
+      };
+
+      setEvents(prev => [newEv, ...prev.slice(0, 49)]);
+      setLiveFeed(prev => [lastEvent, ...prev.slice(0, 99)]);
+
+      // 2. Extract numeric telemetry into metrics & rolling history in real time
+      const raw = lastEvent.raw;
+      if (raw && typeof raw === 'object') {
+        const candidateVal = typeof raw.value === 'number' ? raw.value
+          : (typeof raw.val === 'number' ? raw.val
+          : (typeof raw.metric_value === 'number' ? raw.metric_value
+          : (typeof raw.latency === 'number' ? raw.latency
+          : (typeof raw.cpu_percent === 'number' ? raw.cpu_percent
+          : null))));
+
+        if (candidateVal !== null) {
+          const metricName = lastEvent.event_type || 'live_metric';
+          setMetrics(prev => {
+            const exists = prev.find(m => m.name === metricName);
+            if (exists) {
+              return prev.map(m => m.name === metricName ? { ...m, value: candidateVal, timestamp: lastEvent.timestamp } : m);
+            }
+            return [{ name: metricName, value: candidateVal, unit: raw.unit || '', timestamp: lastEvent.timestamp }, ...prev];
+          });
+
+          const history = rollingHistoryRef.current.get(metricName) || [];
+          rollingHistoryRef.current.set(metricName, [...history, { timestamp: lastEvent.timestamp, value: candidateVal }].slice(-40));
+        }
+      }
+
+      // 3. Status transition on real-time events
+      const etype = (lastEvent.event_type || '').toLowerCase();
+      const summary = (lastEvent.summary || '').toLowerCase();
+      if (etype.includes('fail') || etype.includes('error') || etype.includes('crash') || summary.includes('error')) {
+        setStatus('critical');
+      } else if (etype.includes('spike') || etype.includes('warn') || etype.includes('degraded')) {
+        setStatus('degraded');
+      } else if (etype.includes('recovered') || etype.includes('healthy')) {
+        setStatus('healthy');
+      }
+
+      // 4. Live visual pulse
+      setLivePulse(true);
+      const pulseTimer = setTimeout(() => setLivePulse(false), 1800);
+      return () => clearTimeout(pulseTimer);
+    }
+  }, [lastEvent, connectorId, resourceId]);
+
+  const handleToggleWatch = async () => {
+    const target = resourceId || 'default';
+    if (isWatching) {
+      try {
+        const res = await fetch(`/api/connectors/${connectorId}/watch?target=${encodeURIComponent(target)}`, {
+          method: 'DELETE',
+        });
+        if (res.ok) {
+          setIsWatching(false);
+          setIsPaused(false);
+        }
+      } catch (e) {
+        console.error('Failed to stop watch:', e);
+      }
+    } else {
+      try {
+        const res = await fetch(`/api/connectors/${connectorId}/watch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target, interval: watchInterval }),
+        });
+        if (res.ok) {
+          setIsWatching(true);
+          setIsPaused(false);
+        }
+      } catch (e) {
+        console.error('Failed to start watch:', e);
+      }
+    }
+  };
+
+  const handleTogglePause = async () => {
+    const target = resourceId || 'default';
+    const endpoint = isPaused
+      ? `/api/connectors/${connectorId}/watch/resume`
+      : `/api/connectors/${connectorId}/watch/pause`;
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+      if (res.ok) {
+        setIsPaused(!isPaused);
       }
     } catch (e) {
-      console.error('Error generating AI widgets:', e);
-    } finally {
-      setGeneratingAI(false);
+      console.error('Failed to toggle pause:', e);
     }
   };
 
@@ -378,7 +559,9 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
       layout
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      className="glass-card rounded-2xl p-6 relative overflow-hidden"
+      className={`glass-card rounded-2xl p-6 relative overflow-hidden transition-all duration-500 border ${
+        livePulse ? 'border-accent shadow-[0_0_30px_rgba(34,197,94,0.18)] ring-1 ring-accent/30' : 'border-border-subtle'
+      }`}
     >
       {/* Header Bar */}
       <div className="flex flex-wrap justify-between items-center gap-4 pb-5 border-b border-border-subtle">
@@ -408,6 +591,63 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
 
         {/* Action Controls & Filters */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* Per-Service Watch Control (Phase D2) */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-surface border border-border-subtle">
+            {isWatching ? (
+              <>
+                <span className="relative flex h-2 w-2 mr-0.5">
+                  <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${isPaused ? 'bg-amber-400' : 'animate-ping bg-accent'}`} />
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${isPaused ? 'bg-amber-400' : 'bg-accent'}`} />
+                </span>
+                <span className="text-[11px] font-mono font-semibold text-gray-200">
+                  {isPaused ? 'Paused' : `Live (${watchInterval}s)`}
+                </span>
+                <button
+                  onClick={handleTogglePause}
+                  className="p-1 rounded text-gray-400 hover:text-white transition-colors cursor-pointer"
+                  title={isPaused ? 'Resume Watching' : 'Pause Watching'}
+                >
+                  {isPaused ? <Play size={11} className="text-accent" /> : <Pause size={11} className="text-amber-400" />}
+                </button>
+                <button
+                  onClick={handleToggleWatch}
+                  className="p-1 rounded text-gray-400 hover:text-rose-400 transition-colors cursor-pointer"
+                  title="Stop Watching Service"
+                >
+                  <Square size={11} />
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleToggleWatch}
+                className="flex items-center gap-1.5 text-xs text-gray-300 hover:text-accent transition-colors font-medium cursor-pointer"
+                title="Start live background telemetry watch"
+              >
+                <Radio size={13} className="text-accent" />
+                <span>Watch Service</span>
+              </button>
+            )}
+          </div>
+
+          {/* Live Feed Toggle Button (Phase D3) */}
+          <button
+            onClick={() => setLiveStreamOpen(!liveStreamOpen)}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-xs font-medium transition-all cursor-pointer ${
+              liveStreamOpen
+                ? 'bg-accent/20 border-accent/40 text-accent'
+                : 'bg-surface hover:bg-surface-elevated border-border-subtle text-gray-300'
+            }`}
+            title="Toggle real-time live event feed"
+          >
+            <Activity size={13} className={livePulse ? 'animate-bounce text-accent' : ''} />
+            <span>Live Feed</span>
+            {liveFeed.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-accent/30 text-accent font-mono text-[10px]">
+                {liveFeed.length}
+              </span>
+            )}
+          </button>
+
           {/* Time Range Selector */}
           <div className="flex items-center bg-surface border border-border-subtle rounded-lg p-0.5 text-xs font-mono">
             {(['15m', '1h', '6h', '24h'] as TimeRange[]).map(tr => (
@@ -435,15 +675,14 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
             <RefreshCw size={14} className={refreshing ? 'animate-spin text-accent' : ''} />
           </button>
 
-          {/* AI Generate Widgets */}
+          {/* AI Customize / Configure Layout */}
           <button
-            onClick={handleGenerateAIWidgets}
-            disabled={generatingAI}
+            onClick={() => setIsConfiguratorOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-medium text-gray-200 transition-all cursor-pointer"
-            title="AI synthesizes customized widgets based on live telemetry"
+            title="Configure widget placements, reorder, or synthesize with AI"
           >
-            <Sparkles size={14} className={generatingAI ? 'animate-spin text-accent' : 'text-accent'} />
-            {generatingAI ? 'Synthesizing...' : 'AI Generate'}
+            <Sliders size={14} className="text-accent" />
+            Customize Layout
           </button>
 
           {/* Ask Copilot */}
@@ -472,6 +711,98 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Collapsible Live Event Stream Feed (Phase D3) */}
+      <AnimatePresence>
+        {liveStreamOpen && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-4 p-4 rounded-xl bg-surface/90 border border-accent/25 backdrop-blur-md overflow-hidden space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold text-white">
+                <Terminal size={14} className="text-accent" />
+                <span>Real-Time WebSocket Feed</span>
+                <span className="text-gray-400 font-normal font-mono text-[11px]">
+                  ({liveFeed.length} events received)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {liveFeed.length > 0 && (
+                  <button
+                    onClick={() => setLiveFeed([])}
+                    className="text-[11px] text-gray-400 hover:text-white px-2 py-0.5 rounded bg-surface border border-border-subtle cursor-pointer"
+                  >
+                    Clear Stream
+                  </button>
+                )}
+                <button
+                  onClick={() => setLiveStreamOpen(false)}
+                  className="text-gray-400 hover:text-white p-1 rounded cursor-pointer"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+
+            {liveFeed.length === 0 ? (
+              <div className="py-6 text-center text-xs text-gray-400 font-mono">
+                Awaiting incoming WebSocket telemetry events for {displayName || connectorId}...
+              </div>
+            ) : (
+              <div className="max-h-52 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                {liveFeed.map((ev, idx) => {
+                  const isErr = (ev.event_type || '').toLowerCase().includes('fail') || (ev.event_type || '').toLowerCase().includes('error');
+                  const isWarn = (ev.event_type || '').toLowerCase().includes('spike') || (ev.event_type || '').toLowerCase().includes('warn');
+                  const isRawOpen = expandedRawId === `${idx}_${ev.timestamp}`;
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`p-2.5 rounded-lg border text-xs font-mono transition-colors ${
+                        isErr
+                          ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                          : isWarn
+                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                          : 'bg-surface-elevated border-border-subtle text-gray-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isErr ? 'bg-rose-400' : isWarn ? 'bg-amber-400' : 'bg-accent'}`} />
+                          <span className="font-bold text-white uppercase text-[10px] bg-white/10 px-1 py-0.2 rounded">
+                            {ev.event_type}
+                          </span>
+                          <span className="truncate text-gray-200">{ev.summary}</span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0 text-[10px] text-gray-400">
+                          <span>{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                          {ev.raw && (
+                            <button
+                              onClick={() => setExpandedRawId(isRawOpen ? null : `${idx}_${ev.timestamp}`)}
+                              className="text-accent hover:underline text-[10px] cursor-pointer"
+                            >
+                              {isRawOpen ? 'Hide' : 'Raw'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {isRawOpen && ev.raw && (
+                        <pre className="mt-2 p-2 bg-black/50 rounded text-[10px] text-gray-300 overflow-x-auto">
+                          {JSON.stringify(ev.raw, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Error State */}
       {error && (
@@ -531,9 +862,27 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
         /* Dynamic Widget Grid */
         <div className="space-y-6 pt-6">
           {customLayout && (
-            <div className="flex items-center gap-2 text-xs text-accent font-medium bg-accent/10 border border-accent/25 px-3 py-1.5 rounded-xl">
-              <Check size={14} />
-              AI synthesized custom widget configuration ({customLayout.length} widgets active)
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-accent font-medium bg-accent/10 border border-accent/25 px-4 py-2.5 rounded-xl">
+              <div className="flex items-center gap-2">
+                <Check size={15} />
+                <span>
+                  Custom Layout Active: <strong>{customLayout.length}</strong> widgets configured for this service
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsConfiguratorOpen(true)}
+                  className="px-2.5 py-1 rounded-lg bg-accent/20 hover:bg-accent/30 text-accent text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Configure Layout
+                </button>
+                <button
+                  onClick={handleResetCustomLayout}
+                  className="px-2.5 py-1 rounded-lg bg-surface hover:bg-surface-elevated text-gray-400 hover:text-white border border-border-subtle text-xs transition-colors cursor-pointer"
+                >
+                  Reset to Defaults
+                </button>
+              </div>
             </div>
           )}
 
@@ -543,12 +892,14 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               const keys: string[] = widget.metric_keys || [];
               const unit = widget.unit || '';
               const widgetLabel = widget.label || 'Telemetry';
+              const span = widget.position?.span || (wType === 'status_grid' ? 3 : (wType === 'line_chart' || wType === 'bar_chart' || wType === 'event_timeline' ? 2 : 1));
+              const colSpanClass = span === 3 ? 'col-span-1 md:col-span-2 lg:col-span-3' : (span === 2 ? 'col-span-1 md:col-span-2 lg:col-span-2' : 'col-span-1');
 
               // 1. Radial Gauge
               if (wType === 'gauge') {
                 const cardData = adaptMetricCardData(keys);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl flex items-center justify-center p-4 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl flex items-center justify-center p-4 relative group ${colSpanClass}`}>
                     <MetricGauge
                       value={cardData.rawVal}
                       label={widgetLabel}
@@ -571,7 +922,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               if (wType === 'line_chart') {
                 const chartData = adaptTimeSeriesData(keys);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl relative group ${colSpanClass}`}>
                     <MetricLineChart
                       data={chartData}
                       label={widgetLabel}
@@ -603,7 +954,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               if (wType === 'bar_chart') {
                 const barData = adaptBarData(keys, unit);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl relative group ${colSpanClass}`}>
                     <BarChart
                       data={barData}
                       label={widgetLabel}
@@ -635,7 +986,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               if (wType === 'metric_card') {
                 const cardData = adaptMetricCardData(keys);
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl flex flex-col justify-center gap-3 p-4 relative group">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl flex flex-col justify-center gap-3 p-4 relative group ${colSpanClass}`}>
                     <MetricCard
                       label={widgetLabel}
                       value={cardData.value}
@@ -662,7 +1013,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                   keys.length === 0 || keys.some(k => (ev.event_type || '').toLowerCase().includes(k.toLowerCase()))
                 );
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-2">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl ${colSpanClass}`}>
                     <EventTimeline
                       events={matchedEvents.length > 0 ? matchedEvents : events}
                       label={widgetLabel}
@@ -674,7 +1025,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
               // 6. Health Checks Status Grid
               if (wType === 'status_grid') {
                 return (
-                  <div key={widget.id || idx} className="glass-panel rounded-xl lg:col-span-3">
+                  <div key={widget.id || idx} className={`glass-panel rounded-xl ${colSpanClass}`}>
                     <StatusGrid
                       items={statusItems}
                       label={widgetLabel}
@@ -685,7 +1036,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
 
               // Fallback
               return (
-                <div key={widget.id || idx} className="glass-panel rounded-xl p-4 flex flex-col justify-between">
+                <div key={widget.id || idx} className={`glass-panel rounded-xl p-4 flex flex-col justify-between ${colSpanClass}`}>
                   <span className="text-xs font-semibold uppercase tracking-wider text-gray-400 block mb-2">{widgetLabel}</span>
                   <div className="flex items-baseline gap-2">
                     <span className="text-2xl font-bold text-white">—</span>
@@ -812,6 +1163,18 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Widget Layout Configurator Modal */}
+      <WidgetConfigurator
+        isOpen={isConfiguratorOpen}
+        onClose={() => setIsConfiguratorOpen(false)}
+        connectorId={connectorId}
+        connectorName={displayName || connectorInfo?.name}
+        resourceId={resourceId}
+        currentWidgets={activeWidgets}
+        onSaveLayout={handleSaveCustomLayout}
+        onResetLayout={handleResetCustomLayout}
+      />
     </motion.div>
   );
 };

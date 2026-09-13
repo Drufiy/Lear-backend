@@ -1,27 +1,41 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 export interface WebSocketEvent {
+  id?: string;
   watch_id?: string;
   connector?: string;
   event_type: string;
   summary: string;
+  severity?: string;
   raw?: any;
   timestamp: string;
+  [key: string]: any;
 }
+
+export type ConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 'disconnected';
 
 export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
   const [lastEvent, setLastEvent] = useState<WebSocketEvent | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<any>(null);
+  const retryCountRef = useRef(0);
 
   const connect = useCallback(() => {
     try {
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      setConnectionStatus(retryCountRef.current > 0 ? 'reconnecting' : 'connecting');
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
         setIsConnected(true);
+        setConnectionStatus('connected');
+        retryCountRef.current = 0; // Reset exponential backoff on successful handshake
       };
 
       ws.onmessage = (event) => {
@@ -39,19 +53,42 @@ export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
 
       ws.onclose = () => {
         setIsConnected(false);
-        // Attempt reconnect after 3 seconds
-        reconnectTimeoutRef.current = setTimeout(connect, 3000);
+        setConnectionStatus('reconnecting');
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
+        const delay = Math.min(1000 * Math.pow(2, retryCountRef.current), 30000);
+        retryCountRef.current += 1;
+        reconnectTimeoutRef.current = setTimeout(connect, delay);
       };
 
       ws.onerror = () => {
         setIsConnected(false);
-        ws.close();
+        setConnectionStatus('disconnected');
+        try {
+          ws.close();
+        } catch {}
       };
     } catch (e) {
       console.error('WebSocket connection error:', e);
-      reconnectTimeoutRef.current = setTimeout(connect, 3000);
+      setIsConnected(false);
+      setConnectionStatus('disconnected');
+      const delay = Math.min(1000 * Math.pow(2, retryCountRef.current), 30000);
+      retryCountRef.current += 1;
+      reconnectTimeoutRef.current = setTimeout(connect, delay);
     }
   }, [url]);
+
+  const sendMessage = useCallback((msg: any): boolean => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        const payload = typeof msg === 'string' ? msg : JSON.stringify(msg);
+        wsRef.current.send(payload);
+        return true;
+      } catch (e) {
+        console.error('Failed to send WebSocket message:', e);
+      }
+    }
+    return false;
+  }, []);
 
   useEffect(() => {
     connect();
@@ -61,7 +98,7 @@ export function useWebSocket(url: string = 'ws://127.0.0.1:8000/ws/events') {
     };
   }, [connect]);
 
-  return { isConnected, lastEvent };
+  return { isConnected, connectionStatus, lastEvent, sendMessage };
 }
 
 export default useWebSocket;
