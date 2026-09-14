@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 import dotenv
 import yaml
@@ -37,6 +37,12 @@ from prash.connector_registry import (
     safe_mask,
 )
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
+from prash.widget_generator import (
+    apply_layout,
+    generate_specs,
+    specs_to_json,
+    validate_specs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1593,72 +1599,143 @@ def clear_notifications():
 
 
 # ---------------------------------------------------------------------------
-# AI Widget Generation
+# AI Widget Generation & Saved Layouts
 # ---------------------------------------------------------------------------
+
+WIDGET_CONFIGS_KEY = "widget_configs"
+
+
+def _widget_scope_key(connector_id: str, resource_id: str) -> str:
+    return f"{connector_id}:{resource_id}" if resource_id else connector_id
+
+
+def _load_widget_config(connector_id: str, resource_id: str) -> Optional[List[Dict[str, Any]]]:
+    data = _read_prash_yaml()
+    configs = data.get(WIDGET_CONFIGS_KEY)
+    if not isinstance(configs, dict):
+        return None
+    stored = configs.get(_widget_scope_key(connector_id, resource_id))
+    return stored if isinstance(stored, list) and stored else None
+
+
+def _save_widget_config(connector_id: str, resource_id: str, widgets: List[Dict[str, Any]]) -> None:
+    data = _read_prash_yaml()
+    if not isinstance(data.get(WIDGET_CONFIGS_KEY), dict):
+        data[WIDGET_CONFIGS_KEY] = {}
+    data[WIDGET_CONFIGS_KEY][_widget_scope_key(connector_id, resource_id)] = widgets
+    _write_prash_yaml(data)
+
+
+def _live_widget_metadata(connector_id: str, resource_id: str) -> Tuple[str, List[str]]:
+    """Return (current_status, detected_metric_keys) from the live connector.
+
+    Returns honest empty data on any failure rather than fabricating telemetry.
+    """
+    env_config = _read_credentials()
+    status = "unknown"
+    metrics: List[str] = []
+    if not is_connector_configured(connector_id, env_config):
+        return status, metrics
+    try:
+        conn = get_connector(connector_id, _owned_config(connector_id, env_config))
+        if not resource_id:
+            return status, metrics
+        try:
+            state = conn.poll_state(resource_id)
+            status = state.state.value if hasattr(state.state, "value") else str(state.state)
+        except Exception:
+            pass
+        try:
+            events = conn.get_stats(resource_id)
+            metrics = sorted({ev.get("event_type") for ev in events if ev.get("event_type")})
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return status, metrics
+
 
 @app.post("/api/connectors/{connector_id}/generate-widgets")
 def generate_widgets(
     connector_id: str,
     payload: Dict[str, Any] = Body(default_factory=dict),
 ):
-    """Dynamically generates custom widget configurations tailored to the connector and resource."""
+    """Generate and persist a validated widget layout for a connector resource.
+
+    AI-proposed candidates in ``payload["widgets"]`` are validated against the
+    connector's real capabilities; invalid entries are rejected and reported,
+    and the generator falls back to the connector's registry templates.
+    """
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
     entry = CONNECTOR_REGISTRY[connector_id]
-    resource_id = payload.get("resource_id", "")
-    prompt = payload.get("prompt", "")
+    resource_id = str(payload.get("resource_id") or "")
 
-    env_config = _read_credentials()
-    available_metrics = []
-    current_status = "unknown"
+    result = generate_specs(entry, payload.get("widgets"))
+    widgets = specs_to_json(result.specs)
+    _save_widget_config(connector_id, resource_id, widgets)
 
-    if is_connector_configured(connector_id, env_config):
-        try:
-            conn = get_connector(connector_id, _owned_config(connector_id, env_config))
-            if resource_id:
-                try:
-                    state = conn.poll_state(resource_id)
-                    current_status = state.state.value if hasattr(state.state, "value") else str(state.state)
-                except Exception:
-                    pass
-                try:
-                    events = conn.get_stats(resource_id)
-                    available_metrics = list({ev.get("event_type") for ev in events if ev.get("event_type")})
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # Synthesize widget configuration from registry templates and active metrics
-    generated_widgets = []
-    row, col = 0, 0
-    for idx, template in enumerate(entry.widget_templates):
-        span = 2 if template.type in ("line_chart", "event_timeline") else 1
-        widget_cfg = {
-            "id": f"{connector_id}_{template.id}",
-            "type": template.type,
-            "label": template.label,
-            "metric_keys": template.metric_keys,
-            "unit": template.unit,
-            "description": template.description,
-            "refresh_interval": template.refresh_interval,
-            "position": {"row": row, "col": col, "span": span},
-            "ai_generated": True,
-            "rationale": f"Configured for {entry.name} based on capabilities and active telemetry.",
-        }
-        generated_widgets.append(widget_cfg)
-        col += span
-        if col >= 3:
-            col = 0
-            row += 1
+    current_status, available_metrics = _live_widget_metadata(connector_id, resource_id)
 
     return {
         "connector_id": connector_id,
         "resource_id": resource_id,
-        "widgets": generated_widgets,
+        "widgets": widgets,
+        "source": result.source,
+        "rejected": result.rejected,
         "status": current_status,
         "detected_metrics": available_metrics,
+    }
+
+
+@app.get("/api/connectors/{connector_id}/widgets")
+def get_widget_config(connector_id: str, resource: Optional[str] = Query(None)):
+    """Return the saved widget layout for a connector resource, if one exists."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    resource_id = resource or ""
+    widgets = _load_widget_config(connector_id, resource_id)
+    return {
+        "connector_id": connector_id,
+        "resource_id": resource_id,
+        "widgets": widgets or [],
+        "saved": widgets is not None,
+    }
+
+
+@app.put("/api/connectors/{connector_id}/widgets")
+def save_widget_config(
+    connector_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+):
+    """Validate and persist a user-edited widget layout for a connector resource."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+
+    entry = CONNECTOR_REGISTRY[connector_id]
+    resource_id = str(payload.get("resource_id") or "")
+    submitted = payload.get("widgets")
+    if not isinstance(submitted, list) or not submitted:
+        raise APIBridgeException("BAD_REQUEST", "Field 'widgets' must be a non-empty list", 400)
+
+    valid, rejected = validate_specs(submitted, entry)
+    if rejected:
+        raise APIBridgeException(
+            "WIDGET_VALIDATION_FAILED",
+            "Invalid widget definitions: " + "; ".join(rejected),
+            400,
+            {"rejected": rejected},
+        )
+
+    widgets = specs_to_json(apply_layout(valid))
+    _save_widget_config(connector_id, resource_id, widgets)
+    return {
+        "connector_id": connector_id,
+        "resource_id": resource_id,
+        "widgets": widgets,
+        "saved": True,
     }
 
 

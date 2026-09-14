@@ -10,6 +10,7 @@ import {
   X,
   Activity,
   Maximize2,
+  SlidersHorizontal,
   Table as TableIcon
 } from 'lucide-react';
 import MetricGauge from './widgets/MetricGauge';
@@ -18,6 +19,7 @@ import MetricCard from './widgets/MetricCard';
 import BarChart, { BarChartItem } from './widgets/BarChart';
 import EventTimeline, { TimelineEvent } from './widgets/EventTimeline';
 import StatusGrid, { StatusItem } from './widgets/StatusGrid';
+import WidgetConfigurator, { WidgetConfig } from './WidgetConfigurator';
 
 export interface ServiceWidgetProps {
   connectorId: string;
@@ -47,6 +49,9 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
   const [generatingAI, setGeneratingAI] = useState(false);
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [expandedWidget, setExpandedWidget] = useState<ExpandedWidgetState | null>(null);
+  const [configuratorOpen, setConfiguratorOpen] = useState(false);
+  const [layoutSource, setLayoutSource] = useState<'ai' | 'user' | null>(null);
+  const [layoutNotice, setLayoutNotice] = useState<string | null>(null);
 
   const [metrics, setMetrics] = useState<any[]>([]);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
@@ -132,14 +137,32 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
     }
   };
 
+  const loadSavedLayout = async () => {
+    try {
+      const params = resourceId ? `?resource=${encodeURIComponent(resourceId)}` : '';
+      const res = await fetch(`/api/connectors/${connectorId}/widgets${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.saved && Array.isArray(data.widgets) && data.widgets.length > 0) {
+          setCustomLayout(data.widgets);
+          setLayoutSource('user');
+        }
+      }
+    } catch (e) {
+      console.error('Error loading saved widget layout:', e);
+    }
+  };
+
   useEffect(() => {
     fetchTelemetry();
+    loadSavedLayout();
     const interval = setInterval(() => fetchTelemetry(false), 30000); // 30s auto-refresh
     return () => clearInterval(interval);
   }, [connectorId, resourceId]);
 
   const handleGenerateAIWidgets = async () => {
     setGeneratingAI(true);
+    setLayoutNotice(null);
     try {
       const res = await fetch(`/api/connectors/${connectorId}/generate-widgets`, {
         method: 'POST',
@@ -149,12 +172,24 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
       if (res.ok) {
         const data = await res.json();
         setCustomLayout(data.widgets || []);
+        setLayoutSource(data.source === 'ai' ? 'ai' : 'user');
+        const rejected = Array.isArray(data.rejected) ? data.rejected : [];
+        if (rejected.length > 0) {
+          setLayoutNotice(`${rejected.length} suggested widget(s) were rejected as invalid.`);
+        }
       }
     } catch (e) {
       console.error('Error generating AI widgets:', e);
     } finally {
       setGeneratingAI(false);
     }
+  };
+
+  const handleLayoutSaved = (widgets: WidgetConfig[]) => {
+    setCustomLayout(widgets);
+    setLayoutSource('user');
+    setLayoutNotice(null);
+    setConfiguratorOpen(false);
   };
 
   // Filter duration in ms based on selected time range
@@ -352,6 +387,12 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
     return items;
   }, [statusData, connectorId, resourceId, status, connectorInfo]);
 
+  // Detected metric names, offered to the configurator for valid metric keys
+  const availableMetrics = useMemo(
+    () => Array.from(new Set(metrics.map((m: any) => m.name).filter(Boolean))) as string[],
+    [metrics]
+  );
+
   // Active Widgets: customLayout (AI generated) OR widget_templates from registry
   const activeWidgets = useMemo(() => {
     if (customLayout && customLayout.length > 0) {
@@ -446,6 +487,16 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
             {generatingAI ? 'Synthesizing...' : 'AI Generate'}
           </button>
 
+          {/* Customize Layout */}
+          <button
+            onClick={() => setConfiguratorOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-medium text-gray-200 transition-all cursor-pointer"
+            title="Preview, reorder, and save this service's widget layout"
+          >
+            <SlidersHorizontal size={14} className="text-accent" />
+            Customize
+          </button>
+
           {/* Ask Copilot */}
           {onOpenChat && (
             <button
@@ -530,10 +581,21 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
       ) : (
         /* Dynamic Widget Grid */
         <div className="space-y-6 pt-6">
-          {customLayout && (
-            <div className="flex items-center gap-2 text-xs text-accent font-medium bg-accent/10 border border-accent/25 px-3 py-1.5 rounded-xl">
-              <Check size={14} />
-              AI synthesized custom widget configuration ({customLayout.length} widgets active)
+          {(customLayout || layoutNotice) && (
+            <div className="space-y-2">
+              {customLayout && (
+                <div className="flex items-center gap-2 text-xs text-accent font-medium bg-accent/10 border border-accent/25 px-3 py-1.5 rounded-xl">
+                  <Check size={14} />
+                  {layoutSource === 'ai'
+                    ? `AI synthesized custom widget configuration (${customLayout.length} widgets active)`
+                    : `Custom widget layout active (${customLayout.length} widgets)`}
+                </div>
+              )}
+              {layoutNotice && (
+                <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/25 px-3 py-1.5 rounded-xl">
+                  {layoutNotice}
+                </div>
+              )}
             </div>
           )}
 
@@ -812,6 +874,18 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Widget Layout Configurator (Task 16) */}
+      {configuratorOpen && (
+        <WidgetConfigurator
+          connectorId={connectorId}
+          resourceId={resourceId}
+          widgets={activeWidgets as WidgetConfig[]}
+          availableMetrics={availableMetrics}
+          onClose={() => setConfiguratorOpen(false)}
+          onSaved={handleLayoutSaved}
+        />
+      )}
     </motion.div>
   );
 };
