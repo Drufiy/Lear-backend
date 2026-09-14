@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from prash.connector_registry import CONNECTOR_REGISTRY, ConnectorRegistryEntry, clear_connector_cache
+from prash.connector_registry import CONNECTOR_REGISTRY, AuthField, ConnectorRegistryEntry, clear_connector_cache
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
 from prash.server import APIBridgeException, app, _active_watches
 
@@ -417,65 +417,126 @@ def test_WATCH_LIFECYCLE_START_STOP(client, monkeypatch):
 
 
 def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
-    """Verifies the complete connection lifecycle: connect, validate, masked credentials, and disconnect."""
+    """Verifies the transactional connect lifecycle: credential validation, masked persistence,
+    provider identity, and disconnect against the registry-driven contract."""
     test_env = tmp_path / ".test_connect_env"
     test_env.write_text("")
     monkeypatch.setattr("prash.server.ENV_PATH", str(test_env))
     monkeypatch.setattr("prash.connector_registry.ENV_PATH", str(test_env))
 
-    # 1. Missing credentials must fail with 400
-    res_fail = client.post("/api/connectors/aws/connect", json={"AWS_REGION": "us-east-1"})
-    assert res_fail.status_code == 400
-    assert res_fail.json()["code"] == "CONNECTOR_NOT_CONFIGURED"
+    class LifecycleConnector(Connector):
+        name = "lifecycle"
 
-    # 2. Mock authenticate success
-    mock_conn = MagicMock()
-    mock_conn.authenticate.return_value = True
-    monkeypatch.setattr("prash.server.get_connector", lambda cid, cfg=None: mock_conn)
+        def authenticate(self) -> bool:
+            self.auth_identity = {"account": "123456789012"}
+            return True
 
-    res_connect = client.post("/api/connectors/aws/connect", json={
-        "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
-        "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        "AWS_REGION": "us-west-2",
-    })
-    assert res_connect.status_code == 200
-    data_conn = res_connect.json()
-    assert data_conn["success"] is True
-    assert "identity" in data_conn
-    assert "AWS" in data_conn["identity"]
+        def locate(self, resource: str):
+            return {"id": resource}
 
-    # 3. Verify masked credentials are returned, not raw secrets
-    res_detail = client.get("/api/connectors/aws")
-    assert res_detail.status_code == 200
-    detail_data = res_detail.json()
-    assert detail_data["status"] == "configured"
-    assert "masked_credentials" in detail_data
-    masked_key = detail_data["masked_credentials"]["AWS_ACCESS_KEY_ID"]
-    assert masked_key.startswith("AKI")
-    assert masked_key.endswith("PLE")
-    assert "IOSFODNN7" not in masked_key  # Must not contain inner secret
+    entry = ConnectorRegistryEntry(
+        id="lifecycle",
+        name="Lifecycle Provider",
+        category="cloud",
+        icon="box",
+        color="#123456",
+        connector_class_path="tests.test_desktop_api.LifecycleConnector",
+        auth_fields=[
+            AuthField("LIFECYCLE_KEY", "Key", "password"),
+            AuthField("LIFECYCLE_REGION", "Region", "text", required=False, default="us-east-1"),
+        ],
+        widget_templates=[],
+    )
 
-    # 4. Validate credentials
-    res_val = client.get("/api/connectors/aws/validate")
-    assert res_val.status_code == 200
-    assert res_val.json()["valid"] is True
-    assert res_val.json()["status"] == "connected"
+    with patch.object(ConnectorRegistryEntry, "connector_class", new=LifecycleConnector):
+        with patch.dict(CONNECTOR_REGISTRY, {"lifecycle": entry}):
+            # 1. Missing required credentials must fail with 400 and never write the store
+            res_fail = client.post("/api/connectors/lifecycle/connect", json={"LIFECYCLE_REGION": "us-west-2"})
+            assert res_fail.status_code == 400
+            assert res_fail.json()["code"] == "CONNECTOR_NOT_CONFIGURED"
+            assert test_env.read_text() == ""
 
-    # 5. When auth fails (e.g. expired)
-    mock_conn.authenticate.return_value = False
-    res_exp = client.get("/api/connectors/aws/validate")
-    assert res_exp.status_code == 200
-    assert res_exp.json()["valid"] is False
-    assert res_exp.json()["status"] == "expired"
+            # 2. Successful connect persists and reports the real provider identity
+            res_connect = client.post("/api/connectors/lifecycle/connect", json={
+                "LIFECYCLE_KEY": "AKIAIOSFODNN7EXAMPLE",
+                "LIFECYCLE_REGION": "us-west-2",
+            })
+            assert res_connect.status_code == 200
+            data_conn = res_connect.json()
+            assert data_conn["success"] is True
+            assert data_conn["status"] == "healthy"
+            assert data_conn["identity"] == {"account": "123456789012"}
+            assert "AKIAIOSFODNN7EXAMPLE" not in res_connect.text
 
-    # 6. Disconnect
-    res_disc = client.post("/api/connectors/aws/disconnect")
-    assert res_disc.status_code == 200
-    assert res_disc.json()["success"] is True
+            # 3. Detail exposes masked auth fields, never the raw secret
+            res_detail = client.get("/api/connectors/lifecycle")
+            assert res_detail.status_code == 200
+            fields = {field["key"]: field for field in res_detail.json()["auth_fields"]}
+            assert fields["LIFECYCLE_KEY"]["configured"] is True
+            masked = fields["LIFECYCLE_KEY"]["masked_value"]
+            assert masked.startswith("AKI") and masked.endswith("PLE")
+            assert "IOSFODNN7" not in masked
+            assert "AKIAIOSFODNN7EXAMPLE" not in res_detail.text
 
-    # 7. Connector should now be unconfigured
-    res_unconf = client.get("/api/connectors/aws")
-    assert res_unconf.status_code == 200
-    assert res_unconf.json()["status"] == "unconfigured"
-    assert len(res_unconf.json()["masked_credentials"]) == 0
+            # 4. Disconnect removes registry-owned credentials and stops that connector's watches
+            handle = MagicMock(spec=WatchHandle)
+            _active_watches["lifecycle:one"] = handle
+            res_disc = client.delete("/api/connectors/lifecycle/disconnect")
+            assert res_disc.status_code == 200
+            assert res_disc.json()["status"] == "unconfigured"
+            handle.stop.assert_called_once_with()
+            assert "lifecycle:one" not in _active_watches
+
+            # 5. Connector now reports unconfigured with no masked values
+            res_unconf = client.get("/api/connectors/lifecycle")
+            assert res_unconf.status_code == 200
+            unconf_fields = {field["key"]: field for field in res_unconf.json()["auth_fields"]}
+            assert unconf_fields["LIFECYCLE_KEY"]["configured"] is False
+            assert unconf_fields["LIFECYCLE_KEY"]["masked_value"] == ""
+
+
+def test_NOTIFICATION_PERSISTENCE_AND_READ_STATE(client, monkeypatch, tmp_path):
+    """Notifications persist to the local store, read state is durable, and clear wipes the store."""
+    store = tmp_path / "notifications.json"
+    monkeypatch.setattr("prash.server.NOTIFICATIONS_PATH", str(store))
+    monkeypatch.setattr("prash.server._notifications", [
+        {
+            "id": "n1",
+            "title": "CPU spike",
+            "message": "pod: cpu above threshold",
+            "connector": "kubernetes",
+            "severity": "error",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "read": False,
+        },
+        {
+            "id": "n2",
+            "title": "Recovered",
+            "message": "service healthy again",
+            "connector": "kubernetes",
+            "severity": "success",
+            "timestamp": "2026-01-01T00:05:00+00:00",
+            "read": False,
+        },
+    ])
+
+    listed = client.get("/api/notifications")
+    assert listed.status_code == 200
+    assert [n["id"] for n in listed.json()["notifications"]] == ["n1", "n2"]
+
+    # Marking one read must persist to disk
+    assert client.post("/api/notifications/n1/read").status_code == 200
+    stored = json.loads(store.read_text(encoding="utf-8"))
+    assert next(n for n in stored if n["id"] == "n1")["read"] is True
+    assert next(n for n in stored if n["id"] == "n2")["read"] is False
+
+    # Mark-all-read must persist for every entry
+    assert client.post("/api/notifications/read-all").status_code == 200
+    stored = json.loads(store.read_text(encoding="utf-8"))
+    assert all(n["read"] for n in stored)
+
+    # Clearing wipes both the in-memory queue and the store
+    assert client.delete("/api/notifications").status_code == 200
+    assert json.loads(store.read_text(encoding="utf-8")) == []
+    assert client.get("/api/notifications").json()["notifications"] == []
 

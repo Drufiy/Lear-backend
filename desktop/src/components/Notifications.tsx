@@ -11,8 +11,10 @@ import {
   MessageSquare,
   Mail,
   ShieldAlert,
+  ArrowRight,
 } from 'lucide-react';
-import useNotifications from '../hooks/useNotifications';
+import useNotifications, { AppNotification } from '../hooks/useNotifications';
+import { useLear } from '../context/LearContext';
 
 export default function Notifications() {
   const {
@@ -22,6 +24,7 @@ export default function Notifications() {
     markAllAsRead,
     clearAll,
   } = useNotifications();
+  const { openChat } = useLear();
 
   const [activeView, setActiveView] = useState<'alerts' | 'channels'>('alerts');
   const [severityFilter, setSeverityFilter] = useState<string>('all');
@@ -32,6 +35,17 @@ export default function Notifications() {
     if (severityFilter === 'warning') return n.severity === 'warning';
     return true;
   });
+
+  // Notification center grouping: unread alerts are "New", the rest are "Earlier".
+  const newNotifications = filteredNotifications.filter(n => !n.read);
+  const earlierNotifications = filteredNotifications.filter(n => n.read);
+
+  const handleNotificationClick = (n: { id: string; connector?: string; read: boolean }) => {
+    if (!n.read) markAsRead(n.id);
+    if (n.connector) {
+      openChat({ connectorId: n.connector });
+    }
+  };
 
   const getSeverityIcon = (sev: string) => {
     switch (sev) {
@@ -45,6 +59,69 @@ export default function Notifications() {
         return <Info size={18} className="text-cyan-400 shrink-0" />;
     }
   };
+
+  const renderNotification = (n: AppNotification) => (
+    <div
+      key={n.id}
+      role="button"
+      tabIndex={0}
+      onClick={() => handleNotificationClick(n)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleNotificationClick(n);
+        }
+      }}
+      className={`group flex items-start justify-between p-4 rounded-xl border transition-all cursor-pointer ${
+        n.read
+          ? 'bg-surface/30 border-border-subtle opacity-75 hover:opacity-100'
+          : 'bg-surface/70 border-accent/30 shadow-sm hover:border-accent/60'
+      }`}
+    >
+      <div className="flex items-start gap-3.5">
+        <div className="p-2 rounded-lg bg-surface-elevated border border-border-subtle mt-0.5">
+          {getSeverityIcon(n.severity)}
+        </div>
+        <div>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-semibold ${n.read ? 'text-gray-300' : 'text-white'}`}>
+              {n.title}
+            </span>
+            {n.connector && (
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-accent/15 text-accent">
+                {n.connector}
+              </span>
+            )}
+            {!n.read && <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />}
+          </div>
+          <p className="text-[11px] text-gray-400 font-mono mt-1">{n.message}</p>
+          <span className="text-[10px] text-gray-500 font-mono mt-1 block">
+            {new Date(n.timestamp).toLocaleString()}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 shrink-0">
+        {n.connector && (
+          <span className="flex items-center gap-1 text-[11px] text-gray-500 group-hover:text-accent transition-colors">
+            Investigate
+            <ArrowRight size={12} />
+          </span>
+        )}
+        {!n.read && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              markAsRead(n.id);
+            }}
+            className="text-xs text-accent hover:underline font-medium px-2 py-1 rounded bg-accent/10 cursor-pointer"
+          >
+            Mark read
+          </button>
+        )}
+      </div>
+    </div>
+  );
 
   // Notification routing channels list (preserved from previous version)
   const channels = [
@@ -155,53 +232,27 @@ export default function Notifications() {
                 </span>
               </div>
             ) : (
-              <div className="space-y-3">
-                {filteredNotifications.map(n => (
-                  <div
-                    key={n.id}
-                    className={`flex items-start justify-between p-4 rounded-xl border transition-all ${
-                      n.read
-                        ? 'bg-surface/30 border-border-subtle opacity-75'
-                        : 'bg-surface/70 border-accent/30 shadow-sm'
-                    }`}
-                  >
-                    <div className="flex items-start gap-3.5">
-                      <div className="p-2 rounded-lg bg-surface-elevated border border-border-subtle mt-0.5">
-                        {getSeverityIcon(n.severity)}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className={`text-xs font-semibold ${n.read ? 'text-gray-300' : 'text-white'}`}>
-                            {n.title}
-                          </span>
-                          {n.connector && (
-                            <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-accent/15 text-accent">
-                              {n.connector}
-                            </span>
-                          )}
-                          {!n.read && (
-                            <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-                          )}
-                        </div>
-                        <p className="text-[11px] text-gray-400 font-mono mt-1">
-                          {n.message}
-                        </p>
-                        <span className="text-[10px] text-gray-500 font-mono mt-1 block">
-                          {new Date(n.timestamp).toLocaleString()}
-                        </span>
-                      </div>
+              <div className="space-y-6">
+                {/* NEW notifications (unread) */}
+                {newNotifications.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-accent">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+                      New ({newNotifications.length})
                     </div>
-
-                    {!n.read && (
-                      <button
-                        onClick={() => markAsRead(n.id)}
-                        className="text-xs text-accent hover:underline shrink-0 font-medium px-2 py-1 rounded bg-accent/10 cursor-pointer"
-                      >
-                        Mark read
-                      </button>
-                    )}
+                    {newNotifications.map(n => renderNotification(n))}
                   </div>
-                ))}
+                )}
+
+                {/* EARLIER notifications (read) */}
+                {earlierNotifications.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500">
+                      Earlier ({earlierNotifications.length})
+                    </div>
+                    {earlierNotifications.map(n => renderNotification(n))}
+                  </div>
+                )}
               </div>
             )}
           </div>

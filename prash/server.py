@@ -33,7 +33,6 @@ from prash.connector_registry import (
     get_connector,
     get_missing_fields,
     is_connector_configured,
-    mask_credential,
     registry_to_json,
     safe_mask,
 )
@@ -43,14 +42,44 @@ logger = logging.getLogger(__name__)
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
 YAML_PATH = os.path.join(os.path.dirname(__file__), "..", "prash.yaml")
+NOTIFICATIONS_PATH = os.path.join(os.path.dirname(__file__), "..", ".prash", "notifications.json")
 
 dotenv.load_dotenv(ENV_PATH, override=True)
+
+
+def _load_notifications() -> List[Dict[str, Any]]:
+    """Load persisted notifications from the local store, tolerating corruption."""
+    if not os.path.exists(NOTIFICATIONS_PATH):
+        return []
+    try:
+        with open(NOTIFICATIONS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning(f"Could not read notifications store: {exc}")
+        return []
+
+
+def _save_notifications(items: List[Dict[str, Any]]) -> None:
+    """Persist the notification queue atomically, keeping the newest 100 entries."""
+    directory = os.path.dirname(os.path.abspath(NOTIFICATIONS_PATH))
+    os.makedirs(directory, exist_ok=True)
+    fd, candidate_path = tempfile.mkstemp(prefix="notifications.", dir=directory, text=True)
+    os.close(fd)
+    try:
+        with open(candidate_path, "w", encoding="utf-8") as f:
+            json.dump(items[:100], f, indent=2)
+        os.replace(candidate_path, NOTIFICATIONS_PATH)
+    finally:
+        if os.path.exists(candidate_path):
+            os.unlink(candidate_path)
+
 
 # In-memory watch handles and active websocket clients
 _active_watches: Dict[str, WatchHandle] = {}
 _ws_clients: Set[WebSocket] = set()
 _ws_polling_task: Optional[asyncio.Task] = None
-_notifications: List[Dict[str, Any]] = []
+_notifications: List[Dict[str, Any]] = _load_notifications()
 
 # Global in-memory activity log for Task 14
 _activity_log: List[Dict[str, Any]] = []
@@ -428,6 +457,7 @@ async def _poll_watches_loop():
                     })
                 if len(_notifications) > 100:
                     del _notifications[100:]
+                _save_notifications(_notifications)
 
                 payload = json.dumps({"events": events_to_broadcast})
                 for ws in list(_ws_clients):
@@ -495,7 +525,7 @@ def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[s
             if owner:
                 return f"GitHub: {owner}"
             token = env_config.get("GITHUB_TOKEN", "")
-            return f"GitHub ({mask_credential(token)})"
+            return f"GitHub ({safe_mask(token)})"
 
         if connector_id == "kubernetes":
             context = getattr(connector, "context", None)
@@ -713,7 +743,10 @@ def get_connector_metrics(
         events = []
         try:
             events = connector.get_stats(target=target)
-        except Exception:
+        except TypeError:
+            # Some connectors expose get_stats with a different signature; only
+            # signature mismatches are swallowed here. Real provider failures and
+            # NotImplementedError must propagate so the API reports them honestly.
             events = []
 
         # Normalize metrics from real events
@@ -1526,7 +1559,7 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
 
 @app.get("/api/notifications")
 def get_notifications():
-    """Returns in-memory notification queue and watch updates."""
+    """Returns the persisted notification queue and watch updates."""
     return {"notifications": _notifications}
 
 
@@ -1536,7 +1569,17 @@ def mark_notification_read(notification_id: str):
     for n in _notifications:
         if n.get("id") == notification_id:
             n["read"] = True
+            _save_notifications(_notifications)
             return {"success": True}
+    return {"success": True}
+
+
+@app.post("/api/notifications/read-all")
+def mark_all_notifications_read():
+    """Mark every notification as read."""
+    for n in _notifications:
+        n["read"] = True
+    _save_notifications(_notifications)
     return {"success": True}
 
 
@@ -1545,6 +1588,7 @@ def clear_notifications():
     """Clear all notifications."""
     global _notifications
     _notifications = []
+    _save_notifications(_notifications)
     return {"success": True}
 
 

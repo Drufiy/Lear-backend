@@ -25,11 +25,13 @@ const ToastItem: React.FC<{ toast: AppNotification; onDismiss: (id: string) => v
   onDismiss,
 }) => {
   useEffect(() => {
+    // Critical alerts linger longer (10s) than informational toasts (5s).
+    const dismissMs = toast.severity === 'error' || toast.severity === 'warning' ? 10000 : 5000;
     const timer = setTimeout(() => {
       onDismiss(toast.id);
-    }, 6000);
+    }, dismissMs);
     return () => clearTimeout(timer);
-  }, [toast.id, onDismiss]);
+  }, [toast.id, toast.severity, onDismiss]);
 
   const getIcon = () => {
     switch (toast.severity) {

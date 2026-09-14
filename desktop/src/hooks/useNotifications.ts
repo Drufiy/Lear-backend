@@ -80,8 +80,13 @@ export function useNotifications() {
     }
   }, []);
 
-  const markAllAsRead = useCallback(() => {
+  const markAllAsRead = useCallback(async () => {
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+    try {
+      await fetch('/api/notifications/read-all', { method: 'POST' });
+    } catch (e) {
+      console.error('Error marking all notifications as read:', e);
+    }
   }, []);
 
   const clearAll = useCallback(async () => {
