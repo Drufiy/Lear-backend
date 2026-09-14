@@ -458,6 +458,14 @@ CONNECTOR_REGISTRY: Dict[str, ConnectorRegistryEntry] = {
                 placeholder="ghp_...",
                 help_text="GitHub token with repo and workflow permissions.",
             ),
+            AuthField(
+                key="GITHUB_REPO",
+                label="Repository",
+                type="text",
+                required=False,
+                placeholder="owner/repo",
+                help_text="Optional -- used to show a friendlier connection identity than the token alone.",
+            ),
         ],
         widget_templates=[
             WidgetTemplate(
