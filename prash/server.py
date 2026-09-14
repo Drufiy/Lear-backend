@@ -30,8 +30,8 @@ from prash.connector_registry import (
     get_connector,
     get_missing_fields,
     is_connector_configured,
-    mask_credential,
     registry_to_json,
+    safe_mask,
 )
 from prash.connectors.base import Connector, ConnectorEvent, ConnectorState, ResourceState, WatchHandle
 from prash.widget_generator import (
@@ -399,7 +399,7 @@ def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[s
             if owner:
                 return f"GitHub: {owner}"
             token = env_config.get("GITHUB_TOKEN", "")
-            return f"GitHub ({mask_credential(token)})"
+            return f"GitHub ({safe_mask(token)})"
 
         if connector_id == "kubernetes":
             context = getattr(connector, "context", None)

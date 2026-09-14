@@ -451,10 +451,11 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     assert res_detail.status_code == 200
     detail_data = res_detail.json()
     assert detail_data["status"] == "configured"
-    assert "masked_credentials" in detail_data
+    assert "auth_fields" in detail_data
     assert "last_verified" in detail_data
     assert detail_data["last_verified"] is not None
-    masked_key = detail_data["masked_credentials"]["AWS_ACCESS_KEY_ID"]
+    fields = {field["key"]: field for field in detail_data["auth_fields"]}
+    masked_key = fields["AWS_ACCESS_KEY_ID"]["masked_value"]
     assert masked_key.startswith("AKI")
     assert masked_key.endswith("PLE")
     assert "IOSFODNN7" not in masked_key  # Must not contain inner secret
@@ -483,7 +484,8 @@ def test_CONNECTOR_CONNECT_VALIDATE_DISCONNECT(client, monkeypatch, tmp_path):
     assert res_unconf.status_code == 200
     assert res_unconf.json()["status"] == "unconfigured"
     assert res_unconf.json()["last_verified"] is None
-    assert len(res_unconf.json()["masked_credentials"]) == 0
+    unconf_fields = {field["key"]: field for field in res_unconf.json()["auth_fields"]}
+    assert unconf_fields["AWS_ACCESS_KEY_ID"]["masked_value"] == ""
 
 
 def test_integrations_management_and_last_verified(client, monkeypatch, tmp_path):

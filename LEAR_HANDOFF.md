@@ -23,22 +23,44 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 
 - Remote: `https://github.com/Drufiy/Lear-backend.git`
 - Branch: `main` tracking `origin/main`
-- Base synchronized before current work: `8b857bb` (Merge pull request #46 from Drufiy/feature/watcher-panel)
+- Base synchronized before current work: `3881d16` (Merge pull request #51 from ananttheacharya/main)
 - Last updated: 2026-09-13 by CommandCode with Aryan (ALavent)
 - Commit author expected: `Aryan <214229068+ALavent@users.noreply.github.com>`
 - Push account expected: `ALavent`
-- Current state: 3 local commits ahead of origin/main (tasks 05 + 12 cherry-picked onto latest origin/main). Ready to push after authenticating as ALavent.
-- GitHub credential: Use the personal access token stored securely for ALavent account. Run `git config credential.helper store` and authenticate via HTTPS, or use `gh auth login` if GitHub CLI is available.
+- Current state: `main` is at `3881d16`. Feature work now goes through pull requests reviewed by `ananttheacharya`; do not push straight to `main`.
+- GitHub credential: use the ALavent personal access token via a secure credential store (or `gh auth login`); never commit it.
 
 ## Requested desktop work
 
 | Task | Status | Notes |
 |---|---|---|
-| 05 Service Connection Flow | Implemented, verified, committed | Commit `7424044` on top of latest origin/main. |
-| 06 Sidebar & Navigation | In Progress | Task 06 work exists in origin/main (completed by Anant). Verify if additional work needed. |
-| 08 Dynamic Metric Widgets | In Progress | Task 08 work exists in origin/main (completed by Anant). Verify if additional work needed. |
-| 11 Dashboard Overview | Pending | Requires Tasks 07, 08, and 09. |
-| 12 Integrations Management | Implemented, verified, committed | Commit `0d61fa2` on top of latest origin/main. |
+| 05 Service Connection Flow | Done | Commit `7424044` on main. |
+| 06 Sidebar & Navigation | Done | Delivered by Anant on main. |
+| 07 Project System | Done | Delivered by Anant on main. |
+| 08 Dynamic Metric Widgets | Done | Delivered by Anant on main. |
+| 09 Watcher Status & Live Monitoring | Done | Landed by Anant in PR #51 (exponential backoff, functional-state update, panel countdown/event stream, animations). |
+| 11 Dashboard Overview | Pending | Requires Tasks 07, 08, and 09 (all now complete). |
+| 12 Integrations Management | Done | Commit `0d61fa2` on main. |
+| 15 Notification System | Done | Landed by Anant in PR #51 (persistence, read-all, severity dismiss, New/Earlier grouping, click-to-service). |
+| 16 AI Widget Generation | Done | Landed by Anant in PR #51 (`prash/widget_generator.py` with prompt building/validation/fallback, `WidgetConfigurator.tsx`). |
+
+Task specs for 09/15/16 have moved to `tasks/desktop/completed/`.
+
+## Open pull requests (reviewed by ananttheacharya)
+
+- **#54** `fix/mask-credential-import` → `main` — repairs the unimportable `prash.server` (`mask_credential` → `safe_mask`) and updates the stale connect test. Merge this to make the desktop API and its tests runnable again.
+- #48 (Anant) `fix/desktop-metrics-error-swallow` → `main` — related honest-metrics fix.
+
+## Superseded pull requests (closed)
+
+- #50 `feature/watcher-status-09` — closed by Anant; superseded by PR #51.
+- #52 `feature/notifications-15` — closed as superseded by PR #51.
+- #53 `feature/widget-generation-16` — closed as superseded by PR #51.
+
+## Known issue on main (fixed by #54)
+
+`prash/server.py` imported `mask_credential`, which `prash.connector_registry` does not export (it exports `safe_mask`). On `3881d16`, `import prash.server` raised `ImportError`, so the desktop API could not start and every backend test importing it failed at collection.
+
 
 ## Task 05 — Service Connection Flow
 
@@ -135,14 +157,17 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 
 ## Resume here
 
-1. **Tasks 05 and 12 pushed successfully** to origin/main (`21e634d`).
-2. **Verify tasks 06 and 08** - these were completed by Anant and merged into origin/main. Check if they meet the spec or need additional work.
-3. **Task 11 (Dashboard Overview)** - pending. Requires Tasks 07, 08, and 09 to be complete first.
-4. **Update this file** after each completed task and before ending every session.
+1. **Merge PR #54** to unbreak `main` (`import prash.server` currently fails) and make the desktop API tests runnable.
+2. **Tasks 09, 15, 16 are complete on `main`** — delivered by Anant in merged PR #51. The corresponding PRs (#50, #52, #53) are closed as superseded; there is no remaining work on them.
+3. **Task 11 (Dashboard Overview)** is the next candidate. Its dependencies (07, 08, 09) are all complete.
+4. Re-run the full suite after #54 lands; the AWS `get_stats` failures seen earlier were environmental and should be re-checked against the current main.
+5. Work through pull requests with `ananttheacharya` as reviewer — do not push feature commits directly to `main`.
+6. **Update this file** after each completed task and before ending every session.
 
 ## Durable references
 
 - Desktop task index: `tasks/desktop/00_DESKTOP_OVERVIEW.md`
+- Completed task specs: `tasks/desktop/completed/`
 - Task 05: `tasks/desktop/05_SERVICE_CONNECTIONS.md`
 - Task 12: `tasks/desktop/12_INTEGRATIONS_PAGE.md`
 - Architecture/decision/running log: `PRASH_V2.md` §§9–10
