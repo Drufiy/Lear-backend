@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop Feature 16 — AI Widget Generation Pipeline (`prash/widget_generator.py`, `WidgetConfigurator.tsx`)** *(open PR #53)*:
+  - *Dedicated Generator Module*: New `prash/widget_generator.py` with `WidgetSpec`/`GenerationResult` dataclasses, widget-type and metric-key validation against each connector's registry capabilities, 3-column layout assignment, and an AI → validate → template fallback chain that never yields an empty layout.
+  - *Validated Generation & Persistence*: `POST /api/connectors/{id}/generate-widgets` now validates candidates, reports rejected definitions, and persists the layout to `prash.yaml` under `widget_configs` keyed by connector:resource. Registry-template output is no longer mislabelled `ai_generated`; the endpoints return the true `source` (`"ai"`/`"template"`).
+  - *Saved Layout Endpoints*: `GET /api/connectors/{id}/widgets` reads a saved layout; `PUT /api/connectors/{id}/widgets` validates and persists a user-edited layout, rejecting unknown widget types and metric keys.
+  - *Layout Configurator (`desktop/src/components/WidgetConfigurator.tsx`)*: Preview, add, remove, reorder, and edit widgets (type, metric keys, unit) with inline backend validation errors, wired into `ServiceWidget` via a Customize button and saved-layout loading.
+- **Desktop Feature 15 — In-App Notification System (`useNotifications`, `NotificationToast.tsx`, `Notifications.tsx`)** *(open PR #52)*:
+  - *Durable Notifications*: The queue persists to `.prash/notifications.json` (atomic write, 100-entry cap) and survives a backend restart; added `POST /api/notifications/read-all` plus durable read state.
+  - *Severity-Aware Toasts*: Critical toasts auto-dismiss after 10s, informational toasts after 5s.
+  - *Notification Center*: Alerts are grouped into New (unread) and Earlier sections; clicking a notification marks it read and opens the scoped service view for its connector, with keyboard support.
+  - *Backend Repair*: Fixed a broken `mask_credential` import in `prash/server.py` (the registry exposes `safe_mask`) that made the desktop API unimportable, and stopped `/api/connectors/{id}/metrics` from swallowing provider errors so its honest error handlers are reachable.
+- **Desktop Feature 09 — Watcher Status & Live Monitoring (`useWebSocket`, `useWatcher`, `WatcherPanel.tsx`)** *(open PR #50)*:
+  - *Reconnect Backoff*: WebSocket reconnection now uses exponential backoff (1s→30s, reset on success) instead of a fixed 3s delay.
+  - *Stale-Closure Fix*: `useWatcher` tracks watcher state through a ref so event-driven transitions no longer read stale values.
+  - *Live Panel*: `WatcherPanel` gained a next-poll countdown, a recent-events stream, color-coded connection state, and animated transitions for ACTIVE/ALERTING/STARTING/DEGRADED/ERROR.
 - **Desktop Feature 05 — Service Connection Flow & Credential Management (`ConnectorForm.tsx`, `useConnectorStatus.ts`)**:
   - *Reusable Standalone Connection Form (`desktop/src/components/ConnectorForm.tsx`)*: Extracted inlined Wizard logic into a standalone form supporting dynamic auth fields, show/hide password toggles, placeholder masking for active credentials (`••••••••••••`), live validation spinner, connected provider identity badges, exact error reporting, and safe disconnect confirmation.
   - *Connection Lifecycle Hook (`desktop/src/hooks/useConnectorStatus.ts`)*: Manages connection states (`unconfigured`, `connecting`, `connected`, `expired`, `error`) with periodic 60s background health verification.

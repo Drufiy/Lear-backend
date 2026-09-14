@@ -27,18 +27,34 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 - Last updated: 2026-09-13 by CommandCode with Aryan (ALavent)
 - Commit author expected: `Aryan <214229068+ALavent@users.noreply.github.com>`
 - Push account expected: `ALavent`
-- Current state: 3 local commits ahead of origin/main (tasks 05 + 12 cherry-picked onto latest origin/main). Ready to push after authenticating as ALavent.
-- GitHub credential: Use the personal access token stored securely for ALavent account. Run `git config credential.helper store` and authenticate via HTTPS, or use `gh auth login` if GitHub CLI is available.
+- Current state: `main` is at `a1c7345` (Tasks 05 + 12). Tasks 09/15/16 are open PRs (#50/#52/#53) and must **not** be pushed straight to `main`.
+- GitHub credential: use the ALavent personal access token via a secure credential store (or `gh auth login`); never commit it.
 
 ## Requested desktop work
 
 | Task | Status | Notes |
 |---|---|---|
-| 05 Service Connection Flow | Implemented, verified, committed | Commit `7424044` on top of latest origin/main. |
+| 05 Service Connection Flow | Implemented, verified, pushed | Commit `7424044` on main. |
 | 06 Sidebar & Navigation | In Progress | Task 06 work exists in origin/main (completed by Anant). Verify if additional work needed. |
 | 08 Dynamic Metric Widgets | In Progress | Task 08 work exists in origin/main (completed by Anant). Verify if additional work needed. |
+| 09 Watcher Status & Live Monitoring | Implemented, in review | PR #50 (`feature/watcher-status-09`). Exponential backoff, stale-closure fix, countdown, event stream, state animations. |
 | 11 Dashboard Overview | Pending | Requires Tasks 07, 08, and 09. |
-| 12 Integrations Management | Implemented, verified, committed | Commit `0d61fa2` on top of latest origin/main. |
+| 12 Integrations Management | Implemented, verified, pushed | Commit `0d61fa2` on main. |
+| 15 Notification System | Implemented, in review | PR #52 (`feature/notifications-15`). Persistence, read-all, severity dismiss, New/Earlier grouping, click-to-service. |
+| 16 AI Widget Generation | Implemented, in review | PR #53 (`feature/widget-generation-16`, stacked on #52). Generator module, validation + fallback, saved layouts, WidgetConfigurator. |
+
+## Open pull requests (awaiting review by ananttheacharya)
+
+- **#50** `feature/watcher-status-09` → `main` — Task 09. Independent.
+- **#52** `feature/notifications-15` → `main` — Task 15, also carries the backend `mask_credential`→`safe_mask` repair and the honest-metrics error fix.
+- **#53** `feature/widget-generation-16` → `feature/notifications-15` — Task 16, stacked on #52. Merge #52 first; GitHub retargets #53 to `main`.
+
+No direct commits were pushed to `main` for Tasks 09/15/16 — all changes go through review.
+
+## Known pre-existing issues (not introduced here)
+
+- `tests/test_aws_connector.py::test_get_stats` and `::test_get_stats_enhanced` fail on the merge base `8b857bb` too; the AWS connector emits more events than those tests expect.
+
 
 ## Task 05 — Service Connection Flow
 
@@ -135,16 +151,21 @@ This is the session-resume snapshot for work in `C:\Users\Dell\Lear-backend`. Re
 
 ## Resume here
 
-1. **Tasks 05 and 12 pushed successfully** to origin/main (`21e634d`).
-2. **Verify tasks 06 and 08** - these were completed by Anant and merged into origin/main. Check if they meet the spec or need additional work.
-3. **Task 11 (Dashboard Overview)** - pending. Requires Tasks 07, 08, and 09 to be complete first.
-4. **Update this file** after each completed task and before ending every session.
+1. **Tasks 05 and 12** are pushed to `origin/main` (`a1c7345`).
+2. **Tasks 09, 15, 16 are open as pull requests** #50, #52, #53, each with `ananttheacharya` as reviewer. Do not push them directly to `main`.
+   - Merge order: #50 (independent) and #52 (Task 15, carries the backend repair) first; #53 is stacked on #52 and retargets to `main` when #52 merges.
+3. After the PRs merge, re-run the full suite and verify the two pre-existing AWS `get_stats` failures are still the only unrelated failures.
+4. **Task 11 (Dashboard Overview)** - pending. Requires Tasks 07, 08, and 09 to be complete first.
+5. **Update this file** after each completed task and before ending every session.
 
 ## Durable references
 
 - Desktop task index: `tasks/desktop/00_DESKTOP_OVERVIEW.md`
 - Task 05: `tasks/desktop/05_SERVICE_CONNECTIONS.md`
+- Task 09: `tasks/desktop/09_WATCHER_STATUS.md`
 - Task 12: `tasks/desktop/12_INTEGRATIONS_PAGE.md`
+- Task 15: `tasks/desktop/15_NOTIFICATIONS.md`
+- Task 16: `tasks/desktop/16_AI_WIDGET_GENERATION.md`
 - Architecture/decision/running log: `PRASH_V2.md` §§9–10
 - User-visible changes: `CHANGELOG.md`
 - Test procedures: `TESTING_SETUP.md`, `TESTING_CHECKLIST.md`, `E2E_TEST_CHECKLIST.md`
