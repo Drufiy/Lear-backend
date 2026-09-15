@@ -8,13 +8,16 @@ zero fallback numbers.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import datetime
 import json
 import logging
 import os
+import shutil
 import sys
-from typing import Any, Dict, List, Optional, Set
+import tempfile
+import threading
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
 import dotenv
 import yaml
@@ -150,10 +153,208 @@ _dashboard_summary_cache: Dict[str, Any] = {
     "data": None,
 }
 
+# Connection-lifecycle cache (Task 05): restored 2026-09-14 after being
+# silently dropped from a server.py rewrite -- see prash/server.py's git
+# history at commit 7424044 for the original. Tracks each connector's last
+# known auth status ("healthy"/"expired"/"unconfigured") so /status and the
+# periodic health-check loop don't re-authenticate on every poll, and so a
+# credential known to be invalid isn't retried on every automatic check.
+_connection_states: Dict[str, Dict[str, Any]] = {}
+_health_check_task: Optional[asyncio.Task] = None
+# Connector SDKs inconsistently consult their config mapping and os.environ.
+# Serialize temporary environment projection and dotenv read-modify-replace operations.
+_auth_environment_lock = threading.RLock()
+_dotenv_lock = threading.RLock()
+
+
+def _auth_keys(connector_id: str) -> List[str]:
+    return [field.key for field in CONNECTOR_REGISTRY[connector_id].auth_fields]
+
+
+def _owned_config(connector_id: str, config: Mapping[str, Any], include_defaults: bool = True) -> Dict[str, Any]:
+    """Return only registry fields owned by one connector."""
+    owned: Dict[str, Any] = {}
+    for field in CONNECTOR_REGISTRY[connector_id].auth_fields:
+        if field.key in config:
+            owned[field.key] = config[field.key]
+        elif include_defaults and field.default:
+            owned[field.key] = field.default
+    return owned
+
+
+@contextmanager
+def _candidate_auth_environment(connector_id: str, candidate: Mapping[str, Any]) -> Iterator[None]:
+    """Expose only candidate registry values while constructing/authenticating a
+    connector, restoring whatever was there (including nothing) afterward --
+    so testing a new credential never leaks into or clobbers the real process
+    environment (a connector's own SDK may read os.environ directly)."""
+    keys = _auth_keys(connector_id)
+    with _auth_environment_lock:
+        previous = {key: os.environ.get(key) for key in keys}
+        try:
+            for key in keys:
+                value = candidate.get(key)
+                if value is None or str(value) == "":
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(value)
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
+def _read_credentials() -> Dict[str, Any]:
+    with _dotenv_lock:
+        return dict(dotenv.dotenv_values(ENV_PATH)) if os.path.exists(ENV_PATH) else {}
+
+
+def _utcnow() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _safe_text(value: Any, secrets: Mapping[str, Any]) -> str:
+    text = str(value)
+    for secret in secrets.values():
+        if secret:
+            text = text.replace(str(secret), "[redacted]")
+    return text[:1000]
+
+
+def _connector_error(connector: Connector, secrets: Mapping[str, Any], fallback: str) -> str:
+    error = getattr(connector, "auth_error", None) or fallback
+    return _safe_text(error, secrets)
+
+
+def _connection_state(connector_id: str, env_config: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    config = env_config or {}
+    if connector_id in _connection_states:
+        return dict(_connection_states[connector_id])
+    status = "configured" if is_connector_configured(connector_id, config) else "unconfigured"
+    return {"status": status, "last_verified": None, "last_checked": None, "error": None, "identity": {}}
+
+
+def _set_connection_state(connector_id: str, status: str, error: Optional[str] = None,
+                           identity: Optional[Any] = None, verified: bool = False) -> Dict[str, Any]:
+    """Every call represents one real check attempt, so last_checked always
+    advances to now. last_verified is narrower -- the last time a check
+    actually CONFIRMED the credential healthy -- so it only advances when
+    verified=True, and otherwise carries forward whatever the last successful
+    check set, surviving any number of failed checks in between."""
+    previous = _connection_states.get(connector_id, {})
+    now_ts = _utcnow()
+    state = {
+        "status": status,
+        "last_verified": now_ts if verified else previous.get("last_verified"),
+        "last_checked": now_ts,
+        "error": error,
+        "identity": identity if identity is not None else previous.get("identity", {}),
+    }
+    _connection_states[connector_id] = state
+    return dict(state)
+
+
+def _clear_connection_state(connector_id: str) -> Dict[str, Any]:
+    """Drop any cached state entirely -- used when a connector becomes
+    unconfigured (disconnected, or credentials found missing), so
+    last_verified/identity read as fresh-default None/{} rather than
+    carrying over a stale timestamp from before the credential was removed."""
+    _connection_states.pop(connector_id, None)
+    return {"status": "unconfigured", "last_verified": None, "last_checked": None, "error": None, "identity": {}}
+
+
+def _persist_credentials(updates: Mapping[str, Optional[str]]) -> None:
+    """Atomically replace .env with `updates` applied -- a crash or concurrent
+    write mid-way never leaves a half-written credentials file."""
+    with _dotenv_lock:
+        directory = os.path.dirname(os.path.abspath(ENV_PATH)) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, candidate_path = tempfile.mkstemp(prefix=".env.", dir=directory, text=True)
+        os.close(fd)
+        try:
+            if os.path.exists(ENV_PATH):
+                shutil.copyfile(ENV_PATH, candidate_path)
+            for key, value in updates.items():
+                if value is None or value == "":
+                    dotenv.unset_key(candidate_path, key)
+                else:
+                    dotenv.set_key(candidate_path, key, value)
+            os.replace(candidate_path, ENV_PATH)
+        finally:
+            if os.path.exists(candidate_path):
+                os.unlink(candidate_path)
+
+
+def _remove_credentials(keys: List[str]) -> None:
+    with _dotenv_lock:
+        if not os.path.exists(ENV_PATH):
+            return
+        directory = os.path.dirname(os.path.abspath(ENV_PATH)) or "."
+        fd, candidate_path = tempfile.mkstemp(prefix=".env.", dir=directory, text=True)
+        os.close(fd)
+        try:
+            shutil.copyfile(ENV_PATH, candidate_path)
+            for key in keys:
+                dotenv.unset_key(candidate_path, key)
+            os.replace(candidate_path, ENV_PATH)
+        finally:
+            if os.path.exists(candidate_path):
+                os.unlink(candidate_path)
+
+
+def _verify_persisted_connector(connector_id: str, automatic: bool = False) -> Dict[str, Any]:
+    """Re-authenticate using whatever is currently persisted for this
+    connector, and cache the result. `automatic=True` (the periodic health
+    loop) skips connectors already known expired/errored -- retrying a
+    credential already known to be bad on every tick is wasted work and,
+    worse, extra failed-auth noise against the real provider."""
+    env_config = _owned_config(connector_id, _read_credentials())
+    if not is_connector_configured(connector_id, env_config):
+        return _clear_connection_state(connector_id)
+    current = _connection_states.get(connector_id, {})
+    if automatic and current.get("status") in {"expired", "error"}:
+        return dict(current)
+    secrets = {key: env_config.get(key) for key in _auth_keys(connector_id)}
+    try:
+        with _candidate_auth_environment(connector_id, env_config):
+            clear_connector_cache(connector_id)
+            connector = get_connector(connector_id, env_config)
+            authenticated = connector.authenticate()
+            error = None if authenticated else _connector_error(connector, secrets, "Authentication failed")
+            identity = _get_provider_identity(connector_id, connector, env_config) if authenticated else {}
+    except Exception as exc:
+        error = _safe_text(exc, secrets)
+        # verified=False: last_verified tracks the last CONFIRMED-GOOD check,
+        # not the last attempt -- a failure must never stamp it, only ever
+        # preserve whatever the previous successful verification set.
+        return _set_connection_state(connector_id, "expired", error=error, identity={})
+    if not authenticated:
+        return _set_connection_state(connector_id, "expired", error=error, identity={})
+    return _set_connection_state(connector_id, "healthy", identity=identity, verified=True)
+
+
+async def _health_check_loop() -> None:
+    """Periodically re-verify every currently-configured connector so a
+    revoked credential surfaces on its own instead of only being noticed the
+    next time a user happens to hit /status."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            env_config = _read_credentials()
+            for connector_id in discover_configured(env_config):
+                await asyncio.to_thread(_verify_persisted_connector, connector_id, True)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error(f"Error in connector health check loop: {exc}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _ws_polling_task, _notifications
+    global _ws_polling_task, _health_check_task, _notifications
     try:
         _restore_persisted_watches()
     except Exception as e:
@@ -165,9 +366,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Error loading persisted notifications on startup: {e}")
     _ws_polling_task = asyncio.create_task(_poll_watches_loop())
+    _health_check_task = asyncio.create_task(_health_check_loop())
     yield
     if _ws_polling_task:
         _ws_polling_task.cancel()
+    if _health_check_task:
+        _health_check_task.cancel()
     for handle in list(_active_watches.values()):
         try:
             handle.stop()
@@ -347,27 +551,35 @@ async def _poll_watches_loop():
 # Connector Endpoints
 # ---------------------------------------------------------------------------
 
-_last_verified: Dict[str, str] = {}
-
-
 @app.get("/api/connectors")
 def list_connectors():
-    """Returns all registered connectors with live configuration status."""
+    """Returns all registered connectors with live configuration status.
+
+    status stays registry_to_json's own configured/unconfigured (not the
+    richer connection-lifecycle status) -- last_verified/identity come from
+    the connection-state cache, but a connector whose credentials are
+    literally absent from .env must never read as anything but unconfigured
+    here, regardless of a stale cached "healthy" from an earlier session."""
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
     connectors = registry_to_json(env_config)
     for c in connectors:
-        c["last_verified"] = _last_verified.get(c["id"])
+        state = _connection_state(c["id"], env_config)
+        c["last_verified"] = state["last_verified"]
+        c["identity"] = state["identity"] if c["status"] == "configured" else {}
     return {"connectors": connectors}
 
 
 @app.get("/api/connectors/{connector_id}")
 def get_connector_info(connector_id: str):
-    """Returns detailed metadata for a specific connector."""
+    """Returns detailed metadata for a specific connector. See list_connectors
+    for why status is left to connector_detail_to_json's own computation."""
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
     info = connector_detail_to_json(connector_id, env_config)
-    info["last_verified"] = _last_verified.get(connector_id)
+    state = _connection_state(connector_id, env_config)
+    info["last_verified"] = state["last_verified"]
+    info["identity"] = state["identity"] if info["status"] == "configured" else {}
     return info
 
 
@@ -431,23 +643,34 @@ def _get_provider_identity(connector_id: str, connector: Any, env_config: Dict[s
 
 @app.post("/api/connectors/{connector_id}/connect")
 def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)):
-    """Authenticate and save credentials for any connector."""
+    """Authenticate candidate credentials BEFORE persisting them, atomically.
+
+    Restored 2026-09-14 (see the connection-state cache comment above) after
+    this endpoint had regressed to save-then-authenticate: a rejected
+    connection attempt was left writing its (bad, possibly attacker-supplied)
+    credentials to .env anyway, clobbering whatever good credentials were
+    there before. Also restores rejecting credential keys the registry
+    doesn't own -- previously any field name was accepted and persisted."""
     if connector_id not in CONNECTOR_REGISTRY:
+        credentials.clear()
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
-    if not os.path.exists(ENV_PATH):
-        open(ENV_PATH, "w").close()
+    entry = CONNECTOR_REGISTRY[connector_id]
+    allowed = {field.key for field in entry.auth_fields}
+    submitted = {key: str(value) for key, value in credentials.items() if key in allowed}
+    unknown = sorted(set(credentials) - allowed)
+    existing = _owned_config(connector_id, _read_credentials(), include_defaults=False)
+    candidate = dict(existing)
+    candidate.update(submitted)
+    for field in entry.auth_fields:
+        if field.key not in candidate and field.default:
+            candidate[field.key] = field.default
+    secrets = {field.key: candidate.get(field.key) for field in entry.auth_fields}
+    credentials.clear()
 
-    # Save non-empty credentials to .env
-    for k, v in credentials.items():
-        if v:
-            dotenv.set_key(ENV_PATH, k, v)
-
-    dotenv.load_dotenv(ENV_PATH, override=True)
-    clear_connector_cache(connector_id)
-
-    env_config = dotenv.dotenv_values(ENV_PATH)
-    missing = get_missing_fields(connector_id, env_config)
+    if unknown:
+        raise APIBridgeException("BAD_REQUEST", f"Unknown credential fields: {', '.join(unknown)}", 400)
+    missing = get_missing_fields(connector_id, candidate)
     if missing:
         raise APIBridgeException(
             "CONNECTOR_NOT_CONFIGURED",
@@ -457,48 +680,49 @@ def connect_connector(connector_id: str, credentials: Dict[str, str] = Body(...)
         )
 
     try:
-        connector = get_connector(connector_id, env_config)
-        is_authenticated = connector.authenticate()
-        if not is_authenticated:
-            raise APIBridgeException(
-                "CONNECTOR_AUTH_FAILED",
-                f"Authentication failed for {connector_id}. Provider rejected credentials.",
-                401,
+        with _candidate_auth_environment(connector_id, candidate):
+            connector = get_connector(connector_id, candidate)
+            authenticated = connector.authenticate()
+            error = None if authenticated else _connector_error(
+                connector, secrets, f"Authentication failed for {entry.name}. Provider rejected credentials."
             )
-        entry = CONNECTOR_REGISTRY[connector_id]
-        identity = _get_provider_identity(connector_id, connector, env_config)
-        now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        _last_verified[connector_id] = now_ts
-        return {
-            "success": True,
-            "message": f"{entry.name} authenticated successfully",
-            "identity": identity,
-            "last_verified": now_ts,
-        }
-    except APIBridgeException:
-        raise
-    except Exception as e:
-        raise APIBridgeException("CONNECTOR_API_ERROR", f"Authentication error: {str(e)}", 500)
+            identity = _get_provider_identity(connector_id, connector, candidate) if authenticated else None
+    except Exception as exc:
+        raise APIBridgeException("CONNECTOR_AUTH_FAILED", _safe_text(exc, secrets), 401)
+    if not authenticated:
+        # Failure does NOT touch _connection_states: the candidate was never
+        # persisted, so whatever state reflects the last-persisted, actually-
+        # working credential must be left exactly as it was.
+        raise APIBridgeException("CONNECTOR_AUTH_FAILED", error, 401)
+
+    updates = {
+        field.key: (str(candidate[field.key]) if candidate.get(field.key) else None)
+        for field in entry.auth_fields
+        if field.key in submitted or (field.key not in existing and candidate.get(field.key))
+    }
+    _persist_credentials(updates)
+    clear_connector_cache(connector_id)
+    state = _set_connection_state(connector_id, "healthy", identity=identity, verified=True)
+    secrets.clear()
+    submitted.clear()
+    return {
+        "success": True,
+        "message": f"{entry.name} authenticated successfully",
+        **state,
+    }
 
 
 @app.post("/api/connectors/{connector_id}/disconnect")
+@app.delete("/api/connectors/{connector_id}/disconnect")
 def disconnect_connector(connector_id: str):
     """Disconnect a service by removing credentials from .env and halting active watches."""
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
     entry = CONNECTOR_REGISTRY[connector_id]
+    _remove_credentials([field.key for field in entry.auth_fields])
+    clear_connector_cache(connector_id)
 
-    # 1. Remove all auth field keys from .env
-    if os.path.exists(ENV_PATH):
-        for field in entry.auth_fields:
-            try:
-                dotenv.unset_key(ENV_PATH, field.key)
-            except Exception as e:
-                logger.warning(f"Error unsetting key {field.key}: {e}")
-        dotenv.load_dotenv(ENV_PATH, override=True)
-
-    # 2. Stop any active watches associated with this connector
     stopped_watches = []
     for wid in list(_active_watches.keys()):
         if wid.startswith(f"{connector_id}:") or wid == connector_id:
@@ -510,15 +734,26 @@ def disconnect_connector(connector_id: str):
                 except Exception as e:
                     logger.warning(f"Error stopping watch {wid} on disconnect: {e}")
 
-    # 3. Clear cached connector instance and last verified timestamp
-    clear_connector_cache(connector_id)
-    _last_verified.pop(connector_id, None)
-
+    state = _clear_connection_state(connector_id)
     return {
         "success": True,
         "message": f"{entry.name} disconnected successfully",
         "stopped_watches": stopped_watches,
+        **state,
     }
+
+
+@app.post("/api/connectors/{connector_id}/check")
+def check_connector(connector_id: str):
+    """Force an immediate re-verification of the persisted credential,
+    bypassing the automatic-check skip that spares an already-known-bad
+    credential from being retried on every periodic health tick."""
+    if connector_id not in CONNECTOR_REGISTRY:
+        raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
+    state = _verify_persisted_connector(connector_id)
+    success = state["status"] == "healthy"
+    message = "Connection verified" if success else (state.get("error") or "Connection check failed")
+    return {"success": success, "message": message, **state}
 
 
 @app.get("/api/connectors/{connector_id}/validate")
@@ -542,16 +777,16 @@ def validate_connector(connector_id: str):
         is_authenticated = connector.authenticate()
         if is_authenticated:
             identity = _get_provider_identity(connector_id, connector, env_config)
-            now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            _last_verified[connector_id] = now_ts
+            state = _set_connection_state(connector_id, "healthy", identity=identity, verified=True)
             return {
                 "valid": True,
                 "status": "connected",
                 "message": f"{entry.name} credentials are active",
                 "identity": identity,
-                "last_verified": now_ts,
+                "last_verified": state["last_verified"],
             }
         else:
+            _set_connection_state(connector_id, "expired", error="Authentication failed", identity={})
             return {
                 "valid": False,
                 "status": "expired",
@@ -570,31 +805,34 @@ def validate_connector(connector_id: str):
 
 @app.get("/api/connectors/{connector_id}/status")
 def get_connector_status(connector_id: str, resource: Optional[str] = Query(None)):
-    """Check live status and optionally poll a specific resource."""
+    """Check status and optionally poll a specific resource.
+
+    With no `resource`, this reads the connection-state CACHE and never
+    re-authenticates -- restored 2026-09-14: this had regressed to calling
+    connector.authenticate() on every single call, which is exactly the
+    re-auth spam / retry-storm-against-a-known-bad-credential the cache
+    exists to prevent (a UI polling /status every few seconds would otherwise
+    hammer the real provider with auth calls nonstop). Use POST .../check to
+    force a real re-verification."""
     if connector_id not in CONNECTOR_REGISTRY:
         raise APIBridgeException("CONNECTOR_NOT_FOUND", f"Unknown connector: {connector_id}", 404)
 
     env_config = dotenv.dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
     if not is_connector_configured(connector_id, env_config):
-        return {
-            "status": "unconfigured",
-            "detail": {"missing_fields": get_missing_fields(connector_id, env_config)},
-        }
+        state = _clear_connection_state(connector_id)
+        return {**state, "detail": {"missing_fields": get_missing_fields(connector_id, env_config)}}
+
+    if not resource:
+        state = _connection_state(connector_id, env_config)
+        return {**state, "detail": {"authenticated": state["status"] == "healthy"}}
 
     try:
-        connector = get_connector(connector_id, env_config)
-        is_auth = connector.authenticate()
-        if not is_auth:
-            return {"status": "error", "detail": {"message": "Authentication failed"}}
-
-        if resource:
-            state = connector.poll_state(resource)
-            state_val = state.state.value if hasattr(state.state, "value") else str(state.state)
-            return {"status": state_val, "detail": state.detail, "resource": resource}
-
-        return {"status": "healthy", "detail": {"authenticated": True}}
+        connector = get_connector(connector_id, _owned_config(connector_id, env_config))
+        state = connector.poll_state(resource)
+        state_val = state.state.value if hasattr(state.state, "value") else str(state.state)
+        return {"status": state_val, "detail": state.detail, "resource": resource}
     except Exception as e:
-        return {"status": "error", "detail": {"message": str(e)}}
+        return {"status": "error", "detail": {"message": _safe_text(e, env_config)}}
 
 
 @app.get("/api/connectors/{connector_id}/metrics")
@@ -1649,15 +1887,20 @@ def get_config():
 
 @app.post("/api/config")
 def update_config(updates: Dict[str, str] = Body(...)):
-    """Updates the .env file with new values and clears cached connectors."""
-    if not os.path.exists(ENV_PATH):
-        open(ENV_PATH, "w").close()
-
-    for k, v in updates.items():
-        if v:
-            dotenv.set_key(ENV_PATH, k, v)
-
-    dotenv.load_dotenv(ENV_PATH, override=True)
+    """Update non-connector desktop settings; credentials require
+    authentication via /connect. Restored 2026-09-14: this had regressed to
+    accepting any key at all, including connector credentials -- meaning a
+    bad or untested credential could be written straight to .env through this
+    generic endpoint, completely bypassing the /connect authentication gate."""
+    registry_keys = {field.key for entry in CONNECTOR_REGISTRY.values() for field in entry.auth_fields}
+    rejected = sorted(str(key) for key in updates if str(key) in registry_keys)
+    if rejected:
+        raise APIBridgeException(
+            "CONNECTOR_AUTH_REQUIRED",
+            f"Connector credential keys must be authenticated via /api/connectors/{{id}}/connect: {', '.join(rejected)}",
+            400,
+        )
+    _persist_credentials({str(key): str(value) for key, value in updates.items() if value})
     clear_connector_cache()
     return {"success": True}
 

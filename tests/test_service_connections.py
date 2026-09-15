@@ -82,7 +82,14 @@ def test_connect_uses_registry_class_authenticates_then_persists(service_client)
     assert body["status"] == "healthy"
     assert body["last_verified"]
     assert body["error"] is None
-    assert body["identity"] == {"account": "acct-42", "api_key": "[redacted]"}
+    # identity is a human-readable string built by _get_provider_identity
+    # (per-connector-type: AWS account/region, GitHub owner, etc., falling
+    # back to "{name} Verified" for a connector with no special case) --
+    # NOT the connector's own raw auth_identity dict. Keeping the string
+    # form was a deliberate choice: it's what the desktop UI displays, and
+    # _get_provider_identity has real per-connector logic worth keeping
+    # (see server.py's connection-state cache comment, 2026-09-14).
+    assert body["identity"] == "Dynamic Provider Verified"
     assert "abcdefghi" not in response.text
 
 
@@ -196,7 +203,10 @@ def test_manual_check_returns_status_metadata(service_client):
     assert response.json()["status"] == "healthy"
     assert response.json()["last_verified"]
     assert response.json()["error"] is None
-    assert response.json()["identity"] == {"username": "real-user"}
+    # identity is the human-readable string from _get_provider_identity, not
+    # the connector's raw auth_identity -- see the identical note on
+    # test_connect_uses_registry_class_authenticates_then_persists.
+    assert response.json()["identity"] == "Dynamic Provider Verified"
 
 
 def test_health_check_marks_expired_and_does_not_retry_known_invalid(service_client):
@@ -295,7 +305,11 @@ def test_config_masks_short_values_without_disclosure(service_client):
 
     response = client.get("/api/config")
 
-    assert response.json()["raw"]["SHORT_SECRET"] == "***"
+    # /api/config's own mask() uses a fixed-width bullet for short values
+    # (<=6 chars) rather than length-revealing asterisks -- matches
+    # test_desktop_api.py::test_CONFIG_MASKED_CREDENTIALS, the other
+    # currently-relied-on caller of this same endpoint.
+    assert response.json()["raw"]["SHORT_SECRET"] == "••••••••"
     assert "xy" not in response.text
 
 
