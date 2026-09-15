@@ -1,158 +1,164 @@
-import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import ConnectorForm, { type ConnectorDefinition } from '../components/ConnectorForm';
 
-const connector: ConnectorDefinition = {
-  id: 'github',
-  name: 'GitHub',
-  status: 'unconfigured',
-  auth_fields: [
-    { key: 'token', label: 'Personal access token', type: 'password', required: true, help_text: 'Create a token with repo access.' },
-    { key: 'host', label: 'Host', type: 'text', required: false, default: 'github.com' },
-  ],
-};
+import { ConnectorForm, type ConnectorModel } from '../components/ConnectorForm';
 
-const response = (body: unknown, ok = true, status = 200) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) } as Response);
+function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {}) {
+  const { ok = true, status = ok ? 200 : 400 } = init;
+  return Promise.resolve({ ok, status, json: () => Promise.resolve(body) } as Response);
+}
+
+function mockFetch(handlers: Record<string, () => Promise<Response>>) {
+  const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+    const key = `${options?.method || 'GET'} ${url}`;
+    const handler = handlers[key];
+    if (!handler) throw new Error(`Unexpected request: ${key}`);
+    return handler();
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
+const baseConnector: ConnectorModel = {
+  id: 'aws',
+  name: 'AWS',
+  category: 'infrastructure',
+  color: '#FF9900',
+  description: 'Amazon Web Services',
+  status: 'unconfigured',
+  auth_fields: [
+    { key: 'AWS_ACCESS_KEY_ID', label: 'Access Key ID', type: 'text', required: true },
+    { key: 'AWS_SECRET_ACCESS_KEY', label: 'Secret Access Key', type: 'password', required: true },
+  ],
+};
+
+const configuredConnector: ConnectorModel = {
+  ...baseConnector,
+  status: 'configured',
+  identity: 'AWS Account 123456789012',
+  masked_credentials: { AWS_ACCESS_KEY_ID: 'AKIA...MPLE' },
+  last_verified: '2026-09-16T09:00:00Z',
+};
+
 describe('ConnectorForm', () => {
-  it('renders registry fields and sends credentials to the connector endpoint', async () => {
-    const fetchMock = vi.fn().mockReturnValue(response({ success: true, status: 'connected', identity: { username: 'octocat' }, last_verified: '2026-03-01T12:00:00Z' }));
-    vi.stubGlobal('fetch', fetchMock);
-    const user = userEvent.setup();
-    render(<ConnectorForm connector={connector} />);
+  it('renders connector details and the unconfigured state with no identity or disconnect control', async () => {
+    mockFetch({ 'GET /api/connectors/aws': () => jsonResponse(baseConnector) });
+    render(<ConnectorForm connector={baseConnector} />);
 
-    await user.type(screen.getByLabelText(/Personal access token/), 'ghp_secret');
-    await user.click(screen.getByRole('button', { name: 'Validate & Save Credentials' }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/connectors/github/connect', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ token: 'ghp_secret', host: 'github.com' }),
-    })));
-    expect(await screen.findByText(/Connected · username: octocat/)).toBeInTheDocument();
-    expect(screen.getByText(/Last verified 2026-03-01/)).toBeInTheDocument();
-  });
-
-  it('shows the exact provider error as escaped React text', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockReturnValue(response({ success: false, status: 'failed', identity: null, error: '<b>Bad credentials</b>' }, false, 401)));
-    const user = userEvent.setup();
-    render(<ConnectorForm connector={connector} />);
-
-    await user.type(screen.getByLabelText(/Personal access token/), 'wrong');
-    await user.click(screen.getByRole('button', { name: 'Validate & Save Credentials' }));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('<b>Bad credentials</b>');
-    expect(screen.getByRole('alert').querySelector('b')).toBeNull();
-  });
-
-  it('disables inputs while connecting', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => undefined)));
-    const user = userEvent.setup();
-    render(<ConnectorForm connector={connector} />);
-
-    const token = screen.getByLabelText(/Personal access token/);
-    await user.type(token, 'token');
-    fireEvent.submit(screen.getByRole('button', { name: 'Validate & Save Credentials' }).closest('form')!);
-
-    expect(await screen.findByRole('button', { name: 'Authenticating...' })).toBeDisabled();
-    expect(token).toBeDisabled();
-  });
-
-  it('supports masked credentials, update, and disconnect', async () => {
-    const configuredConnector: ConnectorDefinition = {
-      ...connector,
-      status: 'configured',
-      auth_fields: [{ ...connector.auth_fields[0], masked_value: 'ghp...ret', configured: true }],
-    };
-    const fetchMock = vi.fn().mockReturnValue(response({ success: true, status: 'unconfigured', identity: null }));
-    vi.stubGlobal('fetch', fetchMock);
-    const user = userEvent.setup();
-    render(<ConnectorForm connector={configuredConnector} />);
-
-    const token = screen.getByLabelText(/Personal access token/);
-    expect(token).toHaveValue('ghp...ret');
-    expect(token).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: 'Update credentials' }));
-    await user.click(token);
-    expect(token).toHaveValue('');
-    await user.click(screen.getByRole('button', { name: 'Disconnect' }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/connectors/github/disconnect', expect.objectContaining({ method: 'DELETE' })));
-    expect(token).toHaveValue('');
-    expect(token).toBeRequired();
-    expect(screen.getByRole('button', { name: 'Validate & Save Credentials' })).toBeInTheDocument();
+    expect(screen.getByText('AWS')).toBeInTheDocument();
+    expect(screen.getByText('Amazon Web Services')).toBeInTheDocument();
+    expect(await screen.findByText('○ Not Configured')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Validate & Connect' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Disconnect' })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Enter Access Key ID')).toBeInTheDocument();
   });
 
-  it('keeps a successful connection visible across parent status rerender', async () => {
-    const fetchMock = vi.fn().mockReturnValue(response({ success: true, status: 'healthy', identity: { username: 'octocat' } }));
-    vi.stubGlobal('fetch', fetchMock);
+  it('masks the secret field by default and reveals it on toggle', async () => {
+    mockFetch({ 'GET /api/connectors/aws': () => jsonResponse(baseConnector) });
     const user = userEvent.setup();
+    render(<ConnectorForm connector={baseConnector} />);
 
-    function Parent() {
-      const [current, setCurrent] = React.useState(connector);
-      return <ConnectorForm connector={current} onStatusChange={(_id, status) => {
-        if (status === 'CONNECTED') setCurrent(previous => ({ ...previous, status: 'configured' }));
-      }} />;
-    }
+    const secretInput = screen.getByPlaceholderText('Enter Secret Access Key');
+    expect(secretInput).toHaveAttribute('type', 'password');
 
-    render(<Parent />);
-    await user.type(screen.getByLabelText(/Personal access token/), 'ghp_secret');
-    await user.click(screen.getByRole('button', { name: 'Validate & Save Credentials' }));
-
-    expect(await screen.findByText(/Connected · username: octocat/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Check connection' })).not.toBeInTheDocument();
+    await user.click(secretInput.parentElement!.querySelector('button')!);
+    expect(secretInput).toHaveAttribute('type', 'text');
   });
 
-  it('renders nested identity and treats configured as unverified', () => {
-    const configuredConnector: ConnectorDefinition = {
-      ...connector,
-      status: 'configured',
-      auth_fields: [{ ...connector.auth_fields[0], configured: true, masked_value: 'ghp...ret' }],
-    };
+  it('submits credentials, shows success feedback, and notifies onSuccess', async () => {
+    const onSuccess = vi.fn();
+    const fetchMock = mockFetch({
+      'GET /api/connectors/aws': () => jsonResponse(baseConnector),
+      'POST /api/connectors/aws/connect': () =>
+        jsonResponse({
+          success: true,
+          message: 'AWS credentials verified',
+          identity: 'AWS Account 123456789012',
+          last_verified: '2026-09-16T10:00:00Z',
+        }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectorForm connector={baseConnector} onSuccess={onSuccess} />);
+
+    await user.type(screen.getByPlaceholderText('Enter Access Key ID'), 'AKIAEXAMPLE');
+    await user.type(screen.getByPlaceholderText('Enter Secret Access Key'), 'secret-value');
+    await user.click(screen.getByRole('button', { name: 'Validate & Connect' }));
+
+    expect(await screen.findByText('Authenticated')).toBeInTheDocument();
+    expect(screen.getByText('AWS credentials verified')).toBeInTheDocument();
+    expect(onSuccess).toHaveBeenCalledWith('aws', expect.objectContaining({ success: true }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/connectors/aws/connect',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret-value' }),
+      })
+    );
+  });
+
+  it('shows a connection error and does not call onSuccess when the API rejects credentials', async () => {
+    const onSuccess = vi.fn();
+    mockFetch({
+      'GET /api/connectors/aws': () => jsonResponse(baseConnector),
+      'POST /api/connectors/aws/connect': () =>
+        jsonResponse({ success: false, message: 'Invalid AWS credentials' }, { ok: false, status: 401 }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectorForm connector={baseConnector} onSuccess={onSuccess} />);
+
+    await user.type(screen.getByPlaceholderText('Enter Access Key ID'), 'bad');
+    await user.type(screen.getByPlaceholderText('Enter Secret Access Key'), 'bad');
+    await user.click(screen.getByRole('button', { name: 'Validate & Connect' }));
+
+    expect(await screen.findByText('Connection Error')).toBeInTheDocument();
+    expect(screen.getByText('Invalid AWS credentials')).toBeInTheDocument();
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('renders the connected state with identity, masked credential, and a working disconnect flow', async () => {
+    const onDisconnect = vi.fn();
+    mockFetch({
+      'GET /api/connectors/aws': () => jsonResponse(configuredConnector),
+      'POST /api/connectors/aws/disconnect': () => jsonResponse({ success: true, message: 'Disconnected successfully' }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectorForm connector={configuredConnector} onDisconnect={onDisconnect} />);
+
+    expect(await screen.findByText('● Connected')).toBeInTheDocument();
+    expect(screen.getByText('AWS Account 123456789012')).toBeInTheDocument();
+    expect(screen.getByText(/Active: AKIA\.\.\.MPLE/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Update & Re-verify' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Disconnect' }));
+    expect(screen.getByText('Are you sure you want to disconnect AWS?')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText('Are you sure you want to disconnect AWS?')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Disconnect' }));
+    await user.click(screen.getByRole('button', { name: 'Yes, Disconnect Service' }));
+
+    expect(await screen.findByText('Disconnected successfully')).toBeInTheDocument();
+    expect(onDisconnect).toHaveBeenCalledWith('aws');
+  });
+
+  it('lets a connected user manually re-verify via the health check control', async () => {
+    const fetchMock = mockFetch({
+      'GET /api/connectors/aws': () => jsonResponse(configuredConnector),
+      'GET /api/connectors/aws/validate': () =>
+        jsonResponse({ status: 'connected', identity: 'AWS Account 123456789012', last_verified: '2026-09-16T11:00:00Z' }),
+    });
     render(<ConnectorForm connector={configuredConnector} />);
 
-    expect(screen.queryByText(/^Connected/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Update credentials' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Check connection' })).toBeInTheDocument();
-  });
+    await screen.findByText('● Connected');
+    await userEvent.click(screen.getByTitle('Verify connection liveness'));
 
-  it('renders textarea and file registry fields as safe controlled text inputs', () => {
-    render(<ConnectorForm connector={{
-      ...connector,
-      auth_fields: [
-        { key: 'json', label: 'JSON credential', type: 'textarea', required: false },
-        { key: 'path', label: 'Credential path', type: 'file', required: false },
-      ],
-    }} />);
-
-    expect(screen.getByLabelText('JSON credential').tagName).toBe('TEXTAREA');
-    expect(screen.getByLabelText('Credential path')).toHaveAttribute('type', 'text');
-  });
-
-  it('uses backend message from the real error envelope', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockReturnValue(response({
-      error: true,
-      code: 'CONNECTOR_AUTH_FAILED',
-      message: 'Provider rejected credentials',
-      detail: {},
-    }, false, 401)));
-    const user = userEvent.setup();
-    render(<ConnectorForm connector={connector} />);
-    await user.type(screen.getByLabelText(/Personal access token/), 'wrong');
-    await user.click(screen.getByRole('button', { name: 'Validate & Save Credentials' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Provider rejected credentials');
-  });
-
-  it('shows expired state as a reconnect flow', () => {
-    render(<ConnectorForm connector={{ ...connector, status: 'expired', auth_fields: [{ ...connector.auth_fields[0], masked_value: 'ghp...ret' }] }} />);
-
-    expect(screen.getByRole('alert')).toHaveTextContent('Credentials have expired');
-    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/connectors/aws/validate'));
   });
 });

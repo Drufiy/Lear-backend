@@ -44,13 +44,25 @@ export default function Wizard({ onComplete }: { onComplete: (config?: any) => v
   const selectedConnector = connectors.find(c => c.id === selectedConnectorId);
   const categories = Array.from(new Set(connectors.map(c => c.category)));
 
-  const handleConnectorStatus = useCallback((connectorId: string, status: string) => {
-    if (status !== 'CONNECTED' && status !== 'WATCHING' && status !== 'UNCONFIGURED') return;
-    const nextStatus = status === 'UNCONFIGURED' ? 'unconfigured' : 'configured';
+  // ConnectorForm's actual props are onSuccess/onDisconnect (no onStatusChange
+  // exists on it -- that prop was removed/renamed at some point and this
+  // call site was left passing a callback the component never invoked,
+  // caught by `tsc --noEmit`, previously never run for this project so the
+  // resulting silent no-op -- the wizard's own status badge never updating
+  // live after a successful connect -- went unnoticed).
+  const setConnectorStatus = useCallback((connectorId: string, nextStatus: 'configured' | 'unconfigured') => {
     setConnectors(previous => previous.map(connector => (
       connector.id === connectorId && connector.status !== nextStatus ? { ...connector, status: nextStatus } : connector
     )));
   }, []);
+  const handleConnectorConnected = useCallback(
+    (connectorId: string) => setConnectorStatus(connectorId, 'configured'),
+    [setConnectorStatus]
+  );
+  const handleConnectorDisconnected = useCallback(
+    (connectorId: string) => setConnectorStatus(connectorId, 'unconfigured'),
+    [setConnectorStatus]
+  );
 
   const handleFinish = async () => {
     try {
@@ -178,7 +190,11 @@ export default function Wizard({ onComplete }: { onComplete: (config?: any) => v
                   </span>
                 </div>
 
-                <ConnectorForm connector={selectedConnector} onStatusChange={handleConnectorStatus} />
+                <ConnectorForm
+                  connector={selectedConnector}
+                  onSuccess={handleConnectorConnected}
+                  onDisconnect={handleConnectorDisconnected}
+                />
               </div>
             ) : (
               <div className="flex items-center justify-center py-20 text-gray-500">
