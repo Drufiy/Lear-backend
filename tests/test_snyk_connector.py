@@ -38,13 +38,42 @@ def _capture_urlopen(monkeypatch, body: bytes = b"{}", bodies: list[bytes] | Non
 
 
 def test_authenticate_sends_token_header(monkeypatch):
-    calls = _capture_urlopen(monkeypatch, bodies=[b'{"data": {"type": "self"}}', b'{"name": "Security Team"}'])
+    # /v1/org/{id} is Snyk's now fully-removed v1 API (found live 2026-09-16:
+    # 404 "unsupported url" against a real account) -- authenticate() uses
+    # the REST replacement, /rest/orgs/{id}.
+    calls = _capture_urlopen(monkeypatch, bodies=[
+        b'{"data": {"type": "self"}}',
+        b'{"data": {"attributes": {"name": "Security Team"}}}',
+    ])
     sn = SnykConnector({"SNYK_API_TOKEN": "snyk-secret", "SNYK_ORG_ID": "org-1"})
     assert sn.authenticate() is True
     assert calls[0].get_header("Authorization") == "token snyk-secret"
     assert calls[0].full_url == "https://api.snyk.io/rest/self?version=2024-10-15"
-    assert calls[1].full_url == "https://api.snyk.io/v1/org/org-1"
+    assert calls[1].full_url == "https://api.snyk.io/rest/orgs/org-1?version=2024-10-15"
     assert sn.auth_identity == {"org": "Security Team"}
+    assert sn.auth_error is None
+
+
+def test_authenticate_succeeds_even_when_org_lookup_is_forbidden(monkeypatch):
+    """Found live: a real token on a real account can pass /rest/self but get
+    403 Forbidden on /rest/orgs/{id} (a token-scope gap, not proof the
+    connection is bad). authenticate() must not fail just because the org
+    name couldn't be fetched -- fall back to the raw org id."""
+    import io
+    import urllib.error
+
+    call_count = {"n": 0}
+
+    def fake_urlopen(req, timeout=30):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _FakeResponse(b'{"data": {"type": "self"}}')
+        raise urllib.error.HTTPError(req.full_url, 403, "forbidden", {}, io.BytesIO(b'{"error": "Forbidden"}'))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    sn = SnykConnector({"SNYK_API_TOKEN": "snyk-secret", "SNYK_ORG_ID": "org-1"})
+    assert sn.authenticate() is True
+    assert sn.auth_identity == {"org": "org-1"}
     assert sn.auth_error is None
 
 

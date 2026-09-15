@@ -22,6 +22,12 @@ dependencies = [
     # macOS. Found live, verifying the watcher against the actual cluster.
     "pyobjus>=1.2.3; sys_platform == 'darwin'",
     "boto3>=1.34",
+    # GCP connector (prash/connectors/gcp.py) imports these at module level
+    # inside a try/except -- never declared anywhere, so authenticate() always
+    # failed with "GCP SDK is required" on a clean install. Found live testing
+    # real GCP credentials, 2026-09-16.
+    "google-auth>=2.0",
+    "google-api-python-client>=2.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "python-dotenv>=1.0.0",

@@ -234,7 +234,7 @@ def _connection_state(connector_id: str, env_config: Optional[Mapping[str, Any]]
     if connector_id in _connection_states:
         return dict(_connection_states[connector_id])
     status = "configured" if is_connector_configured(connector_id, config) else "unconfigured"
-    return {"status": status, "last_verified": None, "last_checked": None, "error": None, "identity": {}}
+    return {"status": status, "last_verified": None, "last_checked": None, "error": None, "identity": ""}
 
 
 def _set_connection_state(connector_id: str, status: str, error: Optional[str] = None,
@@ -251,7 +251,7 @@ def _set_connection_state(connector_id: str, status: str, error: Optional[str] =
         "last_verified": now_ts if verified else previous.get("last_verified"),
         "last_checked": now_ts,
         "error": error,
-        "identity": identity if identity is not None else previous.get("identity", {}),
+        "identity": identity if identity is not None else previous.get("identity", ""),
     }
     _connection_states[connector_id] = state
     return dict(state)
@@ -263,7 +263,7 @@ def _clear_connection_state(connector_id: str) -> Dict[str, Any]:
     last_verified/identity read as fresh-default None/{} rather than
     carrying over a stale timestamp from before the credential was removed."""
     _connection_states.pop(connector_id, None)
-    return {"status": "unconfigured", "last_verified": None, "last_checked": None, "error": None, "identity": {}}
+    return {"status": "unconfigured", "last_verified": None, "last_checked": None, "error": None, "identity": ""}
 
 
 def _persist_credentials(updates: Mapping[str, Optional[str]]) -> None:
@@ -324,15 +324,15 @@ def _verify_persisted_connector(connector_id: str, automatic: bool = False) -> D
             connector = get_connector(connector_id, env_config)
             authenticated = connector.authenticate()
             error = None if authenticated else _connector_error(connector, secrets, "Authentication failed")
-            identity = _get_provider_identity(connector_id, connector, env_config) if authenticated else {}
+            identity = _get_provider_identity(connector_id, connector, env_config) if authenticated else ""
     except Exception as exc:
         error = _safe_text(exc, secrets)
         # verified=False: last_verified tracks the last CONFIRMED-GOOD check,
         # not the last attempt -- a failure must never stamp it, only ever
         # preserve whatever the previous successful verification set.
-        return _set_connection_state(connector_id, "expired", error=error, identity={})
+        return _set_connection_state(connector_id, "expired", error=error, identity="")
     if not authenticated:
-        return _set_connection_state(connector_id, "expired", error=error, identity={})
+        return _set_connection_state(connector_id, "expired", error=error, identity="")
     return _set_connection_state(connector_id, "healthy", identity=identity, verified=True)
 
 
@@ -565,7 +565,7 @@ def list_connectors():
     for c in connectors:
         state = _connection_state(c["id"], env_config)
         c["last_verified"] = state["last_verified"]
-        c["identity"] = state["identity"] if c["status"] == "configured" else {}
+        c["identity"] = state["identity"] if c["status"] == "configured" else ""
     return {"connectors": connectors}
 
 
@@ -579,7 +579,7 @@ def get_connector_info(connector_id: str):
     info = connector_detail_to_json(connector_id, env_config)
     state = _connection_state(connector_id, env_config)
     info["last_verified"] = state["last_verified"]
-    info["identity"] = state["identity"] if info["status"] == "configured" else {}
+    info["identity"] = state["identity"] if info["status"] == "configured" else ""
     return info
 
 
@@ -786,7 +786,7 @@ def validate_connector(connector_id: str):
                 "last_verified": state["last_verified"],
             }
         else:
-            _set_connection_state(connector_id, "expired", error="Authentication failed", identity={})
+            _set_connection_state(connector_id, "expired", error="Authentication failed", identity="")
             return {
                 "valid": False,
                 "status": "expired",

@@ -19,6 +19,11 @@ htmlcov/
 .env.*
 !.env.example
 *.pem
+# GCP service-account keys download as {project-id}-{key-id}.json; the previous
+# entry for this only matched one specific key-id by exact filename (silently
+# stopped ignoring the moment a key got rotated/replaced) -- pattern-match the
+# whole project instead.
+prash-by-drufiy-*.json
 
 # OS
 .DS_Store
@@ -39,5 +44,4 @@ Thumbs.db
 *.tfplan
 crash.log
 *.auto.tfvars
-prash-by-drufiy-5e9d3b9144ed.json
 prash.yaml

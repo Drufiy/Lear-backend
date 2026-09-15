@@ -14,6 +14,23 @@ same known limitation already documented in the Grafana connector for the
 same reason -- fine for v1, worth revisiting against an org with many
 projects).
 
+KNOWN BROKEN (found live, 2026-09-16): Snyk's v1 API is now fully removed,
+not just deprecated -- /v1/org/{id} 404s with "unsupported url" against a
+real account, confirmed live. authenticate() was migrated to the REST
+equivalent (/rest/orgs/{id}), with the org-name lookup made best-effort
+(the /rest/self check alone proves the token is live, per its own
+default_org_context field) since a real token on a real account 403'd on
+that specific call -- a token-scope gap, not proof of a bad connection.
+locate() (line ~101) and ignore_issue()'s write path (line ~158) are NOT
+yet migrated -- they still call the dead v1 API and will fail. Left
+unmigrated deliberately: the only live token available to verify against
+403s on every org-scoped REST call tried (both /rest/orgs/{id} and
+/rest/orgs/{id}/projects), so a locate() rewrite couldn't be verified to
+actually work, and ignore_issue() is a write action that shouldn't be
+migrated blind without a way to test-fire it safely. Needs a token with
+proper org-read scope (and org-write for ignore_issue) before finishing
+this migration.
+
 Snyk's own `issueCountsBySeverity` rollup on a project (critical/high/
 medium/low counts) is the direct analog of a Datadog monitor's
 overall_state or a Grafana alert rule's firing state -- one number per
@@ -82,17 +99,33 @@ class SnykConnector(Connector):
             self.auth_error = "Snyk org ID is required"
             return False
         try:
-            # Verify the token against Snyk's self endpoint, then inspect the
-            # configured org because /rest/self does not return an org name.
+            # Verify the token against Snyk's self endpoint -- this alone
+            # proves the token is real and live, and its own response
+            # includes default_org_context (the org id), so a failure past
+            # this point is never "not authenticated," only "couldn't fetch
+            # a friendlier org name."
             self._request("GET", "/rest/self?version=2024-10-15")
-            org = self._request("GET", f"/v1/org/{urllib.parse.quote(self.org_id)}")
-            self.auth_identity = {"org": org.get("name") or org.get("slug")} if (org.get("name") or org.get("slug")) else {}
-            self.auth_error = None
-            return True
         except SnykError as exc:
             self.auth_identity = {}
             self.auth_error = str(exc)
             return False
+
+        # Best-effort org name lookup. /v1/org/{id} is Snyk's now-fully-
+        # removed v1 API (confirmed live 2026-09-16: 404 "unsupported url",
+        # not a deprecation warning -- it's gone). /rest/orgs/{id} is the
+        # replacement, but even with a valid token some tokens' scopes don't
+        # include org read (confirmed live: 403 Forbidden on a real account
+        # with a real token) -- that's a token-scope problem, not proof the
+        # connection is bad, so it must not fail authenticate() outright.
+        try:
+            org = self._request("GET", f"/rest/orgs/{urllib.parse.quote(self.org_id)}?version=2024-10-15")
+            attrs = (org.get("data") or {}).get("attributes") or {}
+            name = attrs.get("name") or attrs.get("slug")
+            self.auth_identity = {"org": name} if name else {"org": self.org_id}
+        except SnykError:
+            self.auth_identity = {"org": self.org_id}
+        self.auth_error = None
+        return True
 
     def locate(self, resource: str) -> Dict[str, Any]:
         if not self.api_token or not self.org_id:
