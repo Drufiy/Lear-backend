@@ -270,7 +270,7 @@ def test_cached_healthy_state_is_invalidated_when_required_credentials_removed(s
     listed = next(item for item in client.get("/api/connectors").json()["connectors"] if item["id"] == "dynamic")
 
     assert listed["status"] == "unconfigured"
-    assert listed["identity"] == {}
+    assert listed["identity"] == ""
 
 
 def test_status_does_not_reauthenticate(service_client):

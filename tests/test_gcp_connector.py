@@ -34,7 +34,21 @@ def _completed(stdout="", returncode=0):
 
 def _patch_gcloud(monkeypatch, outputs):
     """Route the connector's subprocess.run calls to scripted outputs keyed
-    by which gcloud subcommand is being invoked."""
+    by which gcloud subcommand is being invoked.
+
+    Forces _HAS_GCP off so this always exercises the gcloud-CLI fallback
+    path regardless of whether the google-auth SDK is installed in this
+    environment (it now is -- prash/connectors/gcp.py needs it for real
+    use) or whether real GCP credentials are sitting in os.environ (they
+    can be, via prash/server.py's module-level dotenv.load_dotenv(override=
+    True) when another test module imports prash.server earlier in the
+    same pytest session). Without this, `google.auth.default()` picks up
+    real ambient credentials and locate() takes the live discovery.build()
+    API path instead of the scripted subprocess one, hitting the real GCP
+    API and failing with a 403 instead of returning the fixture data these
+    tests assert on. Found live, 2026-09-16, once real credentials existed
+    in .env for the first time."""
+    monkeypatch.setattr(gcp_mod, "_HAS_GCP", False)
     calls = []
 
     def fake_run(cmd, capture_output=True, text=True, check=True, timeout=None):
