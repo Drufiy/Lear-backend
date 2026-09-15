@@ -69,6 +69,25 @@ export function useNotifications() {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
+  // Client-side toast for actions that fail synchronously (a rejected
+  // connect/watch/disconnect fetch) -- distinct from the websocket-driven
+  // watcher events above. Found live: a failing action (e.g. clicking Watch
+  // on an unconfigured connector, which the backend correctly 500s) produced
+  // zero user-visible feedback -- the toast pipeline only had a source for
+  // live watcher events, none for "this button's own API call just failed."
+  // Does not add to the persisted `notifications` history/badge, only the
+  // ephemeral toast strip -- this is transient UI feedback, not an
+  // infrastructure event worth remembering after the session.
+  const pushToast = useCallback((toast: Omit<AppNotification, 'id' | 'timestamp' | 'read'>) => {
+    const newToast: AppNotification = {
+      ...toast,
+      id: `local_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      read: false,
+    };
+    setToasts(prev => [newToast, ...prev.slice(0, 4)]);
+  }, []);
+
   const markAsRead = useCallback(async (id: string) => {
     setNotifications(prev =>
       prev.map(n => (n.id === id ? { ...n, read: true } : n))
@@ -101,6 +120,7 @@ export function useNotifications() {
     toasts,
     unreadCount,
     dismissToast,
+    pushToast,
     markAsRead,
     markAllAsRead,
     clearAll,

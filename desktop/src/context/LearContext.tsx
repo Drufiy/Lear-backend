@@ -76,6 +76,7 @@ interface LearContextType {
   unreadCount: number;
   toasts: AppNotification[];
   dismissToast: (id: string) => void;
+  pushToast: (toast: Omit<AppNotification, 'id' | 'timestamp' | 'read'>) => void;
 }
 
 const LearContext = createContext<LearContextType | undefined>(undefined);
@@ -122,7 +123,7 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [watcherState, setWatcherState] = useState<WatcherState>('IDLE');
   const [appVersion, setAppVersion] = useState<string>('2.0.0');
 
-  const { toasts, unreadCount, dismissToast } = useNotifications();
+  const { toasts, unreadCount, dismissToast, pushToast } = useNotifications();
   const { isConnected, lastEvent } = useWebSocket();
 
   // 1. Fetch system version & configured connectors count
@@ -342,11 +343,27 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setWatcherState('ACTIVE');
         return true;
       }
+      // Found live: a failed watch (e.g. an unconfigured connector) 500'd
+      // with a clear backend message that the UI silently dropped -- the
+      // button just did nothing, no toast, no error state. Surface it.
+      const body = await res.json().catch(() => null);
+      pushToast({
+        title: 'Watch failed to start',
+        message: body?.message || `${connectorId} watch failed (${res.status})`,
+        connector: connectorId,
+        severity: 'error',
+      });
     } catch (e) {
       console.error('Error starting watch:', e);
+      pushToast({
+        title: 'Watch failed to start',
+        message: e instanceof Error ? e.message : 'Network error contacting the backend',
+        connector: connectorId,
+        severity: 'error',
+      });
     }
     return false;
-  }, []);
+  }, [pushToast]);
 
   // Stop watching a resource
   const stopWatch = useCallback(async (connectorId: string, target?: string, watchId?: string) => {
@@ -363,11 +380,24 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setActiveWatches(prev => prev.filter(w => w.watch_id !== wid));
         return true;
       }
+      const body = await res.json().catch(() => null);
+      pushToast({
+        title: 'Watch failed to stop',
+        message: body?.message || `${connectorId} watch stop failed (${res.status})`,
+        connector: connectorId,
+        severity: 'error',
+      });
     } catch (e) {
       console.error('Error stopping watch:', e);
+      pushToast({
+        title: 'Watch failed to stop',
+        message: e instanceof Error ? e.message : 'Network error contacting the backend',
+        connector: connectorId,
+        severity: 'error',
+      });
     }
     return false;
-  }, []);
+  }, [pushToast]);
 
   const value = useMemo(
     () => ({
@@ -401,6 +431,7 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unreadCount,
       toasts,
       dismissToast,
+      pushToast,
     }),
     [
       projects,
@@ -431,6 +462,7 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unreadCount,
       toasts,
       dismissToast,
+      pushToast,
     ]
   );
 
