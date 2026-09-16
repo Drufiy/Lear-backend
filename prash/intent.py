@@ -169,6 +169,20 @@ def _resolve_target(kind: str, targets: list[str], ctx: _Context) -> str | None:
     # Bare name: qualify with the remembered namespace if we have one.
     if ctx.namespace:
         return f"{ctx.namespace}/{targets[0]}"
+    if kind == "pod":
+        # Found live 2026-09-17: server.py's /api/chat[/stream] builds a
+        # fresh _Context() with no namespace on every request (there's no
+        # REPL session to remember one in), so a perfectly natural message
+        # like "the oom-app pod in prash-demo keeps crashing, fix it" fast-
+        # pathed straight to `prash fix oom-app` -- fix.py's
+        # split_k8s_target() then rejected it outright with "expected
+        # <namespace>/<pod> target, got 'oom-app'", even though the pod
+        # genuinely exists and the user even named the namespace in the
+        # same sentence. Falling back to the configured default namespace
+        # (same one KubernetesConnector.locate() already defaults to) beats
+        # handing fix.py a target guaranteed to fail its own parsing.
+        from .connectors.kubernetes import _default_namespace
+        return f"{_default_namespace(None)}/{targets[0]}"
     return targets[0]
 
 

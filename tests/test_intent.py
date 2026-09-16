@@ -65,6 +65,21 @@ def test_free_text_fix_with_explicit_target_qualifies_it():
     assert s.argv == ["fix", "prash-demo/web-3"]
 
 
+def test_free_text_fix_with_no_session_namespace_falls_back_to_env_default(monkeypatch):
+    """Found live 2026-09-17: server.py's /api/chat[/stream] builds a fresh,
+    namespace-less _Context() on every request (no REPL session to
+    remember one in). "the oom-app pod in prash-demo keeps crashing, fix
+    it" fast-pathed to `prash fix oom-app` -- a bare name fix.py's own
+    target parser rejects outright -- even though the pod genuinely
+    exists and the sentence even names the namespace. Must fall back to
+    the configured default namespace instead of handing fix.py a target
+    guaranteed to fail."""
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    s = resolve("the oom-app pod in prash-demo keeps crashing, can you fix it", ctx())
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["fix", "prash-demo/oom-app"]
+
+
 def test_qualified_target_passes_through_untouched():
     s = resolve("restart prash-demo/api-1", ctx(namespace="prash-demo"))
     assert isinstance(s, Suggestion)
