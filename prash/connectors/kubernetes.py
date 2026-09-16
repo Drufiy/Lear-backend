@@ -169,8 +169,15 @@ class KubernetesConnector(Connector):
         env_namespace = self.credentials.get("KUBE_NAMESPACE") or _default_namespace(None)
         if "/" in resource:
             ns, name = resource.split("/", 1)
-            return {"namespace": ns or env_namespace, "name": name}
-        return {"namespace": env_namespace, "name": resource}
+            namespace = ns or env_namespace
+        else:
+            namespace, name = env_namespace, resource
+
+        if name and name != "*" and (self.core_v1 or self.authenticate()):
+            resolved = _resolve_pod_name(self.core_v1, namespace, name)
+        else:
+            resolved = None
+        return {"namespace": namespace, "name": resolved or name}
 
     def poll_state(self, resource: str) -> ResourceState:
         target = self.locate(resource)
@@ -306,13 +313,52 @@ def _client() -> client.CoreV1Api:
     return _core_api
 
 
+def _resolve_pod_name(api: client.CoreV1Api, namespace: str, name: str) -> str | None:
+    """Resolve a Deployment/friendly name to its actual running pod.
+
+    Users -- and Lear Copilot's own LLM -- naturally refer to a workload
+    by its Deployment name, e.g. "broken-app", but the real pod is
+    "broken-app-<replicaset-hash>-<pod-hash>", and a literal
+    read_namespaced_pod(name="broken-app") 404s outright. Found live
+    2026-09-16: Copilot correctly diagnosed the crash-looping Deployment
+    and proposed `prash fix prash-demo/broken-app`, and execution failed
+    immediately with "pod not found" -- exactly the kind of dead end a
+    demo can't afford. Try the exact name first (a pod genuinely named
+    that is still the cheap, common case, and the one every existing
+    caller/test already exercises); only list the namespace and
+    prefix-match otherwise. Shared by KubernetesConnector.locate() (the
+    class-based Connector interface) and get_pod_status() below (the
+    older module-level functions `prash fix`'s CLI path still calls
+    directly) so the two don't drift into fixing this independently, or
+    only one of them getting it.
+    """
+    try:
+        api.read_namespaced_pod(name=name, namespace=namespace)
+        return name
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+    try:
+        pods = api.list_namespaced_pod(namespace=namespace)
+    except ApiException:
+        return None
+    candidates = [p for p in pods.items if p.metadata.name.startswith(f"{name}-")]
+    if not candidates:
+        return None
+    # Prefer a live pod over a leftover terminating one from a previous
+    # rollout; break remaining ties deterministically.
+    candidates.sort(key=lambda p: (p.metadata.deletion_timestamp is not None, p.metadata.name))
+    return candidates[0].metadata.name
+
+
 def get_pod_status(namespace: str, pod_name: str | None = None) -> list[PodStatus]:
     """Read-only. All pods in `namespace`, or just `pod_name` if given."""
     namespace = _default_namespace(namespace)
     api = _client()
     try:
         if pod_name:
-            pod = api.read_namespaced_pod(name=pod_name, namespace=namespace)
+            resolved = _resolve_pod_name(api, namespace, pod_name) or pod_name
+            pod = api.read_namespaced_pod(name=resolved, namespace=namespace)
             pods = [pod]
         else:
             pods = api.list_namespaced_pod(namespace=namespace).items
@@ -348,9 +394,12 @@ def _read_pod_log_raw(api, *, name: str, namespace: str, tail_lines: int, previo
 
 
 def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
-    """Read-only. Recent logs for a pod."""
+    """Read-only. Recent logs for a pod. `pod_name` may be a Deployment/
+    friendly name (resolved via _resolve_pod_name(), same as
+    get_pod_status()) or a literal pod name."""
     namespace = _default_namespace(namespace)
     api = _client()
+    pod_name = _resolve_pod_name(api, namespace, pod_name) or pod_name
     try:
         logs = _read_pod_log_raw(api, name=pod_name, namespace=namespace, tail_lines=tail_lines, previous=False)
     except ApiException as exc:
@@ -368,9 +417,11 @@ def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 500) -> str:
 
 
 def stream_pod_logs(namespace: str, pod_name: str, tail_lines: int = 10):
-    """Read-only. Live-follows a pod's logs."""
+    """Read-only. Live-follows a pod's logs. `pod_name` may be a
+    Deployment/friendly name, same as get_pod_status()."""
     namespace = _default_namespace(namespace)
     api = _client()
+    pod_name = _resolve_pod_name(api, namespace, pod_name) or pod_name
     resp = api.read_namespaced_pod_log(
         name=pod_name, namespace=namespace, follow=True, tail_lines=tail_lines, _preload_content=False
     )
@@ -382,9 +433,11 @@ def stream_pod_logs(namespace: str, pod_name: str, tail_lines: int = 10):
 
 
 def get_pod_events(namespace: str, pod_name: str) -> list[dict]:
-    """Read-only. Kubernetes Events involving this pod, most recent first."""
+    """Read-only. Kubernetes Events involving this pod, most recent first.
+    `pod_name` may be a Deployment/friendly name, same as get_pod_status()."""
     namespace = _default_namespace(namespace)
     api = _client()
+    pod_name = _resolve_pod_name(api, namespace, pod_name) or pod_name
     try:
         events = api.list_namespaced_event(
             namespace=namespace,
@@ -412,8 +465,12 @@ def restart_pod(namespace: str, pod_name: str) -> bool:
     """WRITE. Safe-tier action per PRASH_V2.md §5"""
     namespace = _default_namespace(namespace)
     api = _client()
+    # Same Deployment-name-vs-actual-pod-name gap as get_pod_status(): the
+    # diagnosis/action pipeline passes through whatever name the user (or
+    # the LLM) gave, e.g. "broken-app", which isn't a literal pod.
+    resolved = _resolve_pod_name(api, namespace, pod_name) or pod_name
     try:
-        api.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        api.delete_namespaced_pod(name=resolved, namespace=namespace)
         return True
     except ApiException as exc:
         if exc.status == 404:

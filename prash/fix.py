@@ -113,6 +113,12 @@ async def diagnose_k8s_pod(
     if not pods:
         raise FixTargetError(f"pod {namespace}/{pod} not found")
     pod_status = pods[0]
+    # get_pod_status() resolves a Deployment/friendly name (e.g. "broken-app")
+    # to the actual running pod (e.g. "broken-app-6b58dc6d7b-fphhd") -- use
+    # THAT resolved name from here on, not the original `pod` argument, or
+    # get_pod_logs()/get_pod_events() below 404 on the very name
+    # get_pod_status() just proved doesn't exist as a literal pod.
+    pod = pod_status.name
     logs = get_pod_logs(namespace, pod)
     events = get_pod_events(namespace, pod)
     context = format_k8s_context(pod_status, logs, events)

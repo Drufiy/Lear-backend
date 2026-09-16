@@ -639,6 +639,75 @@ def test_exec_in_pod_always_closes_even_when_run_forever_raises(monkeypatch):
     assert fake_resp.closed is True
 
 
+# -- KubernetesConnector.locate(): resolving a Deployment/friendly name to
+# -- its actual running pod. Found live 2026-09-16: Lear Copilot correctly
+# -- diagnosed the crash-looping "broken-app" Deployment and proposed
+# -- `prash fix prash-demo/broken-app`, and execution failed outright with
+# -- "pod not found" -- the real pod is "broken-app-6b58dc6d7b-fphhd".
+
+def test_locate_returns_exact_name_when_a_pod_is_really_named_that():
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()  # read_namespaced_pod succeeds by default (a Mock, not an exception)
+
+    result = conn.locate("prash-demo/broken-app")
+
+    assert result == {"namespace": "prash-demo", "name": "broken-app"}
+    conn.core_v1.list_namespaced_pod.assert_not_called()  # exact hit -- no need to list+guess
+
+
+def test_locate_falls_back_to_prefix_match_when_exact_name_is_a_deployment():
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    conn.core_v1.read_namespaced_pod.side_effect = ApiException(status=404)
+    conn.core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
+        SimpleNamespace(metadata=SimpleNamespace(name="broken-app-6b58dc6d7b-fphhd", deletion_timestamp=None)),
+        SimpleNamespace(metadata=SimpleNamespace(name="configmap-app-67f8795879-mmtzw", deletion_timestamp=None)),
+    ])
+
+    result = conn.locate("prash-demo/broken-app")
+
+    assert result == {"namespace": "prash-demo", "name": "broken-app-6b58dc6d7b-fphhd"}
+
+
+def test_locate_prefers_a_live_pod_over_one_being_terminated():
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    conn.core_v1.read_namespaced_pod.side_effect = ApiException(status=404)
+    conn.core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
+        SimpleNamespace(metadata=SimpleNamespace(name="broken-app-old-terminating", deletion_timestamp=datetime.now(timezone.utc))),
+        SimpleNamespace(metadata=SimpleNamespace(name="broken-app-new-live", deletion_timestamp=None)),
+    ])
+
+    result = conn.locate("prash-demo/broken-app")
+
+    assert result["name"] == "broken-app-new-live"
+
+
+def test_locate_returns_the_typed_name_when_nothing_matches_even_by_prefix():
+    """Deliberately preserves the old contract for a genuinely missing
+    resource -- downstream NOT_FOUND handling depends on locate() still
+    returning A name, not None, so poll_state can report NOT_FOUND rather
+    than crashing on a KeyError."""
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+    conn.core_v1.read_namespaced_pod.side_effect = ApiException(status=404)
+    conn.core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+
+    result = conn.locate("prash-demo/does-not-exist")
+
+    assert result == {"namespace": "prash-demo", "name": "does-not-exist"}
+
+
+def test_locate_skips_the_lookup_entirely_for_a_namespace_wide_wildcard():
+    conn = k8s.KubernetesConnector({"KUBE_NAMESPACE": "prash-demo"})
+    conn.core_v1 = MagicMock()
+
+    result = conn.locate("prash-demo/*")
+
+    assert result == {"namespace": "prash-demo", "name": "*"}
+    conn.core_v1.read_namespaced_pod.assert_not_called()
+
+
 # -- KubernetesConnector.get_stats: the new class surface (Spec M1b). These
 # -- were shipped with zero coverage (PR #32); this pins the ConnectorEvent
 # -- (TypedDict) contract so the "sort by x['timestamp']" path can't regress

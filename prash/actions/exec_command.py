@@ -88,8 +88,13 @@ class ExecAction(Action):
         # inside the WebSocket client, not a clean "not found." Checking
         # first with the same get_pod_status() every other pod-targeting
         # action already uses avoids depending on that internal shape.
-        if not get_pod_status(namespace, pod):
+        pods = get_pod_status(namespace, pod)
+        if not pods:
             return ActionResult(status=ActionResultStatus.FAILED, summary=f"pod {namespace}/{pod} not found")
+        # get_pod_status() resolves a Deployment/friendly name (e.g.
+        # "broken-app") to the actual running pod -- exec into THAT pod,
+        # not the friendly name the WebSocket exec API has never heard of.
+        pod = pods[0].name
 
         container = ctx.extra.get("container")
         try:
