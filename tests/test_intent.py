@@ -80,6 +80,28 @@ def test_free_text_fix_with_no_session_namespace_falls_back_to_env_default(monke
     assert s.argv == ["fix", "prash-demo/oom-app"]
 
 
+def test_free_text_fix_bails_to_llm_when_it_smells_like_a_non_k8s_instance(monkeypatch):
+    """Found live 2026-09-17: "bithub-backend seems down, nginx might not
+    be running, can you check and fix it" matched the "fix" verb and got
+    blindly qualified as a kubernetes pod ("prash-demo/bithub-backend"),
+    even though the sentence explicitly names an in-instance service
+    (nginx), not a pod. resolve_fast_path has no provider-detection logic
+    at all -- must return None (bail to the LLM) instead of guessing wrong
+    for a brand-new, unqualified target next to a non-k8s instance hint."""
+    monkeypatch.setenv("KUBE_NAMESPACE", "prash-demo")
+    s = resolve_fast_path("bithub-backend seems down, nginx might not be running, can you check and fix it", ctx())
+    assert s is None
+
+
+def test_free_text_fix_still_uses_k8s_fast_path_with_an_established_namespace():
+    """The bail-out in the test above must not fire once the session
+    already has a real kubernetes namespace context -- that's specific
+    enough to trust, hint words or not."""
+    s = resolve_fast_path("the nginx-proxy pod keeps crashing, fix it", ctx(namespace="prash-demo"))
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["fix", "prash-demo/nginx-proxy"]
+
+
 def test_qualified_target_passes_through_untouched():
     s = resolve("restart prash-demo/api-1", ctx(namespace="prash-demo"))
     assert isinstance(s, Suggestion)

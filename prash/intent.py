@@ -44,6 +44,20 @@ _BAREISH = re.compile(r"^[a-z0-9][a-z0-9-]{2,40}$")
 def _looks_like_bare_resource(w: str) -> bool:
     return bool(_BAREISH.fullmatch(w)) and ("-" in w or any(c.isdigit() for c in w))
 
+
+# A bare resource name for a pod-needing verb (fix/restart/rollback/stats)
+# is exactly as plausible as an AWS/GCP instance name as it is a k8s pod --
+# "bithub-backend" and "broken-app" have the identical shape. Found live
+# 2026-09-17: "bithub-backend seems down, nginx might not be running, can
+# you check and fix it" matched the "fix" verb and got blindly qualified as
+# a kubernetes pod, even though the sentence explicitly names an in-instance
+# service (nginx), not a pod. The fast path has no provider-detection logic
+# at all (only the LLM path does) -- these words are a cheap, deliberately
+# imprecise signal to bail to the LLM rather than confidently guess wrong.
+_NON_K8S_INSTANCE_HINTS = re.compile(
+    r"\b(nginx|apache|ec2|instance|compute engine|droplet|vm|server|proxy|aws|gcp|azure)\b"
+)
+
 # Words that are talk, not entity. Everything else that looks podish and
 # isn't on this list is a candidate target.
 _STOPWORDS = {
@@ -281,6 +295,18 @@ def resolve_fast_path(text: str, ctx: _Context) -> Suggestion | Clarify | None:
 
     kind = _needs_target(verb)
     targets = _targets_in(text)
+
+    # Bail to the LLM (real provider detection) rather than confidently
+    # guess a kubernetes target for what reads like an AWS/GCP instance --
+    # see _NON_K8S_INSTANCE_HINTS. Only for a brand-new, unqualified target
+    # with no established session namespace; an already-"ns/pod" target or
+    # an ongoing k8s session context is unambiguous enough to trust as-is.
+    if (
+        kind == "pod" and targets and "/" not in targets[0] and not ctx.namespace
+        and _NON_K8S_INSTANCE_HINTS.search(text.lower())
+    ):
+        return None
+
     target = _resolve_target(kind, targets, ctx)
 
     if kind == "repo" and not target:
