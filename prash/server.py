@@ -773,6 +773,21 @@ def validate_connector(connector_id: str):
         }
 
     try:
+        # Force a fresh connector instance for every check. Several
+        # connectors (AWS, GCP) cache their own authenticate() result
+        # on `self` forever, on the documented assumption that they're
+        # constructed fresh per CLI invocation -- true for the CLI, false
+        # here, where get_connector() reuses one cached instance per
+        # connector_id for the server's whole lifetime. Found live
+        # 2026-09-17: AWS showed "Expired" in the UI while the exact same
+        # credentials authenticated fine standalone -- one transient
+        # failure (a network blip, or a check that raced credentials still
+        # loading at startup) got stuck as a permanent False on the
+        # cached instance, and no amount of clicking "Check" in the UI
+        # could ever re-verify it. /validate's whole contract is "force a
+        # real re-verification" (see its docstring), so it must never
+        # reuse a stale instance the way a passive status read can.
+        clear_connector_cache(connector_id)
         connector = get_connector(connector_id, env_config)
         is_authenticated = connector.authenticate()
         if is_authenticated:
