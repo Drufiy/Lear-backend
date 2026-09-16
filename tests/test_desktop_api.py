@@ -721,6 +721,34 @@ def test_CHAT_EXECUTE_STRIPS_PRASH_PREFIX(client):
     assert data["command"] == ["actions"]
 
 
+def test_CHAT_EXECUTE_APPROVAL_TIER_ACTION_IS_NOT_SILENTLY_DECLINED(client, monkeypatch, tmp_path):
+    """Found live 2026-09-17: an APPROVAL-tier action (execute-aws,
+    execute-gcp, apply-ci-fix, ...) triggered via /api/chat/execute was
+    reported as "declined by user" every single time -- cmd_run's default
+    ask=CliAsk() blocks on a real interactive stdin prompt that doesn't
+    exist in this in-process, FastAPI-threadpool-thread context, reads
+    nothing, and the dispatcher's own "silence means no" rule (correct for
+    a real terminal) turned that into a fabricated decline. Product
+    decision 2026-09-17: the chat UI's "Execute Action" click IS the
+    approval here (the exact command was already shown before that button
+    existed), so this must get past the approval gate. Landing on the
+    action's own execute() logic (missing AWS creds, in this test) is
+    fine; landing on "declined by user" or "needs_approval" is the
+    regression this guards against."""
+    mock_env = tmp_path / ".env"
+    mock_env.write_text("")  # deliberately no AWS credentials -- must never reach a real AWS call
+    monkeypatch.setenv("PRASH_ENV", str(mock_env))
+
+    res = client.post(
+        "/api/chat/execute",
+        json={"command": ["run", "execute-aws", "some-instance", "--command", "echo hi"]},
+    )
+    assert res.status_code == 200
+    output = res.json()["output"]
+    assert "declined by user" not in output
+    assert "needs_approval" not in output
+
+
 def test_CHAT_STREAM_SSE(client, monkeypatch, tmp_path):
     """Verifies that /api/chat/stream streams reasoning tokens and final action payload via SSE."""
     mock_env = tmp_path / ".env"

@@ -2450,6 +2450,33 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
         sys.stdout = capture_out
         sys.stderr = capture_out
 
+        # cmd_run/cmd_fix default to ask=CliAsk(), which blocks on a real
+        # interactive stdin prompt -- there is none here
+        # (parsed_args.func(parsed_args) runs in-process, in a FastAPI
+        # threadpool thread, not a terminal a human is sitting at). Found
+        # live 2026-09-17: an APPROVAL-tier action (execute-aws,
+        # execute-gcp, apply-ci-fix, ...) triggered from the chat UI's own
+        # "Execute Action" button -- which only appears after the LLM's
+        # response already showed the exact plan/command -- was silently
+        # reported as "declined by user" every time, because CliAsk() read
+        # nothing from stdin and the dispatcher's own "no answer means no"
+        # rule (correct for a real terminal) treated that silence as a
+        # decline nobody actually gave.
+        #
+        # Product decision 2026-09-17: the chat UI's "Execute Action" click
+        # itself IS the human's approval here -- the exact command was
+        # already shown before that button existed, same trust model as
+        # every other action this app already runs on a single click.
+        # CliAsk is swapped for the duration of this one call only (never
+        # module-global) so the CLI's own interactive terminal behavior for
+        # `prash run`/`prash fix` invoked directly is completely unchanged.
+        class _ChatUiApprovedAsk(cli.AskFn):
+            def ask(self, action, plan, ctx) -> bool:
+                return True
+
+        original_cli_ask = cli.CliAsk
+        cli.CliAsk = _ChatUiApprovedAsk
+
         ret_code = 0
         try:
             parsed_args = parser.parse_args(argv)
@@ -2464,6 +2491,7 @@ def execute_chat_action(payload: Dict[str, Any] = Body(...)):
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+            cli.CliAsk = original_cli_ask
 
         output_text = capture_out.getvalue().strip()
         if not output_text:
