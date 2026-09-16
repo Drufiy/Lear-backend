@@ -69,6 +69,50 @@ def test_deepseek_client_constructed_when_key_present(monkeypatch):
     assert client is not None
 
 
+def test_deepseek_client_rebuilds_when_the_running_event_loop_changes(monkeypatch):
+    """Found live 2026-09-17: server.py's /api/chat/execute runs the CLI's
+    `fix` command in-process from a threadpool worker thread, and cmd_fix's
+    own asyncio.run(...) creates a brand-new event loop each call, closing
+    it on return. Because this client is a module-level singleton, once it
+    was built inside one of those now-dead loops, every later call --
+    including from the server's own correctly-running main loop -- reused
+    an httpx transport bound to a closed loop and failed with a generic
+    "Connection error.", even with valid credentials and a live network.
+    Locks in the fix: a client built under one loop must never be handed
+    back once a DIFFERENT loop is asking."""
+    import asyncio
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+    importlib.reload(kc)
+
+    first_client = asyncio.run(_get_deepseek_client_async())
+    second_client = asyncio.run(_get_deepseek_client_async())
+
+    assert first_client is not None
+    assert second_client is not None
+    assert first_client is not second_client  # different loops -> must not share a client
+
+
+def test_deepseek_client_reused_within_the_same_running_loop(monkeypatch):
+    """The other half of the contract: rebuilding must be keyed on the loop
+    actually changing, not on every call -- otherwise every DeepSeek call
+    within one real request would rebuild the client for nothing."""
+    import asyncio
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+    importlib.reload(kc)
+
+    async def _two_calls_same_loop():
+        return kc._deepseek_client(), kc._deepseek_client()
+
+    a, b = asyncio.run(_two_calls_same_loop())
+    assert a is b
+
+
+async def _get_deepseek_client_async():
+    return kc._deepseek_client()
+
+
 def test_model_ids_read_from_env_with_v1_matching_defaults(monkeypatch):
     monkeypatch.delenv("KIMI_MODEL", raising=False)
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)

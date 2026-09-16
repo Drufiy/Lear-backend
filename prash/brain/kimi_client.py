@@ -36,8 +36,22 @@ logger = logging.getLogger(__name__)
 # ── Client setup (lazy — see module docstring point 2) ─────────────────────────
 
 _kimi: AsyncOpenAI | None = None
+_kimi_loop: object = None
 _deepseek: AsyncOpenAI | None = None
 _deepseek_checked = False
+_deepseek_loop: object = None
+
+
+def _running_loop():
+    """The current asyncio event loop, or None outside an async context.
+
+    Used to detect when a cached client was built for a DIFFERENT loop than
+    the one now running -- see the module-level clients' docstrings below
+    for why that happens and why it matters."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 def _kimi_model() -> str:
@@ -53,8 +67,13 @@ def _primary_model() -> str:
 
 
 def _kimi_client() -> AsyncOpenAI:
-    global _kimi
-    if _kimi is None:
+    # Rebuild whenever the running event loop differs from the one this
+    # client was last built for -- see _deepseek_client()'s docstring for
+    # why a stale loop match here means a silent, misleading connection
+    # failure instead of an obviously-wrong result.
+    global _kimi, _kimi_loop
+    loop = _running_loop()
+    if _kimi is None or _kimi_loop is not loop:
         api_key = os.environ.get("KIMI_API_KEY")
         if not api_key:
             # Real bug, caught live (2026-08-15): a blank KIMI_API_KEY reached
@@ -73,15 +92,41 @@ def _kimi_client() -> AsyncOpenAI:
             base_url=os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
             timeout=90.0,
         )
+        _kimi_loop = loop
     return _kimi
 
 
 def _deepseek_client() -> AsyncOpenAI | None:
     """None if no key is configured — every call site already handles that as
-    'DeepSeek not configured, fall back to Kimi', matching v1's behavior."""
-    global _deepseek, _deepseek_checked
+    'DeepSeek not configured, fall back to Kimi', matching v1's behavior.
+
+    Found live 2026-09-17: server.py's /api/chat/execute runs the CLI's
+    `fix` command IN-PROCESS (parsed_args.func(parsed_args), not a real
+    subprocess) from a sync FastAPI handler, which Starlette runs in a
+    threadpool worker thread. cmd_fix's own asyncio.run(diagnose_k8s_pod(
+    ...)) is exactly right for a real, fresh CLI invocation -- the
+    assumption every connector's own per-instance auth caching already
+    documents -- but here it creates a brand-new event loop in whichever
+    threadpool thread FastAPI happened to use, and asyncio.run() always
+    closes that loop when the call returns. The client this function
+    builds is a MODULE-LEVEL SINGLETON, so once it was constructed inside
+    one of those now-dead loops, every later call -- including from the
+    server's own correctly-running main loop -- reused an httpx transport
+    bound to a closed loop and failed with a generic "Connection error.",
+    even with valid credentials and a live network. Same root shape as the
+    /api/chat[/stream] event-loop-bridge bug fixed earlier (see
+    prash/intent.py's resolve_fast_path() docstring) -- different call
+    site, so a per-call-site fix wasn't enough. Comparing the loop this
+    client was built for against the one actually running now, and
+    rebuilding on a mismatch, fixes it at the one place both bugs actually
+    share: this cache."""
+    global _deepseek, _deepseek_checked, _deepseek_loop
+    loop = _running_loop()
+    if _deepseek_loop is not loop:
+        _deepseek_checked = False
     if not _deepseek_checked:
         _deepseek_checked = True
+        _deepseek_loop = loop
         api_key = os.environ.get("DEEPSEEK_API_KEY")
         if api_key:
             _deepseek = AsyncOpenAI(
@@ -89,6 +134,8 @@ def _deepseek_client() -> AsyncOpenAI | None:
                 base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
                 timeout=90.0,
             )
+        else:
+            _deepseek = None
     return _deepseek
 
 
