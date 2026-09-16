@@ -357,7 +357,7 @@ def test_CHAT_TELEMETRY_INJECTION(client, monkeypatch, tmp_path):
         return Suggestion(explain="Restart crashed instance", argv=["restart", "i-0abc123"])
 
     monkeypatch.setattr("prash.intent._resolve_via_llm_async", mock_llm_resolve)
-    monkeypatch.setattr("prash.intent.resolve", lambda msg, ctx: None)
+    monkeypatch.setattr("prash.intent.resolve_fast_path", lambda msg, ctx: None)
 
     res = client.post(
         "/api/chat",
@@ -741,7 +741,7 @@ def test_CHAT_STREAM_SSE(client, monkeypatch, tmp_path):
         return Suggestion(explain="Restart crashed instance", argv=["restart", "i-0abc123"])
 
     monkeypatch.setattr("prash.intent._resolve_via_llm_async", mock_llm_resolve)
-    monkeypatch.setattr("prash.intent.resolve", lambda msg, ctx: None)
+    monkeypatch.setattr("prash.intent.resolve_fast_path", lambda msg, ctx: None)
 
     res = client.post(
         "/api/chat/stream",

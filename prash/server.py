@@ -2235,7 +2235,7 @@ async def chat(
 ):
     """Passes chat to Prash Intent Parser with real injected connector telemetry."""
     try:
-        from prash.intent import _call_llm_intent, _Context, _resolve_via_llm_async, Clarify, resolve, Suggestion
+        from prash.intent import _call_llm_intent, _Context, _resolve_via_llm_async, Clarify, resolve_fast_path, Suggestion
 
         ctx = _Context()
 
@@ -2260,8 +2260,9 @@ async def chat(
 
         augmented_message = f"{telemetry_context}\nUser: {message}" if telemetry_context else message
 
-        # 1. Fast path resolve
-        result = resolve(message, ctx)
+        # 1. Fast path resolve (heuristic only -- no LLM call, no event-loop
+        # bridge; see resolve_fast_path()'s docstring in prash/intent.py)
+        result = resolve_fast_path(message, ctx)
         if result is None:
             # 2. LLM fallback
             result = await _resolve_via_llm_async(augmented_message, ctx)
@@ -2307,7 +2308,7 @@ async def chat_stream(
 
     async def event_generator():
         try:
-            from prash.intent import _Context, _resolve_via_llm_async, Clarify, resolve, Suggestion
+            from prash.intent import _Context, _resolve_via_llm_async, Clarify, resolve_fast_path, Suggestion
 
             ctx = _Context()
             telemetry_context = ""
@@ -2330,8 +2331,10 @@ async def chat_stream(
 
             augmented_message = f"{telemetry_context}\nUser: {message}" if telemetry_context else message
 
-            # 1. Fast path resolve
-            result = resolve(message, ctx)
+            # 1. Fast path resolve (heuristic only -- no LLM call, no
+            # event-loop bridge; see resolve_fast_path()'s docstring in
+            # prash/intent.py)
+            result = resolve_fast_path(message, ctx)
             if result is None:
                 # 2. LLM fallback
                 result = await _resolve_via_llm_async(augmented_message, ctx)

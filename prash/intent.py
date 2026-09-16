@@ -216,25 +216,37 @@ def _pagerduty_hit(text: str) -> Suggestion | Clarify | None:
     return _provider_hit(text, "pagerduty")
 
 
-def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
-    """Parse free text into a command suggestion, a clarifying question, or
-    None (genuinely couldn't resolve it, fast or otherwise)."""
+def resolve_fast_path(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+    """The heuristic-only half of resolve() -- keyword/regex matching, no
+    LLM call. Split out 2026-09-16 for server.py's /api/chat/stream: that
+    handler is already async and does its own proper `await
+    _resolve_via_llm_async(...)` fallback, but was calling the full
+    synchronous resolve() for "step 1", which silently falls through to
+    _resolve_via_llm()'s thread-and-new-event-loop bridge whenever the
+    keyword table misses (exactly the "check ... for crash-looping pods"
+    case, since "check" isn't one of the ~12 hardcoded verbs). That bridge
+    is meant for repl.py/tui.py's plain synchronous callers, which have no
+    event loop of their own -- called from inside a FastAPI handler that
+    already has one running, it spins up a second asyncio event loop in a
+    background thread, and prash.brain.kimi_client's module-level cached
+    AsyncOpenAI client gets bound to whichever loop happens to construct
+    it first. asyncio.run() always closes its loop on return, so once that
+    background thread's call finished (success, failure, or its own 12s
+    timeout), the cached client was left holding a transport tied to a
+    dead loop -- and every later DeepSeek call in the process, including
+    the "real" one from chat_stream's own step 2 in the correct main loop,
+    failed with a generic, misleading "Connection error." Found live
+    2026-09-16: reproduced instantly through the real endpoint, could not
+    reproduce at all calling the exact same DeepSeek code standalone or via
+    a throwaway FastAPI debug endpoint -- the difference was always
+    whether resolve()'s LLM branch had run in a thread first."""
     for provider_hit in (_datadog_hit, _pagerduty_hit):
         hit = provider_hit(text)
         if hit is not None:
             return hit
     verb = _verb_hit(text)
     if verb is None:
-        # Milestone 2 (2026-08-24): the fast path only recognizes ~12
-        # hardcoded verbs and fix/restart/rollback/open-pr targets -- it has
-        # no idea Datadog, Grafana, PagerDuty, Snyk, Gitleaks, Azure, or GCP
-        # exist. "what's wrong with our grafana alerts" landed here and
-        # died with "I didn't get that", live, 2026-08-23. Route anything
-        # the keyword table doesn't recognize through the same tool-calling
-        # brain the diagnosis pipeline already uses, instead of adding verb
-        # #13 by hand -- that's the whole reason this needed a second stage
-        # instead of a bigger keyword table.
-        return _resolve_via_llm(text, ctx)
+        return None
 
     if verb == "watch":
         # "keep an eye on prash-demo/api" -> watch that pod's namespace;
@@ -283,6 +295,21 @@ def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
     if verb == "apply-ci-fix":
         return Suggestion(["fix", target, "--ci"], f"diagnosing + fixing CI on {target}")
     return None
+
+
+def resolve(text: str, ctx: _Context) -> Suggestion | Clarify | None:
+    """Parse free text into a command suggestion, a clarifying question, or
+    None (genuinely couldn't resolve it, fast or otherwise). Synchronous --
+    for repl.py/tui.py's plain callers with no event loop of their own.
+    An async caller that already has an event loop (server.py's
+    /api/chat/stream) should call resolve_fast_path() + await
+    _resolve_via_llm_async() directly instead of this, to avoid the
+    thread-and-new-event-loop bridge _resolve_via_llm() uses -- see
+    resolve_fast_path()'s docstring for why that matters."""
+    result = resolve_fast_path(text, ctx)
+    if result is not None:
+        return result
+    return _resolve_via_llm(text, ctx)
 
 
 def complete(verb: str, choice: str, ctx: _Context) -> Suggestion | None:

@@ -19,6 +19,7 @@ from prash.intent import (
     _verb_hit,
     complete,
     resolve,
+    resolve_fast_path,
 )
 from prash.repl import _is_it_phrase, _looks_like_talk
 
@@ -86,6 +87,40 @@ def test_open_pr_never_guesses_a_repo():
     s = resolve("open a pr", ctx(namespace="prash-demo", pod="api-2", last_target="prash-demo/api-2"))
     assert isinstance(s, Clarify)
     assert "repository" in s.question
+
+
+# ---- resolve_fast_path() vs resolve() (server.py async-safety split) ------
+
+def test_resolve_fast_path_matches_resolve_on_heuristic_hits():
+    """Both must agree on anything the keyword table actually recognizes --
+    the split changes WHO calls the LLM fallback, not the heuristic half's
+    behavior."""
+    text = "restart the broken pod"
+    c = ctx(namespace="prash-demo", pod="api-1", last_target="prash-demo/api-1")
+    assert resolve_fast_path(text, c) == resolve(text, c)
+
+
+def test_resolve_fast_path_returns_none_without_touching_the_llm(monkeypatch):
+    """Found live 2026-09-16: server.py's /api/chat and /api/chat/stream
+    (both async FastAPI handlers) called the synchronous resolve() for
+    their heuristic-only "fast path" step, not realizing resolve() itself
+    falls through to _resolve_via_llm() -- which runs the coroutine via
+    asyncio.run() in a background thread. That's the right bridge for
+    repl.py/tui.py's plain synchronous callers, but from inside a handler
+    that already has its own running event loop it creates a SECOND
+    asyncio event loop in the same process; asyncio.run() closes that loop
+    on return, and prash.brain.kimi_client's module-level cached
+    AsyncOpenAI client -- if constructed on that thread -- was left bound
+    to a now-dead loop, so every later DeepSeek call in the process failed
+    with a generic "Connection error", even calls made correctly from the
+    main loop afterward. resolve_fast_path() must never reach the LLM path
+    on a miss -- that's the whole point of the split."""
+    def _boom(*args, **kwargs):
+        raise AssertionError("resolve_fast_path() must not call the LLM fallback")
+
+    monkeypatch.setattr("prash.intent._resolve_via_llm", _boom)
+    result = resolve_fast_path("what's wrong with our grafana alerts", ctx())
+    assert result is None
 
 
 # ---- datadog fast-path routing (connector rewrite M2/M4) -------------------
