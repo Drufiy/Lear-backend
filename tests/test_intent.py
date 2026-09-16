@@ -420,3 +420,44 @@ def test_llm_alert_routes_through_run_action():
     )
     assert isinstance(s, Suggestion)
     assert s.argv == ["run", "aws-alert", "i-0abc"]
+
+
+def test_llm_fix_adds_provider_flag_for_aws_and_gcp():
+    """Found live 2026-09-17: dropping the provider here isn't a no-op --
+    cmd_fix defaults to the kubernetes path, which rejects a bare instance
+    name like "bithub-backend" with "expected <namespace>/<pod> target"."""
+    s = _args_to_suggestion_or_clarify(
+        {"command": "fix", "provider": "aws", "resource": "bithub-backend", "explanation": "diagnose the instance"}
+    )
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["fix", "bithub-backend", "--provider", "aws"]
+
+    s2 = _args_to_suggestion_or_clarify(
+        {"command": "fix", "provider": "gcp", "resource": "drufiy-proxy", "explanation": "diagnose the instance"}
+    )
+    assert s2.argv == ["fix", "drufiy-proxy", "--provider", "gcp"]
+
+
+def test_llm_run_execute_aws_passes_through_the_command():
+    """Found live 2026-09-17: execute-aws/execute-gcp/exec were unreachable
+    through chat at all -- cli.py's `run` subcommand has always had
+    --command/--exec-command flags, but nothing in the LLM's tool schema or
+    this argv builder ever populated them, so the action always failed with
+    "no command given" regardless of what the user asked for."""
+    s = _args_to_suggestion_or_clarify({
+        "command": "run", "action_id": "execute-aws", "resource": "bithub-backend",
+        "run_command": "sudo systemctl restart nginx", "explanation": "restart nginx",
+    })
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["run", "execute-aws", "bithub-backend", "--command", "sudo systemctl restart nginx"]
+
+
+def test_llm_run_exec_uses_the_exec_command_flag_not_command():
+    """`exec` (a k8s pod) takes --exec-command, not --command -- the two
+    instance-level actions (execute-aws/execute-gcp) take --command."""
+    s = _args_to_suggestion_or_clarify({
+        "command": "run", "action_id": "exec", "resource": "prash-demo/api-1",
+        "run_command": "ls -la /app", "explanation": "list app directory",
+    })
+    assert isinstance(s, Suggestion)
+    assert s.argv == ["run", "exec", "prash-demo/api-1", "--exec-command", "ls -la /app"]

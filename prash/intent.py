@@ -402,10 +402,19 @@ def _build_intent_tool_schema() -> dict:
                         "get_stats. "
                         "watch = start proactively monitoring a resource/namespace for new "
                         "problems ('keep an eye on', 'notify me when'). "
-                        "fix = diagnose+propose a fix for a k8s pod (provider=kubernetes) "
-                        "or a CI run (provider=github/gitlab). "
+                        "fix = diagnose+propose a fix for a k8s pod (provider=kubernetes), "
+                        "a CI run (provider=github/gitlab), or an AWS/GCP instance "
+                        "(provider=aws/gcp) -- but for AWS/GCP this only sees the instance's "
+                        "own power state and CloudWatch/Cloud Monitoring metrics, NOT the "
+                        "health of services running inside it (nginx, an app process, etc). "
+                        "If the user describes an in-instance service being down (a site not "
+                        "responding, a proxy/app not running) rather than the instance itself, "
+                        "use run with action_id=execute-aws/execute-gcp and a command that "
+                        "checks and fixes that specific service instead -- fix will not see it. "
                         "run = execute one of the registered write actions below -- this is "
-                        "also how you page/alert an on-call responder (use an *-alert action id). "
+                        "also how you page/alert an on-call responder (use an *-alert action id), "
+                        "and how you check/restart an in-instance service on AWS/GCP (see "
+                        "`run_command` below). "
                         "clarify = you cannot confidently resolve this -- ask instead."
                     ),
                 },
@@ -437,6 +446,20 @@ def _build_intent_tool_schema() -> dict:
                 "minutes": {"type": "integer", "description": "only for mute/silence-style actions, if the user gave a duration"},
                 "reason": {"type": "string", "description": "only for snyk-ignore-issue: the user's stated reason"},
                 "deployment_id": {"type": "string", "description": "only for vercel-rollback/-redeploy, if the user gave one"},
+                "run_command": {
+                    "type": "string",
+                    "description": (
+                        "only for action_id=execute-aws, execute-gcp, or exec (running a real "
+                        "shell command on an EC2 instance, a GCP Compute instance, or inside a "
+                        "k8s pod). The exact command to run, e.g. 'sudo systemctl restart "
+                        "nginx'. Pick a real, specific, minimal command that matches what the "
+                        "user described needs fixing or checking -- never something destructive "
+                        "or broader than asked (no wildcard deletes, no reboots, no changes to "
+                        "anything other than the service/resource actually named). This action "
+                        "always needs human approval before it runs, but the command shown for "
+                        "approval must already be the right one, not a placeholder."
+                    ),
+                },
                 "explanation": {
                     "type": "string",
                     "description": "one short, plain sentence describing what you're about to do -- shown to the user before it runs.",
@@ -527,6 +550,15 @@ def _args_to_suggestion_or_clarify(args: dict) -> Suggestion | Clarify | None:
         provider = args.get("provider")
         if provider in ("github", "gitlab"):
             return Suggestion(["fix", resource, "--ci", "--provider", provider], explanation)
+        if provider in ("aws", "gcp"):
+            # Found live 2026-09-17: dropping the provider here isn't a
+            # no-op -- cmd_fix defaults to the kubernetes path
+            # (`provider = getattr(args, "provider", "kubernetes") or
+            # "kubernetes"`), which immediately rejects a bare instance
+            # name like "bithub-backend" with "expected <namespace>/<pod>
+            # target" -- exactly the failure mode this line was letting
+            # through undetected for every AWS/GCP fix request.
+            return Suggestion(["fix", resource, "--provider", provider], explanation)
         return Suggestion(["fix", resource], explanation)
 
     if command == "run":
@@ -540,6 +572,19 @@ def _args_to_suggestion_or_clarify(args: dict) -> Suggestion | Clarify | None:
             argv += ["--reason", str(args["reason"])]
         if args.get("deployment_id"):
             argv += ["--deployment-id", str(args["deployment_id"])]
+        if args.get("run_command"):
+            # Found live 2026-09-17: execute-aws/execute-gcp/exec were
+            # unreachable through chat at all -- cli.py's `run` subcommand
+            # has always had --command/--exec-command flags, but nothing
+            # in the LLM's tool schema or this argv builder ever populated
+            # them, so ctx.extra["command"] stayed empty and the action
+            # failed with "no command given" regardless of what the user
+            # asked for. `exec` (a k8s pod) takes --exec-command; the two
+            # instance-level actions take --command. (Named run_command,
+            # not command, to avoid colliding with the top-level `command`
+            # field that picks investigate/stats/fix/run/etc.)
+            flag = "--exec-command" if action_id == "exec" else "--command"
+            argv += [flag, str(args["run_command"])]
         return Suggestion(argv, explanation)
 
     return None
