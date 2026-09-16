@@ -811,3 +811,35 @@ def test_watch_authenticates_when_not_already_connected(monkeypatch):
     list(conn.watch("prash-demo/broken-app-abc"))
 
     assert called["authenticate"] is True
+
+
+def test_blank_kubeconfig_env_var_is_cleared_before_client_import():
+    """Found live 2026-09-16: prash/server.py's module-level
+    dotenv.load_dotenv(override=True) puts KUBECONFIG="" (the .env
+    template's blank default) into REAL os.environ before this connector
+    module is ever imported in the real app. The kubernetes-client library
+    reads os.environ["KUBECONFIG"] once, itself, at import time, and
+    caches "" as an explicit-but-invalid path rather than "unset" -- so
+    every authenticate() call for the rest of the process's life failed
+    with "Invalid kube-config file. No configuration found.", even though
+    `kubectl` worked fine against the same kubeconfig. A normal in-process
+    test can't reproduce this (the module is already imported once,
+    cleanly, by the time any test runs) -- this spawns a fresh interpreter
+    with the same blank env var docker/CI would actually set, matching
+    prash/connectors/kubernetes.py's import-time guard."""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["KUBECONFIG"] = ""
+    result = subprocess.run(
+        [sys.executable, "-c", (
+            "import os\n"
+            "import prash.connectors.kubernetes\n"
+            "print(repr(os.environ.get('KUBECONFIG')))\n"
+        )],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "None"

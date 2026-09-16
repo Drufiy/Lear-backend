@@ -26,6 +26,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Iterator, Optional
 
+# Must run BEFORE `from kubernetes import config` below. prash/server.py's
+# module-level dotenv.load_dotenv(override=True) puts KUBECONFIG="" (the
+# .env template's blank default) into REAL os.environ ahead of this import
+# whenever server.py imports first (the normal case) -- and the kubernetes
+# client library reads os.environ["KUBECONFIG"] once, itself, at import
+# time, caching it as "explicitly set to an invalid empty path" rather than
+# "unset". Popping it inside authenticate() at call time is too late: the
+# bad value is already baked in by then, no matter what config_file= is
+# passed per-call. Found live 2026-09-16: kubectl worked fine against the
+# same kubeconfig while this connector reported expired/failed with
+# "Invalid kube-config file. No configuration found." for the lifetime of
+# the process.
+if not os.environ.get("KUBECONFIG"):
+    os.environ.pop("KUBECONFIG", None)
+
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
 
@@ -122,7 +137,7 @@ class KubernetesConnector(Connector):
         self.apps_v1 = None
 
     def authenticate(self) -> bool:
-        kubeconfig = self.credentials.get("KUBECONFIG") or os.environ.get("KUBECONFIG")
+        kubeconfig = self.credentials.get("KUBECONFIG") or os.environ.get("KUBECONFIG") or None
         requested_context = self.credentials.get("KUBE_CONTEXT") or os.environ.get("KUBE_CONTEXT") or None
 
         try:
