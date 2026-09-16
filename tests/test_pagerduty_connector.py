@@ -53,12 +53,38 @@ def _sequenced_urlopen(monkeypatch, bodies: list[bytes]):
 
 
 def test_authenticate_sends_token_header(monkeypatch):
-    calls = _capture_urlopen(monkeypatch, b'{"user": {"name": "Ada", "email": "ada@example.com"}}')
+    # /abilities is the liveness check (works for any valid token); /users/me
+    # is best-effort identity enrichment on top of it.
+    calls = _sequenced_urlopen(monkeypatch, [
+        b'{"abilities": []}',
+        b'{"user": {"name": "Ada", "email": "ada@example.com"}}',
+    ])
     pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "pdkey"})
     assert pd.authenticate() is True
     assert calls[0].get_header("Authorization") == "Token token=pdkey"
-    assert calls[0].full_url == "https://api.pagerduty.com/users/me"
+    assert calls[0].full_url == "https://api.pagerduty.com/abilities"
+    assert calls[1].full_url == "https://api.pagerduty.com/users/me"
     assert pd.auth_identity == {"user": "Ada", "email": "ada@example.com"}
+    assert pd.auth_error is None
+
+
+def test_authenticate_succeeds_with_account_level_key_that_cannot_resolve_identity(monkeypatch):
+    """Found live: a real, valid account-level API key 400s on /users/me
+    ("use a user-level token") even though every other read/write the
+    connector does works fine with it. authenticate() must not fail just
+    because identity enrichment isn't available for this token type."""
+    call_count = {"n": 0}
+
+    def fake_urlopen(req, timeout=30):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _FakeResponse(b'{"abilities": []}')
+        raise urllib.error.HTTPError(req.full_url, 400, "bad request", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "account-level-key"})
+    assert pd.authenticate() is True
+    assert pd.auth_identity == {}
     assert pd.auth_error is None
 
 
@@ -233,7 +259,9 @@ def test_request_retries_429_with_backoff(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
     assert pd.authenticate() is True
-    assert attempts["n"] == 3
+    # 2 failed + 1 successful attempt for the /abilities liveness check,
+    # then 1 more successful attempt for the best-effort /users/me lookup.
+    assert attempts["n"] == 4
     assert sleeps == [1, 2]
 
 
@@ -288,7 +316,9 @@ def test_credential_rotation_reauth_on_401(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "stale-key"})
     assert pd.authenticate() is True
-    assert attempts["n"] == 2
+    # 1 failed + 1 successful attempt for /abilities (with reauth), then 1
+    # more successful attempt for the best-effort /users/me lookup.
+    assert attempts["n"] == 3
     assert pd.api_key == "fresh-key"
     assert calls[1].get_header("Authorization") == "Token token=fresh-key"
 

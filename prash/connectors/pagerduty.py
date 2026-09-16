@@ -341,6 +341,23 @@ class PagerDutyConnector(Connector):
             self.auth_error = "PagerDuty API key is required"
             return False
         try:
+            # /abilities needs nothing beyond a valid token -- works for
+            # both account-level and user-scoped REST API keys, per this
+            # file's own module docstring -- so it's the liveness check,
+            # not /users/me (which only a user-scoped token can answer).
+            self._request("GET", "/abilities", timeout=SHORT_TIMEOUT)
+        except PagerDutyError as exc:
+            self.auth_identity = {}
+            self.auth_error = str(exc)
+            return False
+
+        # Best-effort identity enrichment. Found live 2026-09-16: a real,
+        # valid account-level API key 400s on /users/me ("unable to
+        # determine the user's identity... use a user-level token") -- a
+        # token-type gap, not proof the connection is bad, so it must not
+        # fail authenticate() outright once /abilities already proved the
+        # token live.
+        try:
             resp = self._request("GET", "/users/me", timeout=SHORT_TIMEOUT)
             user = resp.get("user", resp) if isinstance(resp, dict) else {}
             self.auth_identity = {
@@ -349,12 +366,10 @@ class PagerDutyConnector(Connector):
                     "email": user.get("email"),
                 }.items() if value
             }
-            self.auth_error = None
-            return True
-        except PagerDutyError as exc:
+        except PagerDutyError:
             self.auth_identity = {}
-            self.auth_error = str(exc)
-            return False
+        self.auth_error = None
+        return True
 
     def locate(self, resource: str) -> Dict[str, Any]:
         if not self.api_key:
