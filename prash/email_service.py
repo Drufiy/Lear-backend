@@ -1,14 +1,19 @@
-"""Lear Email Notification Service — Executive-Grade HTML Alerts.
+"""Executive HTML Email Alerting and Autonomous SRE Dispatch Service.
 
-Generates beautiful, responsive, dark-mode email alerts for infrastructure incidents,
-automated diagnoses, and remediations.
+Generates responsive dark-obsidian HTML email reports for production incidents,
+containing:
+1. Executive Incident Summary & Severity Badge
+2. DeepSeek AI Root Cause Diagnosis & Code/Config Diff
+3. Three Interactive Action Buttons:
+   - Button 1: [💬 Open Shared Incident War Room] (Direct shared conversation with Copilot)
+   - Button 2: [✅ Approve & Apply Fix] (One-click instant auto-remediation)
+   - Button 3: [❌ Deny / Escalate] (One-click reject / human handoff)
+4. Inbound Email Reply Instructions for bidirectional agent communication.
 """
-from __future__ import annotations
 
 import datetime
 import email.message
 import html
-import json
 import logging
 import os
 import smtplib
@@ -30,17 +35,70 @@ def generate_incident_email_html(
     status: str = "FAILED",
     error_summary: str = "Connection refused to database host 'postgres-wrong:5432'",
     diagnosis: str = "ConfigMap 'checkout-api-config' DATABASE_HOST is misconfigured to 'postgres-wrong'. Episodic memory confirms this pattern matches prior incidents.",
-    action_taken: str = "Lear Autonomous SRE patched ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and completed rolling restart.",
-    resolution_status: str = "RECOVERED",
+    action_taken: str = "Lear Autonomous SRE proposes: Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger rolling restart.",
+    resolution_status: str = "INVESTIGATING",
     cluster: str = "AWS EKS lear-demo (ap-south-1 Mumbai)",
     downtime_seconds: int = 14,
+    incident_id: Optional[str] = None,
+    base_url: str = "http://localhost:8000",
+    **kwargs: Any,
 ) -> str:
-    """Generates an executive-grade, dark-obsidian responsive HTML email."""
+    """Generates an executive-grade, interactive dark-obsidian responsive HTML email."""
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     is_recovered = resolution_status.upper() in ("RECOVERED", "HEALTHY", "RESOLVED")
     status_bg = "#10B981" if is_recovered else "#EF4444"
-    status_text = "RESOLVED IN 14s" if is_recovered else "CRITICAL ALERT"
+    status_text = f"RESOLVED IN {downtime_seconds}s" if is_recovered else "CRITICAL ALERT — ACTION REQUIRED"
     status_icon = "🟢" if is_recovered else "🚨"
+
+    inc_id = incident_id or f"INC-{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}"
+    war_room_url = f"{base_url}/incident/{inc_id}"
+    approve_url = f"{base_url}/api/incident/{inc_id}/approve"
+    deny_url = f"{base_url}/api/incident/{inc_id}/deny"
+
+    # Action buttons block
+    if not is_recovered:
+        action_buttons_html = f"""
+      <div style="margin: 28px 0; padding: 20px; background: #131A2B; border: 1px solid #1E293B; border-radius: 8px; text-align: center;">
+        <div style="font-size: 13px; font-weight: 700; text-transform: uppercase; color: #38BDF8; letter-spacing: 0.5px; margin-bottom: 14px;">
+          ⚡ Interactive Incident Actions (One-Click)
+        </div>
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto; width: 100%;">
+          <tr>
+            <td align="center" style="padding: 4px;">
+              <a href="{war_room_url}" target="_blank" style="display: block; background: #2563EB; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 12px 18px; border-radius: 6px; text-decoration: none; border: 1px solid #3B82F6;">
+                💬 Open Shared War Room
+              </a>
+            </td>
+            <td align="center" style="padding: 4px;">
+              <a href="{approve_url}" target="_blank" style="display: block; background: #059669; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 12px 18px; border-radius: 6px; text-decoration: none; border: 1px solid #10B981;">
+                ✅ Approve & Apply Fix
+              </a>
+            </td>
+            <td align="center" style="padding: 4px;">
+              <a href="{deny_url}" target="_blank" style="display: block; background: #DC2626; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 12px 18px; border-radius: 6px; text-decoration: none; border: 1px solid #EF4444;">
+                ❌ Deny / Escalate
+              </a>
+            </td>
+          </tr>
+        </table>
+        <div style="margin-top: 14px; font-size: 12px; color: #94A3B8; line-height: 1.5;">
+          💡 <strong>Email Quick-Reply:</strong> You can also reply directly to this email with <em>"Approve"</em>, <em>"Deny"</em>, or ask technical questions. Lear Copilot will analyze your message and send back an auto-generated reply!
+        </div>
+      </div>
+        """
+    else:
+        action_buttons_html = f"""
+      <div style="margin: 28px 0; padding: 16px; background: rgba(16, 185, 129, 0.1); border: 1px solid #059669; border-radius: 8px; text-align: center;">
+        <span style="font-size: 14px; font-weight: 700; color: #10B981;">
+          ✅ Autonomous Remediation Completed & Verified
+        </span>
+        <div style="margin-top: 8px;">
+          <a href="{war_room_url}" target="_blank" style="color: #38BDF8; font-size: 13px; text-decoration: underline;">
+            View Incident Post-Mortem & Timeline in War Room →
+          </a>
+        </div>
+      </div>
+        """
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -110,13 +168,11 @@ def generate_incident_email_html(
       margin-bottom: 24px;
     }}
     .metric-grid {{
-      display: table;
-      width: 100%;
+      display: flex;
+      gap: 12px;
       margin-bottom: 24px;
-      border-spacing: 8px;
     }}
     .metric-col {{
-      display: table-cell;
       background: #131A2B;
       border: 1px solid #1E293B;
       border-radius: 8px;
@@ -178,16 +234,15 @@ def generate_incident_email_html(
       border-radius: 6px;
       padding: 12px 14px;
       font-size: 13px;
-      line-height: 1.5;
-      margin-top: 8px;
+      line-height: 1.6;
     }}
     .footer {{
-      background: #0B0E17;
-      padding: 20px 32px;
+      padding: 24px 32px;
+      background: #090D16;
       border-top: 1px solid #1E293B;
-      text-align: center;
       font-size: 12px;
       color: #64748B;
+      text-align: center;
     }}
     .footer a {{
       color: #10B981;
@@ -204,10 +259,14 @@ def generate_incident_email_html(
     <div class="content">
       <h1 class="hero-title">{html.escape(title)}</h1>
       <p class="hero-desc">
-        Lear Autonomous SRE Engine detected an incident in the production cluster. The AI brain diagnosed the root cause and applied remediation.
+        Lear Autonomous SRE Engine detected an incident in the production cluster. The AI brain diagnosed the root cause and is standing by for authorization or autonomous remediation.
       </p>
 
       <div class="metric-grid">
+        <div class="metric-col">
+          <div class="metric-label">Incident ID</div>
+          <div class="metric-val">{html.escape(inc_id)}</div>
+        </div>
         <div class="metric-col">
           <div class="metric-label">Target Service</div>
           <div class="metric-val">{html.escape(service)}</div>
@@ -216,38 +275,37 @@ def generate_incident_email_html(
           <div class="metric-label">Cluster</div>
           <div class="metric-val">{html.escape(cluster)}</div>
         </div>
-        <div class="metric-col">
-          <div class="metric-label">MTTR (Resolution)</div>
-          <div class="metric-val">{downtime_seconds}s (Autonomous)</div>
-        </div>
       </div>
 
       <div class="card">
         <div class="card-title">🚨 Incident Detection & Customer Impact</div>
         <p class="card-body">
-          Pod entered <strong>CrashLoopBackOff</strong> due to failed health probes. Customer checkout requests began receiving <strong>502 Bad Gateway</strong>.
+          Pod entered <strong>CrashLoopBackOff</strong> due to failed database connection. Customer checkout requests are currently receiving <strong>502 Bad Gateway</strong>.
         </p>
         <div class="log-box">{html.escape(error_summary)}</div>
       </div>
 
       <div class="card">
-        <div class="card-title">🧠 DeepSeek Brain Diagnosis</div>
+        <div class="card-title">🧠 DeepSeek AI Brain Diagnosis</div>
         <p class="card-body">
           {html.escape(diagnosis)}
         </p>
       </div>
 
       <div class="card">
-        <div class="card-title">⚡ Autonomous Remediation Executed</div>
+        <div class="card-title">⚡ Autonomous Remediation Plan</div>
         <div class="action-box">
           <strong>Action:</strong> {html.escape(action_taken)}<br>
-          <strong>Verification:</strong> Liveness/Readiness probes passing. Checkout endpoint returned HTTP 200 OK.
+          <strong>Safety Check:</strong> Zero code change; configuration merge patch only; rollback safe.
         </div>
       </div>
+
+      {action_buttons_html}
+
     </div>
     <div class="footer">
       Generated automatically by <strong>Lear Local AI DevOps Agent</strong> • {now_str}<br>
-      Immutable Audit ID: <code>audit_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}</code> • <a href="#">Open Lear Dashboard</a>
+      Incident: <code>{html.escape(inc_id)}</code> • <a href="{war_room_url}">Open Incident War Room</a>
     </div>
   </div>
 </body>
@@ -266,8 +324,12 @@ def dispatch_email_alert(
     resolution_status: str = "RESOLVED",
     credentials: Optional[Dict[str, str]] = None,
     to_email: Optional[str] = None,
+    downtime_seconds: int = 14,
+    incident_id: Optional[str] = None,
+    base_url: str = "http://localhost:8000",
+    **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Generates the HTML email, archives it for UI preview, and dispatches via SMTP if configured."""
+    """Generates the HTML email, archives it for preview, and dispatches via SMTP if configured."""
     creds = credentials or {}
     env_file = Path(__file__).resolve().parent.parent / ".env"
     if env_file.exists():
@@ -276,6 +338,8 @@ def dispatch_email_alert(
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 creds.setdefault(k.strip(), v.strip().strip("'").strip('"'))
+
+    inc_id = incident_id or f"INC-{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}"
 
     html_body = generate_incident_email_html(
         title=subject,
@@ -286,43 +350,55 @@ def dispatch_email_alert(
         diagnosis=diagnosis,
         action_taken=action_taken,
         resolution_status=resolution_status,
+        downtime_seconds=downtime_seconds,
+        incident_id=inc_id,
+        base_url=base_url,
     )
 
     # 1. Save latest HTML to disk for immediate dashboard iframe/modal preview
     latest_file = EMAIL_DIR / "latest.html"
+    inc_file = EMAIL_DIR / f"{inc_id}.html"
     try:
         latest_file.write_text(html_body, encoding="utf-8")
+        inc_file.write_text(html_body, encoding="utf-8")
     except Exception as e:
-        logger.warning(f"Could not write {latest_file}: {e}")
+        logger.warning(f"Could not write email file: {e}")
+
+    recipient = to_email or creds.get("EMAIL_TO", "anantacharya290@gmail.com")
 
     email_record = {
         "id": f"email_{int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)}",
+        "incident_id": inc_id,
         "subject": subject,
         "service": service,
         "status": status,
         "resolution_status": resolution_status,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "recipient": to_email or creds.get("EMAIL_TO", "oncall-team@lear-demo.com"),
+        "recipient": recipient,
+        "sender": creds.get("EMAIL_FROM", "anantacharya5568@gmail.com"),
         "smtp_sent": False,
         "html": html_body,
     }
 
     # 2. Attempt real SMTP if configured
     smtp_host = creds.get("EMAIL_SMTP_HOST")
-    recipient = to_email or creds.get("EMAIL_TO")
-
     if smtp_host and recipient:
         try:
             port = int(creds.get("EMAIL_SMTP_PORT", "587"))
             user = creds.get("EMAIL_USER")
             password = creds.get("EMAIL_PASSWORD")
-            sender = creds.get("EMAIL_FROM", user or "alerts@lear.ai")
+            sender = creds.get("EMAIL_FROM", "anantacharya5568@gmail.com")
 
             msg = email.message.EmailMessage()
             msg["Subject"] = subject
             msg["From"] = sender
             msg["To"] = recipient
-            msg.set_content(f"{subject}\n\nService: {service}\nStatus: {status}\nDiagnosis: {diagnosis}\nAction: {action_taken}")
+            msg.set_content(
+                f"{subject}\n\nService: {service}\nStatus: {status}\nDiagnosis: {diagnosis}\n"
+                f"Action: {action_taken}\n\nOpen War Room: {base_url}/incident/{inc_id}\n"
+                f"Approve Fix: {base_url}/api/incident/{inc_id}/approve\n"
+                f"Deny Fix: {base_url}/api/incident/{inc_id}/deny\n"
+            )
             msg.add_alternative(html_body, subtype="html")
 
             with smtplib.SMTP(smtp_host, port, timeout=10) as server:

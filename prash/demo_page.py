@@ -695,6 +695,9 @@ DEMO_PAGE_HTML = """<!DOCTYPE html>
           <button class="btn-action btn-fix" id="btnFix" onclick="triggerAutoFix()">
             🧠 Trigger Lear Auto-Fix
           </button>
+          <button class="btn-action" style="background: #2563EB; color: #FFFFFF; border: 1px solid #3B82F6;" onclick="openLatestWarRoom()">
+            💬 Open Incident War Room
+          </button>
           <button class="btn-action btn-traffic" id="btnTraffic" onclick="toggleTraffic()">
             🚀 Start Background Traffic
           </button>
@@ -832,15 +835,23 @@ DEMO_PAGE_HTML = """<!DOCTYPE html>
       document.getElementById('incidentToast').classList.remove('active');
     }
 
+    let activeIncidentId = null;
+
     async function injectFailure() {
       logTerminal('tag-err', 'INJECT', 'Patching ConfigMap checkout-api-config: DATABASE_HOST -> postgres-wrong');
       triggerOutageUI();
 
       try {
         const res = await fetch('/api/demo/inject-failure', { method: 'POST' });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error('HTTP ' + res.status + ': ' + errText);
+        }
         const d = await res.json();
+        if (d.incident) activeIncidentId = d.incident.incident_id;
         logTerminal('tag-dd', 'DATADOG', 'Datadog synthetic monitor triggered: container count < 1');
-        logTerminal('tag-err', 'ALERT', 'Email Alert Dispatched: [CRITICAL] checkout-api CrashLoopBackOff');
+        logTerminal('tag-err', 'ALERT', 'Email Alert Dispatched to anantacharya5568@gmail.com');
+        logTerminal('tag-brain', 'WAR_ROOM', 'Shared War Room created: ' + (activeIncidentId || 'active'));
         
         // Refresh email iframe
         document.getElementById('emailIframe').src = '/api/demo/emails/latest?t=' + Date.now();
@@ -856,6 +867,10 @@ DEMO_PAGE_HTML = """<!DOCTYPE html>
 
       try {
         const res = await fetch('/api/demo/auto-fix', { method: 'POST' });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error('HTTP ' + res.status + ': ' + errText);
+        }
         const d = await res.json();
         logTerminal('tag-fix', 'APPLIED', 'ConfigMap patched and checkout-api pod rolled out cleanly.');
         logTerminal('tag-k8s', 'VERIFIED', 'Probe check passed: /healthz 200 OK. Pod 1/1 Running.');
@@ -866,6 +881,23 @@ DEMO_PAGE_HTML = """<!DOCTYPE html>
         logOrder('ok', 'RECOVERED: Checkout API restored by Lear. Ready for customer orders!');
       } catch (e) {
         logTerminal('tag-err', 'ERROR', 'Auto-fix call failed: ' + e.message);
+      }
+    }
+
+    function openLatestWarRoom() {
+      if (activeIncidentId) {
+        window.open('/incident/' + activeIncidentId, '_blank');
+      } else {
+        fetch('/api/incident/latest')
+          .then(r => r.json())
+          .then(d => {
+            if (d.incident && d.incident.incident_id) {
+              window.open('/incident/' + d.incident.incident_id, '_blank');
+            } else {
+              window.open('/incident/INC-LATEST', '_blank');
+            }
+          })
+          .catch(() => window.open('/incident/INC-LATEST', '_blank'));
       }
     }
 
