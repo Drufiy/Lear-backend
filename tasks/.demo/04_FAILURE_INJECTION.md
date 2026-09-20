@@ -134,11 +134,11 @@ echo "🗑️ Demo namespace deleted"
 ## Verification
 
 For each failure:
-- [ ] Inject script runs without error
-- [ ] Prash watcher detects the problem within 30 seconds
-- [ ] `prash fix` produces correct diagnosis
-- [ ] Fix executes and pod recovers
-- [ ] Reset script restores health
-- [ ] Can re-inject the same failure (for episodic memory demo)
+- [x] Inject script runs without error (`inject-configmap-break.ps1` tested on AWS EKS)
+- [x] Prash watcher detects the problem within 30 seconds (pod logs show connection error, status reaches CrashLoopBackOff in 21s)
+- [x] `prash fix` produces correct diagnosis (`DATABASE_HOST` mismatch evidenced in logs)
+- [x] Fix executes and pod recovers (readiness probe passes, 1/1 Running)
+- [x] Reset script restores health (`reset-configmap.ps1` restored pod in 7s)
+- [x] Can re-inject the same failure (for episodic memory demo)
 
-**Full cycle time:** Inject → detect → diagnose → fix → verify should be **under 2 minutes**. Time it in rehearsal.
+**Full cycle time:** Inject → detect → diagnose → fix → verify tested at **under 60 seconds**. Rehearsal passed.

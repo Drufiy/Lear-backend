@@ -46,11 +46,16 @@ prash watch --provider kubernetes
 
 > **Say:** "We're connected to Kubernetes, Datadog, and GitHub. These are real connections — real API keys on this machine. They never touch our servers."
 
-### 1:00 — Show the load
+### 1:00 — Show the load & live traffic
 
-> **Say:** "500 simulated users are hitting checkout right now. This is running on a real AWS EKS cluster."
+> **Say:** "Simulated users are hitting checkout right now. This is running on our live AWS EKS cluster in Mumbai."
 
-**Do:** Show the loadgen pod in `kubectl get pods` or the request rate on the dashboard.
+**Do:** Show `kubectl get pods -n lear-demo`, or hit the public ELB live:
+```bash
+# Live AWS ELB checkout invocation:
+curl.exe -s -X POST http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/api/checkout -H "Content-Type: application/json" -d "{\"cart_id\": \"live-demo\", \"user_id\": \"gradup-md\", \"items\": [{\"id\": \"item-1\", \"price\": 49.99}]}"
+# Returns: {"order_id": "...", "status": "COMPLETED", "payment": {"status": "success"}, "shipping": {...}}
+```
 
 ### 1:30 — Show the watcher
 
@@ -67,7 +72,11 @@ prash watch --provider kubernetes
 > **Say:** "Let me break something."
 
 **Do:** In Tab 3, run:
-```bash
+```powershell
+# PowerShell (Windows):
+powershell -ExecutionPolicy Bypass -File .\scripts\demo\scripts\inject-configmap-break.ps1
+
+# Or Bash (Linux/Mac):
 ./scripts/demo/scripts/inject-configmap-break.sh
 ```
 
@@ -146,11 +155,18 @@ prash audit
 ### 6:00 — Reset, then break again
 
 **Do:**
-```bash
+```powershell
+# PowerShell:
+powershell -ExecutionPolicy Bypass -File .\scripts\demo\scripts\reset-configmap.ps1
+# Wait 10 seconds for pod to recover
+powershell -ExecutionPolicy Bypass -File .\scripts\demo\scripts\inject-configmap-break.ps1
+
+# Or Bash:
 ./scripts/demo/scripts/reset-configmap.sh
-# Wait 15 seconds for pod to recover
 ./scripts/demo/scripts/inject-configmap-break.sh
 ```
+
+*(Tip: You can also pre-seed or reset memory with `.\scripts\demo\seed-memory.ps1` or `.\scripts\demo\reset-memory.ps1`)*
 
 > **Say:** "Same failure. Different time. Let's see if Prash remembers."
 

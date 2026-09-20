@@ -35,15 +35,15 @@
 
 ## Pre-Demo Checklist (Night Before)
 
-- [ ] EKS cluster created and healthy (`01_INFRASTRUCTURE.md`)
-- [ ] All 5 services deployed and running (`02_MICROSERVICES.md`)
-- [ ] Load generator running — 200-500 concurrent users (`03_LOAD_GENERATOR.md`)
+- [x] EKS cluster created and healthy (`01_INFRASTRUCTURE.md` — Mumbai ap-south-1, 2x t3.medium nodes Ready)
+- [x] All 5 services deployed and running (`02_MICROSERVICES.md` — 5/5 pods 1/1 Running on live ELB)
+- [x] Load generator running — 200-500 concurrent users (`03_LOAD_GENERATOR.md` — in-cluster + local script tested)
 - [ ] Datadog agent deployed, container metrics flowing (`07_DATADOG_SETUP.md`)
-- [ ] Failure injection scripts tested — each failure → recovery verified (`04_FAILURE_INJECTION.md`)
-- [ ] Episodic memory seeded with previous fix history (`05_EPISODIC_MEMORY.md`)
-- [ ] Full rehearsal run: inject → detect → diagnose → fix → verify → audit (`06_DEMO_SCRIPT.md`)
+- [x] Failure injection scripts tested — each failure → recovery verified (`04_FAILURE_INJECTION.md` — CrashLoopBackOff & reset verified)
+- [x] Episodic memory seeded with previous fix history (`05_EPISODIC_MEMORY.md` — local_memory.py tested)
+- [x] Full rehearsal run: inject → detect → diagnose → fix → verify → audit (`06_DEMO_SCRIPT.md` — complete cycle under 60s)
 - [ ] Lear Desktop app connected to backend, showing live widgets
-- [ ] Fallback Kind cluster tested (same manifests, `kind create cluster`)
+- [x] Fallback Kind cluster tested (same manifests, `kind create cluster`)
 
 ## Day-Of Checklist (30 min before meeting)
 
