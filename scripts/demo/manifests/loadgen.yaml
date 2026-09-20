@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loadgen-code
+  namespace: lear-demo
+  labels:
+    app: loadgen
+    team: lear-demo
+    env: staging
+data:
+  loadgen.py: |
+    #!/usr/bin/env python3
+    """Load generator simulating realistic distributed user checkout traffic."""
+
+    import concurrent.futures
+    import json
+    import os
+    import random
+    import time
+    import urllib.request
+    import urllib.error
+
+    TARGET_URL = os.environ.get("TARGET_URL", "http://frontend")
+    CONCURRENCY = int(os.environ.get("CONCURRENCY", "10"))
+    REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "0.05"))
+
+    SUCCESS_COUNT = 0
+    FAILURE_COUNT = 0
+    START_TIME = time.time()
+
+    def send_order():
+        global SUCCESS_COUNT, FAILURE_COUNT
+        url = f"{TARGET_URL}/api/checkout"
+        payload = json.dumps({
+            "item": random.choice(["Cloud Tier 1", "Enterprise Suite", "Agent License", "Pro Monitoring"]),
+            "price": round(random.uniform(29.99, 199.99), 2),
+            "user_id": f"usr_{random.randint(1000, 9999)}"
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                if resp.status == 200:
+                    SUCCESS_COUNT += 1
+                else:
+                    FAILURE_COUNT += 1
+        except Exception:
+            FAILURE_COUNT += 1
+
+    def print_stats():
+        last_success = 0
+        last_failure = 0
+        last_time = time.time()
+        while True:
+            time.sleep(3)
+            now = time.time()
+            dt = now - last_time
+            succ_diff = SUCCESS_COUNT - last_success
+            fail_diff = FAILURE_COUNT - last_failure
+            rate = succ_diff / dt if dt > 0 else 0
+            fail_rate = fail_diff / dt if dt > 0 else 0
+
+            print(
+                f"[loadgen] Traffic: {rate:.1f} req/s | "
+                f"Total Orders: {SUCCESS_COUNT} | "
+                f"Errors: {FAILURE_COUNT} (Rate: {fail_rate:.1f} err/s)",
+                flush=True
+            )
+            last_success = SUCCESS_COUNT
+            last_failure = FAILURE_COUNT
+            last_time = now
+
+    def worker_loop():
+        while True:
+            send_order()
+            if REQUEST_DELAY > 0:
+                time.sleep(REQUEST_DELAY)
+
+    def main():
+        print(f"[loadgen] Starting load generator against {TARGET_URL}", flush=True)
+        print(f"[loadgen] Concurrency: {CONCURRENCY} workers | Base Delay: {REQUEST_DELAY}s", flush=True)
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY + 1)
+        # Background stats reporter
+        executor.submit(print_stats)
+
+        # Worker threads
+        for _ in range(CONCURRENCY):
+            executor.submit(worker_loop)
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: lear-demo
+  labels:
+    app: loadgen
+    team: lear-demo
+    env: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+        team: lear-demo
+        env: staging
+    spec:
+      containers:
+        - name: loadgen
+          image: python:3.12-alpine
+          command: ["python", "/app/loadgen.py"]
+          env:
+            - name: TARGET_URL
+              value: "http://frontend"
+            - name: CONCURRENCY
+              value: "15"
+            - name: REQUEST_DELAY
+              value: "0.02"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: loadgen-code
