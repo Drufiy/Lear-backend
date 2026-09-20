@@ -381,13 +381,18 @@ def dispatch_email_alert(
     }
 
     # 2. Attempt real SMTP if configured
-    smtp_host = creds.get("EMAIL_SMTP_HOST")
+    user = (creds.get("EMAIL_USER") or os.environ.get("EMAIL_USER") or "").strip()
+    password = (creds.get("EMAIL_PASSWORD") or os.environ.get("EMAIL_PASSWORD") or "").strip()
+    if password:
+        password = password.replace(" ", "").strip()
+    sender = (creds.get("EMAIL_FROM") or os.environ.get("EMAIL_FROM") or user or "anantacharya5568@gmail.com").strip()
+    smtp_host = (creds.get("EMAIL_SMTP_HOST") or os.environ.get("EMAIL_SMTP_HOST") or "").strip()
+    if not smtp_host and ("@gmail.com" in user.lower() or "@gmail.com" in sender.lower()):
+        smtp_host = "smtp.gmail.com"
+
     if smtp_host and recipient:
         try:
-            port = int(creds.get("EMAIL_SMTP_PORT", "587"))
-            user = creds.get("EMAIL_USER")
-            password = creds.get("EMAIL_PASSWORD")
-            sender = creds.get("EMAIL_FROM", "anantacharya5568@gmail.com")
+            port = int(creds.get("EMAIL_SMTP_PORT") or os.environ.get("EMAIL_SMTP_PORT") or "587")
 
             msg = email.message.EmailMessage()
             msg["Subject"] = subject
@@ -401,16 +406,44 @@ def dispatch_email_alert(
             )
             msg.add_alternative(html_body, subtype="html")
 
-            with smtplib.SMTP(smtp_host, port, timeout=10) as server:
-                server.starttls()
-                if user and password:
-                    server.login(user, password)
-                server.send_message(msg)
+            if port == 465:
+                with smtplib.SMTP_SSL(smtp_host, port, timeout=12) as server:
+                    if user and password:
+                        server.login(user, password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP(smtp_host, port, timeout=12) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    if user and password:
+                        server.login(user, password)
+                    server.send_message(msg)
             email_record["smtp_sent"] = True
             logger.info(f"Successfully sent incident email to {recipient} via {smtp_host}:{port}")
         except Exception as exc:
             logger.warning(f"SMTP send failed ({smtp_host}): {exc}")
             email_record["smtp_error"] = str(exc)
+
+    # 3. Also dispatch to Slack webhook if configured
+    try:
+        from prash.slack_service import dispatch_slack_alert
+        slack_res = dispatch_slack_alert(
+            title=subject,
+            service=service,
+            namespace=namespace,
+            status=status,
+            error_summary=error_summary,
+            diagnosis=diagnosis,
+            action_taken=action_taken,
+            incident_id=inc_id,
+            base_url=base_url
+        )
+        email_record["slack_sent"] = slack_res.get("sent", False)
+        if not slack_res.get("sent") and "error" in slack_res:
+            email_record["slack_error"] = slack_res.get("error")
+    except Exception as se:
+        logger.warning(f"Slack auto-dispatch skipped: {se}")
 
     DISPATCHED_EMAILS.insert(0, email_record)
     if len(DISPATCHED_EMAILS) > 50:
