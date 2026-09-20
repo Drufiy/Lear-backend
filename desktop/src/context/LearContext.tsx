@@ -54,10 +54,46 @@ interface LearContextType {
   viewProjectDetail: (id: string) => void;
   clearProjectDetail: () => void;
 
+export interface ChatContextType {
+  connectorId?: string;
+  resourceId?: string;
+  incidentId?: string;
+  title?: string;
+  errorSummary?: string;
+  diagnosis?: string;
+  agentThinking?: string[];
+  tags?: string[];
+  severity?: string;
+  requiresApproval?: boolean;
+  initialPrompt?: string;
+}
+
+interface LearContextType {
+  // Projects
+  projects: Project[];
+  activeProjectId: string;
+  activeProject: Project | null;
+  selectProject: (id: string) => void;
+  refreshProjects: () => Promise<void>;
+
+  // Environment
+  activeEnvironment: string;
+  selectEnvironment: (env: string) => void;
+  environments: string[];
+
+  // Navigation
+  activeTab: string;
+  setActiveTab: (tab: string) => void;
+  openCreateProjectModal: boolean;
+  setOpenCreateProjectModal: (open: boolean) => void;
+  selectedProjectIdForDetail: string | null;
+  viewProjectDetail: (id: string) => void;
+  clearProjectDetail: () => void;
+
   // Global Copilot / Chatbot
   chatOpen: boolean;
-  chatContext: { connectorId?: string; resourceId?: string } | null;
-  openChat: (ctx?: { connectorId?: string; resourceId?: string } | null) => void;
+  chatContext: ChatContextType | null;
+  openChat: (ctx?: ChatContextType | null) => void;
   closeChat: () => void;
 
   // Active Services
@@ -97,7 +133,7 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [selectedProjectIdForDetail, setSelectedProjectIdForDetail] = useState<string | null>(null);
 
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatContext, setChatContext] = useState<{ connectorId?: string; resourceId?: string } | null>(null);
+  const [chatContext, setChatContext] = useState<ChatContextType | null>(null);
 
   const viewProjectDetail = useCallback((id: string) => {
     setSelectedProjectIdForDetail(id);
@@ -108,7 +144,7 @@ export const LearProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSelectedProjectIdForDetail(null);
   }, []);
 
-  const openChat = useCallback((ctx?: { connectorId?: string; resourceId?: string } | null) => {
+  const openChat = useCallback((ctx?: ChatContextType | null) => {
     setChatContext(ctx || null);
     setChatOpen(true);
   }, []);

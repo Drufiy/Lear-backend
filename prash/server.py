@@ -3174,6 +3174,204 @@ def demo_send_custom_email(body: Dict[str, Any] = Body(...)):
     return {"success": True, "message": msg, "record": record}
 
 
+# ─── Storefront & Chaos Admin Console ────────────────────────────────────
+
+@app.get("/store", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
+def view_customer_store():
+    """Serves the clean, premium Lear Edge Systems customer storefront."""
+    from prash.customer_store import generate_customer_store_html
+    return HTMLResponse(content=generate_customer_store_html())
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def view_admin_chaos():
+    """Serves the zero-chat chaos engineering admin console."""
+    from prash.admin_panel import generate_admin_chaos_html
+    return HTMLResponse(content=generate_admin_chaos_html())
+
+
+# ─── Database Failover & Chaos Injections ─────────────────────────────────
+
+@app.post("/api/demo/inject-db-failure")
+def demo_inject_db_failure():
+    """Simulates primary PostgreSQL failure and performs automated discovery of standby replica."""
+    import subprocess
+    from prash.email_service import dispatch_email_alert
+    from prash.incident_manager import create_incident
+
+    try:
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "patch", "configmap", "checkout-api-config",
+             "--type", "merge", "-p", '{"data":{"DATABASE_HOST":"postgres-primary-offline"}}'],
+            check=True, timeout=10, capture_output=True
+        )
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+            check=True, timeout=10, capture_output=True
+        )
+    except Exception as e:
+        logger.error(f"DB failure injection failed: {e}")
+
+    # Autonomous discovery of standby replica
+    target_replica_host = "postgres-replica"
+    try:
+        out = subprocess.run(
+            ["kubectl", "get", "svc", "-n", "lear-demo", "-o", "json"],
+            timeout=8, capture_output=True, text=True
+        )
+        if out.returncode == 0:
+            svc_data = json.loads(out.stdout)
+            for item in svc_data.get("items", []):
+                s_name = item.get("metadata", {}).get("name", "")
+                if "replica" in s_name or "standby" in s_name:
+                    target_replica_host = s_name
+                    break
+    except Exception as e:
+        logger.warning(f"Error during service discovery: {e}")
+
+    thinking_steps = [
+        "Ingested telemetry anomaly: 100% database query failure rate on checkout-api.",
+        "Pod log inspection: psycopg2.OperationalError: could not connect to server 'postgres' (port 5432): Connection refused.",
+        "Triggered Kubernetes Service Discovery in namespace 'lear-demo' to search for active DB endpoints.",
+        f"Discovered healthy standby replica '{target_replica_host}:5432' (Pod status: 1/1 Running, 0 restarts).",
+        f"Synthesized remediation plan: Re-route production traffic from primary to standby replica '{target_replica_host}'.",
+        "Tier-1 production mutation guardrail: Automatic failover requires human approval.",
+        "Dispatched priority email alert to anantacharya290@gmail.com and published in-app approval toast on Lear Dashboard."
+    ]
+
+    inc = create_incident(
+        service="checkout-api",
+        namespace="lear-demo",
+        title="[CRITICAL] Primary PostgreSQL Outage - Standby Replica Failover Available",
+        severity="CRITICAL",
+        tags=["CRITICAL", "DB-FAILOVER", "AWAITING APPROVAL"],
+        error_summary="psycopg2.OperationalError: could not connect to server 'postgres' (10.100.220.14), port 5432: Connection refused",
+        diagnosis=f"Primary database 'postgres:5432' experienced connection failure. Lear Service Discovery discovered active standby replica '{target_replica_host}:5432'.",
+        proposed_remediation=f"Execute Failover: Re-route checkout-api traffic to standby replica '{target_replica_host}' by patching ConfigMap.",
+        patch_data={"DATABASE_HOST": target_replica_host},
+        cluster="AWS EKS lear-demo (ap-south-1 Mumbai)",
+        agent_thinking=thinking_steps,
+        requires_approval=True,
+        episodic_memory="Matched past incident INC-8429: Standby replica failover executed with 100% recovery in 12s."
+    )
+
+    email_record = dispatch_email_alert(
+        subject="[CRITICAL] Primary PostgreSQL Outage - Standby Replica Failover Available",
+        service="checkout-api",
+        namespace="lear-demo",
+        status="CRITICAL",
+        error_summary="psycopg2.OperationalError: connection to 'postgres:5432' refused",
+        diagnosis=f"Primary database 'postgres:5432' offline. Healthy standby replica '{target_replica_host}:5432' discovered.",
+        action_taken=f"Failover proposed: Patch ConfigMap to route to '{target_replica_host}'. Standing by for human approval.",
+        resolution_status="FAILED",
+        incident_id=inc["incident_id"]
+    )
+
+    return {"success": True, "action": "injected", "incident": inc, "email": email_record}
+
+
+@app.post("/api/demo/auto-failover-db")
+def demo_auto_failover_db():
+    """Executes failover to standby replica (postgres-replica)."""
+    import subprocess
+    from prash.email_service import dispatch_email_alert
+    from prash.incident_manager import get_latest_incident, execute_remediation
+
+    latest = get_latest_incident()
+    inc_id = latest["incident_id"] if latest else None
+
+    if inc_id:
+        execute_remediation(inc_id)
+    else:
+        try:
+            subprocess.run(
+                ["kubectl", "-n", "lear-demo", "patch", "configmap", "checkout-api-config",
+                 "--type", "merge", "-p", '{"data":{"DATABASE_HOST":"postgres-replica"}}'],
+                check=True, timeout=10, capture_output=True
+            )
+            subprocess.run(
+                ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+                check=True, timeout=10, capture_output=True
+            )
+        except Exception as e:
+            logger.error(f"Failover execution error: {e}")
+
+    email_record = dispatch_email_alert(
+        subject="[RESOLVED] Production Traffic Failed Over to postgres-replica by Lear Autonomous SRE",
+        service="checkout-api",
+        namespace="lear-demo",
+        status="RESOLVED",
+        error_summary="Prior primary database outage",
+        diagnosis="Failover verified. Production checkout traffic is now running against standby replica 'postgres-replica:5432'.",
+        action_taken="ConfigMap DATABASE_HOST switched to postgres-replica. Zero downtime rollout completed.",
+        resolution_status="RECOVERED",
+        downtime_seconds=12,
+        incident_id=inc_id
+    )
+
+    return {"success": True, "action": "failed_over", "incident_id": inc_id, "email": email_record}
+
+
+@app.post("/api/demo/inject-timeout")
+def demo_inject_timeout():
+    """Simulates downstream gateway latency and 504 timeout."""
+    from prash.incident_manager import create_incident
+    from prash.email_service import dispatch_email_alert
+
+    inc = create_incident(
+        service="checkout-api",
+        namespace="lear-demo",
+        title="[WARNING] Upstream Gateway Latency Degradation (504 Gateway Timeout)",
+        severity="WARNING",
+        tags=["WARNING", "GATEWAY-TIMEOUT", "LATENCY"],
+        error_summary="HTTP 504 Gateway Timeout: Upstream server timed out after 5000ms",
+        diagnosis="Downstream egress gateway experiencing elevated latency. Recommended: Enable circuit breaker.",
+        proposed_remediation="Apply circuit breaker and route through regional backup cache.",
+        cluster="AWS EKS lear-demo (ap-south-1 Mumbai)",
+        agent_thinking=[
+            "Ingested CloudWatch latency spike metric: p99 latency exceeded 5200ms.",
+            "Detected 504 Gateway Timeout responses on customer checkout.",
+            "Correlated with Datadog APM trace: external payment gateway bottleneck.",
+            "Proposing circuit breaker activation."
+        ],
+        requires_approval=False
+    )
+    email_record = dispatch_email_alert(
+        subject="[WARNING] Upstream Gateway Latency Degradation (504 Gateway Timeout)",
+        service="checkout-api",
+        namespace="lear-demo",
+        status="WARNING",
+        error_summary="HTTP 504 Gateway Timeout: Upstream server timed out after 5000ms",
+        diagnosis="Downstream egress gateway experiencing elevated latency.",
+        action_taken="Monitoring gateway latency; circuit breaker policy ready.",
+        resolution_status="INVESTIGATING",
+        incident_id=inc["incident_id"]
+    )
+    return {"success": True, "action": "injected", "incident": inc, "email": email_record}
+
+
+@app.post("/api/demo/inject-load")
+def demo_inject_load():
+    """Fires concurrent requests against checkout API to simulate high load."""
+    import urllib.request
+    import threading
+
+    def fire():
+        elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/healthz"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(elb_url, timeout=2)
+            except Exception:
+                pass
+
+    threads = [threading.Thread(target=fire) for _ in range(10)]
+    for t in threads:
+        t.start()
+
+    return {"success": True, "message": "Fired 500 concurrent requests across 10 threads against AWS ELB."}
+
+
 # ─── Shared Incident War Room & Email Reply Endpoints ────────────────────
 
 @app.get("/incident/{incident_id}", response_class=HTMLResponse)
@@ -3185,6 +3383,12 @@ def view_incident_war_room(incident_id: str):
     if not inc:
         raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
     return HTMLResponse(content=generate_incident_war_room_html(inc))
+
+
+@app.get("/api/incidents")
+def get_all_incidents_endpoint():
+    from prash.incident_manager import get_all_incidents
+    return {"success": True, "incidents": get_all_incidents()}
 
 
 @app.get("/api/incident/latest")

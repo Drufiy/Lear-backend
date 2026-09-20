@@ -64,6 +64,15 @@ def get_latest_incident() -> Optional[Dict[str, Any]]:
     return sorted_incidents[0]
 
 
+def get_all_incidents() -> List[Dict[str, Any]]:
+    _load_incidents()
+    return sorted(
+        _INCIDENTS.values(),
+        key=lambda x: x.get("created_at_epoch", 0),
+        reverse=True
+    )
+
+
 def create_incident(
     service: str = "checkout-api",
     namespace: str = "lear-demo",
@@ -74,10 +83,20 @@ def create_incident(
     proposed_remediation: str = "Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger rolling restart.",
     patch_data: Optional[Dict[str, Any]] = None,
     cluster: str = "AWS EKS lear-demo (ap-south-1 Mumbai)",
+    tags: Optional[List[str]] = None,
+    agent_thinking: Optional[List[str]] = None,
+    requires_approval: bool = False,
+    episodic_memory: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = datetime.datetime.now(datetime.timezone.utc)
     now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
     incident_id = f"INC-{int(now.timestamp())}"
+
+    default_tags = tags or (["CRITICAL", "DATABASE"] if "database" in title.lower() else ["CRITICAL", "POD-FAILURE"])
+    if requires_approval and "AWAITING APPROVAL" not in default_tags:
+        default_tags.append("AWAITING APPROVAL")
+
+    target_host = (patch_data or {}).get("DATABASE_HOST", "postgres")
 
     initial_copilot_message = (
         f"🚨 **Incident Alert Triggered** for `{service}` in `{namespace}` ({cluster}).\n\n"
@@ -85,9 +104,21 @@ def create_incident(
         f"{diagnosis}\n\n"
         f"**Error Trace:**\n"
         f"```\n{error_summary}\n```\n\n"
+        f"**Autonomous SRE Investigation & Thinking:**\n"
+    )
+
+    if agent_thinking:
+        for idx, step in enumerate(agent_thinking, 1):
+            initial_copilot_message += f"• **Phase {idx}:** {step}\n"
+        initial_copilot_message += "\n"
+
+    if episodic_memory:
+        initial_copilot_message += f"🧠 **Episodic Memory Match:**\n{episodic_memory}\n\n"
+
+    initial_copilot_message += (
         f"**Proposed Remediation:**\n"
-        f"1. Patch `ConfigMap/checkout-api-config` `DATABASE_HOST: postgres-wrong` -> `postgres`\n"
-        f"2. Trigger rolling restart `deployment/checkout-api`\n"
+        f"1. Patch `ConfigMap/{service}-config` `DATABASE_HOST` -> `{target_host}`\n"
+        f"2. Trigger rolling restart `deployment/{service}`\n"
         f"3. Run health verification probes against `/healthz`\n\n"
         f"I am standing by for your authorization. You can click **Approve** or **Deny** below, or reply with questions."
     )
@@ -101,10 +132,19 @@ def create_incident(
         "status": "ACTIVE",
         "resolution_status": "INVESTIGATING",
         "cluster": cluster,
+        "tags": default_tags,
         "error_summary": error_summary,
         "diagnosis": diagnosis,
         "proposed_remediation": proposed_remediation,
         "patch_data": patch_data or {"DATABASE_HOST": "postgres"},
+        "agent_thinking": agent_thinking or [
+            f"Ingested telemetry anomaly from {service}.",
+            f"Parsed pod logs and identified failure: {error_summary[:120]}",
+            f"Correlated with active cluster services and formulated remediation plan: {proposed_remediation}",
+            "Dispatched email alert and escalated for review."
+        ],
+        "requires_approval": requires_approval,
+        "episodic_memory": episodic_memory or "Correlated pattern with prior cluster recovery episodes.",
         "created_at": now_str,
         "created_at_epoch": now.timestamp(),
         "resolved_at": None,
@@ -136,11 +176,14 @@ def execute_remediation(incident_id: str) -> Dict[str, Any]:
     if not incident:
         return {"success": False, "error": f"Incident {incident_id} not found"}
 
+    target_host = incident.get("patch_data", {}).get("DATABASE_HOST", "postgres")
+
     try:
-        # Patch ConfigMap back to postgres
+        patch_payload = json.dumps({"data": {"DATABASE_HOST": target_host}})
+        # Patch ConfigMap to target host (postgres or postgres-replica)
         subprocess.run(
             ["kubectl", "-n", incident["namespace"], "patch", "configmap", f"{incident['service']}-config",
-             "--type", "merge", "-p", '{"data":{"DATABASE_HOST":"postgres"}}'],
+             "--type", "merge", "-p", patch_payload],
             check=True, timeout=10, capture_output=True, text=True
         )
         # Rollout restart
@@ -156,6 +199,12 @@ def execute_remediation(incident_id: str) -> Dict[str, Any]:
     incident["status"] = "RESOLVED"
     incident["resolution_status"] = "RECOVERED"
     incident["resolved_at"] = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    
+    # Update tags
+    tags = [t for t in incident.get("tags", []) if t != "AWAITING APPROVAL"]
+    if "RESOLVED" not in tags:
+        tags.append("RESOLVED")
+    incident["tags"] = tags
 
     # Add confirmation message in conversation
     incident["conversation"].append({
@@ -164,7 +213,7 @@ def execute_remediation(incident_id: str) -> Dict[str, Any]:
         "avatar": "✅",
         "message": (
             f"🎉 **Remediation Executed & Verified**\n\n"
-            f"- ConfigMap `{incident['service']}-config` successfully patched (`DATABASE_HOST: postgres`).\n"
+            f"- ConfigMap `{incident['service']}-config` successfully patched (`DATABASE_HOST: {target_host}`).\n"
             f"- Deployment `{incident['service']}` rolled out with zero downtime.\n"
             f"- Health probe `/healthz` returned `200 OK`. Pods are `1/1 Running`.\n"
             f"- Incident `{incident_id}` is now **RESOLVED**."
