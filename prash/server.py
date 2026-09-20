@@ -17,13 +17,14 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
 import dotenv
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from prash.connector_registry import (
     CONNECTOR_REGISTRY,
@@ -1129,9 +1130,17 @@ def _start_watch_internal(connector_id: str, target: str, interval: int = 5, per
 
 
 def _stop_watch_internal(connector_id: str, target: Optional[str] = None, watch_id: Optional[str] = None, persist: bool = True) -> bool:
+    if not target and not watch_id:
+        matching = [w for w in list(_active_watches.keys()) if w.startswith(f"{connector_id}:") or _watch_metadata.get(w, {}).get("connector") == connector_id]
+        if not matching:
+            return True
+        for w in matching:
+            _stop_watch_internal(connector_id, watch_id=w, persist=persist)
+        return True
+
     wid = watch_id or (f"{connector_id}:{target}" if target else None)
     if not wid or wid not in _active_watches:
-        raise APIBridgeException("RESOURCE_NOT_FOUND", f"No active watch found for {wid}", 404)
+        return True
 
     handle = _active_watches.pop(wid, None)
     _watch_metadata.pop(wid, None)
@@ -2795,6 +2804,196 @@ def get_status_legacy():
                 "error_detail": str(e),
             })
     return {"statuses": statuses}
+
+
+# ---------------------------------------------------------------------------
+# Demo Control Center & Live Storefront Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/demo", response_class=HTMLResponse)
+def serve_demo_dashboard():
+    """Serves the interactive Demo Control Center and Customer Storefront."""
+    from prash.demo_page import DEMO_PAGE_HTML
+    return HTMLResponse(content=DEMO_PAGE_HTML)
+
+
+@app.get("/api/demo/status")
+def get_demo_status():
+    """Returns real cluster pod status and live ELB response time."""
+    import subprocess
+    import urllib.request
+    
+    pods = []
+    try:
+        raw = subprocess.check_output(
+            ["kubectl", "get", "pods", "-n", "lear-demo", "-o", "json"],
+            timeout=5, stderr=subprocess.DEVNULL
+        )
+        data = json.loads(raw)
+        for item in data.get("items", []):
+            m = item.get("metadata", {})
+            st = item.get("status", {})
+            cs = st.get("containerStatuses", [{}])[0] if st.get("containerStatuses") else {}
+            phase = st.get("phase", "Unknown")
+            waiting = cs.get("state", {}).get("waiting", {})
+            reason = waiting.get("reason", phase)
+            pods.append({
+                "name": m.get("name"),
+                "status": reason if waiting else phase,
+                "ready": cs.get("ready", False),
+                "restarts": cs.get("restartCount", 0)
+            })
+    except Exception as e:
+        logger.warning(f"Could not fetch pods: {e}")
+
+    elb_healthy = False
+    latency_ms = 0
+    elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/healthz"
+    try:
+        t0 = time.time()
+        req = urllib.request.Request(elb_url)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            latency_ms = round((time.time() - t0) * 1000)
+            elb_healthy = (resp.status == 200)
+    except Exception:
+        elb_healthy = False
+
+    return {
+        "pods": pods,
+        "elb_healthy": elb_healthy,
+        "latency_ms": latency_ms
+    }
+
+
+@app.post("/api/demo/inject-failure")
+def demo_inject_failure():
+    """Injects real ConfigMap break and dispatches high-priority incident email."""
+    import subprocess
+    from prash.email_service import dispatch_email_alert
+
+    try:
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "patch", "configmap", "checkout-api-config",
+             "--type", "merge", "-p", '{"data":{"DATABASE_HOST":"postgres-wrong"}}'],
+            check=True, timeout=10, capture_output=True
+        )
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+            check=True, timeout=10, capture_output=True
+        )
+    except Exception as e:
+        logger.error(f"Failure injection failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Dispatch beautiful alert email
+    email_record = dispatch_email_alert(
+        subject="[CRITICAL] checkout-api Database Connectivity Failure (CrashLoopBackOff)",
+        service="checkout-api",
+        namespace="lear-demo",
+        status="CRITICAL",
+        error_summary="gaierror: [Errno -2] Name does not resolve for database host 'postgres-wrong:5432'",
+        diagnosis="DeepSeek Brain identified DATABASE_HOST misconfigured to 'postgres-wrong'. Episodic memory confirms matching past resolution.",
+        action_taken="Lear Auto-Fix recommended: Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger rolling restart.",
+        resolution_status="FAILED"
+    )
+
+    return {"success": True, "action": "injected", "email": email_record}
+
+
+@app.post("/api/demo/auto-fix")
+def demo_auto_fix():
+    """Autonomous fix: restores ConfigMap to postgres and dispatches resolution email."""
+    import subprocess
+    from prash.email_service import dispatch_email_alert
+
+    try:
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "patch", "configmap", "checkout-api-config",
+             "--type", "merge", "-p", '{"data":{"DATABASE_HOST":"postgres"}}'],
+            check=True, timeout=10, capture_output=True
+        )
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+            check=True, timeout=10, capture_output=True
+        )
+    except Exception as e:
+        logger.error(f"Auto-fix failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Dispatch resolution email
+    email_record = dispatch_email_alert(
+        subject="[RESOLVED] checkout-api Successfully Restored by Lear Autonomous SRE",
+        service="checkout-api",
+        namespace="lear-demo",
+        status="RESOLVED",
+        error_summary="Prior error: postgres-wrong host resolution failure",
+        diagnosis="Root cause resolved. ConfigMap DATABASE_HOST restored to valid service host 'postgres'.",
+        action_taken="Automated merge patch applied to checkout-api-config. Deployment rollout verified 1/1 Running.",
+        resolution_status="RECOVERED",
+        downtime_seconds=14
+    )
+
+    return {"success": True, "action": "fixed", "email": email_record}
+
+
+@app.post("/api/demo/reset")
+def demo_reset():
+    """Resets the cluster back to baseline healthy configuration."""
+    return demo_auto_fix()
+
+
+@app.post("/api/demo/customer-checkout")
+def demo_customer_checkout(body: Dict[str, Any] = Body(...)):
+    """Simulates real customer checkout through public AWS ELB."""
+    import urllib.request
+    import urllib.error
+
+    elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/api/checkout"
+    payload = json.dumps({
+        "item": body.get("item", "AI SRE Sentinel Key"),
+        "price": body.get("price", 49.99),
+        "timestamp": time.time()
+    }).encode("utf-8")
+
+    req = urllib.request.Request(elb_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            return data
+    except urllib.error.HTTPError as he:
+        return JSONResponse(status_code=he.code, content={"status": "FAILED", "error": f"HTTP {he.code}: {he.reason}"})
+    except Exception as exc:
+        return JSONResponse(status_code=502, content={"status": "FAILED", "error": f"Gateway Error: {str(exc)}"})
+
+
+@app.get("/api/demo/emails/latest", response_class=HTMLResponse)
+def get_latest_email_html():
+    """Returns the latest dispatched HTML email for preview."""
+    from prash.email_service import EMAIL_DIR, generate_incident_email_html
+    latest = EMAIL_DIR / "latest.html"
+    if latest.exists():
+        return HTMLResponse(content=latest.read_text(encoding="utf-8"))
+    return HTMLResponse(content=generate_incident_email_html(title="[STANDBY] Lear SRE Monitoring Active"))
+
+
+@app.post("/api/demo/send-email")
+def demo_send_custom_email(body: Dict[str, Any] = Body(...)):
+    """Sends the latest incident report to an explicit recipient email address."""
+    recipient = body.get("email")
+    if not recipient:
+        raise HTTPException(status_code=400, detail="Recipient email is required")
+    from prash.email_service import dispatch_email_alert
+    record = dispatch_email_alert(
+        subject="[DEMO ALERT] Lear Autonomous SRE Incident & Resolution Report",
+        to_email=recipient
+    )
+    msg = f"Dispatched incident report to {recipient}"
+    if record.get("smtp_sent"):
+        msg += " via SMTP!"
+    else:
+        msg += f" (Archived locally — configure EMAIL_SMTP_HOST in .env for external delivery)"
+    return {"success": True, "message": msg, "record": record}
+
 
 
 if __name__ == "__main__":

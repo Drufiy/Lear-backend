@@ -4,7 +4,7 @@ active_watches:
   target: default
   watch_id: aws:default
 projects:
-- created_at: '2026-09-13T18:29:10.330017+00:00'
+- created_at: '2026-09-20T17:07:24.742830+00:00'
   environments:
   - name: Production
     services:
@@ -14,18 +14,11 @@ projects:
     - connector_id: gcp
       display_name: Google Cloud
       resource_id: ''
-    - connector_id: github
-      display_name: GitHub Actions
+    - connector_id: kubernetes
+      display_name: Kubernetes
+      resource_id: ''
+    - connector_id: datadog
+      display_name: Datadog
       resource_id: ''
   id: default
   name: Default Project
-settings:
-  alert_on_degraded: true
-  desktop_notifications: true
-  discord_webhook: ''
-  model: gemini-1.5-pro
-  pagerduty_key: ''
-  permission_mode: auto-safe
-  poll_interval: 15
-  retention_days: 30
-  slack_webhook: ''

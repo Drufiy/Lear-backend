@@ -40,9 +40,9 @@ helm install datadog-agent datadog/datadog \
   --set agents.image.tag=7-jmx
 ```
 
-- [ ] Datadog agent DaemonSet running: `kubectl get ds -n lear-demo`
-- [ ] Containers visible in Datadog UI: Infrastructure → Containers
-- [ ] Metrics flowing: `kubernetes.cpu.usage`, `kubernetes.memory.usage`
+- [x] Datadog agent DaemonSet running: `kubectl get ds -n lear-demo`
+- [x] Containers visible in Datadog UI: Infrastructure → Containers
+- [x] Metrics flowing: `kubernetes.cpu.usage`, `kubernetes.memory.usage`
 
 ### T2. Create Datadog Synthetic Monitor
 
@@ -84,10 +84,10 @@ print(f"Monitor created: {resp.json().get('id')}")
 - The `break_datadog.py` script already creates/manages a synthetic monitor
 - Run it once to set up, then it fires automatically when checkout-api goes down
 
-- [ ] Monitor created in Datadog
-- [ ] Monitor is GREEN when checkout-api is healthy
-- [ ] Monitor fires RED when checkout-api pods go down
-- [ ] `break_combined.py` can read both K8s events + Datadog events
+- [x] Monitor created in Datadog
+- [x] Monitor is GREEN when checkout-api is healthy
+- [x] Monitor fires RED when checkout-api pods go down
+- [x] `break_combined.py` can read both K8s events + Datadog events
 
 ### T3. Set environment variables
 
@@ -98,8 +98,8 @@ DATADOG_APP_KEY=<your-key>    # Already confirmed
 DATADOG_SITE=datadoghq.com    # Already confirmed
 ```
 
-- [ ] Prash can connect: `prash investigate --provider datadog`
-- [ ] Desktop Integrations shows Datadog connected (green)
+- [x] Prash can connect: `prash investigate --provider datadog`
+- [x] Desktop Integrations shows Datadog connected (green)
 
 ### T4. Verify correlation pipeline
 
@@ -115,9 +115,9 @@ python scripts/testing/break_combined.py --namespace lear-demo --pod checkout-ap
 # 3. Verify: should show "1 correlated incident from 2 sources (kubernetes + datadog)"
 ```
 
-- [ ] `break_combined.py` correlates K8s + Datadog events
-- [ ] Single incident, not two separate alerts
-- [ ] Prash diagnosis includes evidence from both sources
+- [x] `break_combined.py` correlates K8s + Datadog events
+- [x] Single incident, not two separate alerts
+- [x] Prash diagnosis includes evidence from both sources
 
 ### T5. Datadog Dashboard tab (for the demo)
 
@@ -128,20 +128,20 @@ Create a simple Datadog dashboard showing:
 
 This is optional — only open it during the demo if you want a visual "Datadog also sees the problem" moment.
 
-- [ ] Dashboard created in Datadog UI
-- [ ] Shows live container metrics
-- [ ] Shows monitor status
+- [x] Dashboard created in Datadog UI
+- [x] Shows live container metrics
+- [x] Shows monitor status
 
 ---
 
 ## Verification
 
-- [ ] `kubectl get pods -n lear-demo | grep datadog` — agent running
-- [ ] Datadog UI shows containers from lear-demo namespace
-- [ ] Monitor is GREEN with healthy services
-- [ ] Monitor fires RED when checkout-api goes down
-- [ ] Prash DatadogConnector reads the monitor status correctly
-- [ ] Correlation works: K8s + Datadog = one incident
+- [x] `kubectl get pods -n lear-demo | grep datadog` — agent running
+- [x] Datadog UI shows containers from lear-demo namespace
+- [x] Monitor is GREEN with healthy services
+- [x] Monitor fires RED when checkout-api goes down
+- [x] Prash DatadogConnector reads the monitor status correctly
+- [x] Correlation works: K8s + Datadog = one incident
 
 ---
 
