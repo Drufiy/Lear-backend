@@ -1,0 +1,120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-service-code
+  namespace: lear-demo
+  labels:
+    app: payment-service
+    team: lear-demo
+    env: staging
+data:
+  server.js: |
+    const http = require('http');
+    const crypto = require('crypto');
+
+    const PORT = process.env.PORT || 3000;
+
+    const server = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', service: 'payment-service', healthy: true }));
+        return;
+      }
+
+      if (req.method === 'POST' && req.url === '/charge') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+          const delay = Math.floor(Math.random() * 200) + 100;
+          setTimeout(() => {
+            const txId = 'tx_' + crypto.randomBytes(8).toString('hex');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              status: 'success',
+              tx_id: txId,
+              amount: 49.99,
+              currency: 'USD',
+              timestamp: new Date().toISOString()
+            }));
+          }, delay);
+        });
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not Found' }));
+    });
+
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`[payment-service] Listening on port ${PORT}`);
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: lear-demo
+  labels:
+    app: payment-service
+    team: lear-demo
+    env: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+        team: lear-demo
+        env: staging
+    spec:
+      containers:
+        - name: payment-service
+          image: node:20-alpine
+          command: ["node", "/app/server.js"]
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: code
+          configMap:
+            name: payment-service-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: lear-demo
+  labels:
+    app: payment-service
+    team: lear-demo
+    env: staging
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - port: 3000
+      targetPort: 3000

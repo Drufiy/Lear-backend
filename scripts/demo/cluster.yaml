@@ -1,0 +1,30 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: lear-demo
+  region: ap-south-1
+  version: "1.31"
+  tags:
+    Project: Lear-Demo
+    ManagedBy: eksctl
+
+managedNodeGroups:
+  - name: demo-nodes
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 30
+    volumeType: gp3
+    labels:
+      role: worker
+      env: demo
+      team: lear-demo
+    tags:
+      Project: Lear-Demo
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        cloudWatch: true
+        ebs: true

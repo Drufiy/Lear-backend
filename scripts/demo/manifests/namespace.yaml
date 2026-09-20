@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lear-demo
+  labels:
+    name: lear-demo
+    team: lear-demo
+    env: staging
+    managed-by: prash
