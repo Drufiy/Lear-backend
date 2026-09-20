@@ -369,10 +369,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _render_run_result(result)
 
 
-def _render_run_result(result: RunResult) -> int:
+def _render_run_result(result: RunResult, diagnosis: Any = None) -> int:
     """Shared outcome rendering for cmd_run and cmd_fix: circuit-open gets the
     STOP-AND-ESCALATE panel, everything else gets the decision/status line +
     verification + audit id."""
+    if result.ok and diagnosis is not None:
+        try:
+            from .brain.local_memory import save_fix
+            verified = result.result.verification.ok if (result.result and result.result.verification) else True
+            save_fix(diagnosis, verified=verified)
+        except Exception:
+            pass
+
     if result.outcome is ExecutionOutcome.CIRCUIT_OPEN:
         console.print(
             Panel(
@@ -550,7 +558,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
         except MissingSecretError as exc:
             console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
             return 3
-        return _render_run_result(result)
+        return _render_run_result(result, diagnosis)
 
     try:
         namespace, pod = split_k8s_target(args.target)
@@ -597,7 +605,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
         except KeyError as exc:
             console.print(f"[red]{exc}[/red]")
             return 2
-        return _render_run_result(run_result)
+        return _render_run_result(run_result, diagnosis)
 
     if diagnosis.options:
         # The "ask, don't quit" flow (PRASH_V2.md §9, 2026-08-15): the brain
@@ -636,7 +644,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
         except MissingSecretError as exc:
             console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
             return 3
-        return _render_run_result(result)
+        return _render_run_result(result, diagnosis)
 
     action_id = recommended_action_id(diagnosis.recommended_action)
     if action_id is None:
@@ -660,7 +668,7 @@ def cmd_fix(args: argparse.Namespace) -> int:
     except MissingSecretError as exc:
         console.print(f"[yellow]secret '{exc.name}' required: {exc.hint}[/yellow]")
         return 3
-    return _render_run_result(result)
+    return _render_run_result(result, diagnosis)
 
 
 # Minimum credential(s) each provider needs for a baseline authenticate()
