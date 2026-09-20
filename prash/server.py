@@ -2975,6 +2975,7 @@ def serve_demo_dashboard():
 
 
 @app.get("/api/demo/status")
+@app.get("/api/demo/health")
 def get_demo_status():
     """Returns real cluster pod status and live ELB response time."""
     import subprocess

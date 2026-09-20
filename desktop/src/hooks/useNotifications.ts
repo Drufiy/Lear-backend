@@ -6,6 +6,8 @@ export interface AppNotification {
   title: string;
   message: string;
   connector?: string;
+  incidentId?: string;
+  incidentData?: any;
   severity: 'info' | 'warning' | 'error' | 'success';
   timestamp: string;
   read: boolean;

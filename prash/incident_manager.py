@@ -180,15 +180,20 @@ def execute_remediation(incident_id: str) -> Dict[str, Any]:
 
     try:
         patch_payload = json.dumps({"data": {"DATABASE_HOST": target_host}})
+        if target_host == "postgres":
+            subprocess.run(
+                ["kubectl", "-n", incident["namespace"], "scale", "deployment", "postgres", "--replicas=1"],
+                timeout=10, capture_output=True, text=True
+            )
         # Patch ConfigMap to target host (postgres or postgres-replica)
         subprocess.run(
             ["kubectl", "-n", incident["namespace"], "patch", "configmap", f"{incident['service']}-config",
              "--type", "merge", "-p", patch_payload],
             check=True, timeout=10, capture_output=True, text=True
         )
-        # Rollout restart
+        # Delete pod immediately so new config takes effect at once
         subprocess.run(
-            ["kubectl", "-n", incident["namespace"], "rollout", "restart", f"deployment/{incident['service']}"],
+            ["kubectl", "-n", incident["namespace"], "delete", "pod", "-l", f"app={incident['service']}", "--now"],
             check=True, timeout=10, capture_output=True, text=True
         )
     except Exception as e:

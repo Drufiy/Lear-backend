@@ -32,28 +32,6 @@ export interface ActiveWatch {
 export type AggregateStatus = 'healthy' | 'degraded' | 'error';
 export type WatcherState = 'IDLE' | 'STARTING' | 'ACTIVE' | 'DEGRADED' | 'ALERTING' | 'ERROR';
 
-interface LearContextType {
-  // Projects
-  projects: Project[];
-  activeProjectId: string;
-  activeProject: Project | null;
-  selectProject: (id: string) => void;
-  refreshProjects: () => Promise<void>;
-
-  // Environment
-  activeEnvironment: string;
-  selectEnvironment: (env: string) => void;
-  environments: string[];
-
-  // Navigation
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
-  openCreateProjectModal: boolean;
-  setOpenCreateProjectModal: (open: boolean) => void;
-  selectedProjectIdForDetail: string | null;
-  viewProjectDetail: (id: string) => void;
-  clearProjectDetail: () => void;
-
 export interface ChatContextType {
   connectorId?: string;
   resourceId?: string;
