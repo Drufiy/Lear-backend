@@ -287,8 +287,8 @@ class DatadogConnector(Connector):
             if resource.isdigit():
                 monitor = self._request("GET", f"/api/v1/monitor/{resource}", timeout=SHORT_TIMEOUT)
             else:
-                query = urllib.parse.quote(resource)
-                resp = self._request("GET", f"/api/v1/monitor/search?query={query}", timeout=SHORT_TIMEOUT)
+                clean_query = urllib.parse.quote(resource.replace(":", " "))
+                resp = self._request("GET", f"/api/v1/monitor/search?query={clean_query}", timeout=SHORT_TIMEOUT)
                 monitors = resp.get("monitors", []) if isinstance(resp, dict) else []
                 if not monitors:
                     return {}
