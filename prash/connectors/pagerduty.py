@@ -208,7 +208,7 @@ class _PagerDutyWatchHandle(WatchHandle):
 
 class PagerDutyConnector(Connector):
     name = "pagerduty"
-    read_capabilities = ("incident_state", "watch", "stats")
+    read_capabilities = ("incident_state", "watch", "stats", "oncalls", "service_dependencies")
     write_capabilities = ("acknowledge_incident", "resolve_incident", "trigger_event", "page_oncall")
 
     def __init__(self, credentials: Mapping[str, Any]):
@@ -670,3 +670,115 @@ class PagerDutyConnector(Connector):
             if any(a.get("alert_key") == incident_key for a in alerts):
                 return incident
         return None
+
+    def get_oncalls(
+        self,
+        service: Optional[str] = None,
+        escalation_policy_id: Optional[str] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve active on-call responders from PagerDuty's /oncalls endpoint.
+
+        Optionally filtered by service name/id or escalation policy id.
+        Returns list of oncall entries with resolved user and schedule details.
+        """
+        if not self.api_key:
+            return []
+
+        params: List[str] = ["include[]=users", "include[]=schedules"]
+        if service:
+            handle = self.locate(service)
+            svc_id = handle["service_id"] if handle and "service_id" in handle else service
+            params.append(f"service_ids[]={urllib.parse.quote(svc_id)}")
+
+        if escalation_policy_id:
+            params.append(f"escalation_policy_ids[]={urllib.parse.quote(escalation_policy_id)}")
+
+        if since:
+            params.append(f"since={urllib.parse.quote(since.isoformat())}")
+        if until:
+            params.append(f"until={urllib.parse.quote(until.isoformat())}")
+
+        query_str = "&".join(params)
+        path = f"/oncalls?{query_str}" if query_str else "/oncalls"
+
+        try:
+            resp = self._request("GET", path, timeout=SHORT_TIMEOUT)
+        except PagerDutyError as exc:
+            logger.warning(f"Could not fetch PagerDuty oncalls: {exc}")
+            return []
+
+        raw_oncalls = resp.get("oncalls", []) if isinstance(resp, dict) else []
+        results: List[Dict[str, Any]] = []
+        for entry in raw_oncalls:
+            if not isinstance(entry, dict):
+                continue
+            user = entry.get("user") or {}
+            schedule = entry.get("schedule") or {}
+            escalation_policy = entry.get("escalation_policy") or {}
+            results.append({
+                "escalation_level": entry.get("escalation_level", 1),
+                "start": entry.get("start"),
+                "end": entry.get("end"),
+                "user_id": user.get("id"),
+                "user_name": user.get("name") or user.get("summary"),
+                "user_email": user.get("email"),
+                "schedule_id": schedule.get("id"),
+                "schedule_name": schedule.get("summary"),
+                "escalation_policy_id": escalation_policy.get("id"),
+                "escalation_policy_name": escalation_policy.get("summary"),
+            })
+        return results
+
+    def get_service_dependencies(self, service: str) -> Dict[str, Any]:
+        """Retrieve technical and business service dependencies from PagerDuty.
+
+        Surfaces both supporting services (upstream) and dependent services
+        (downstream) for cross-service incident correlation.
+        """
+        if not self.api_key:
+            return {"service_id": service, "supporting": [], "dependent": [], "relationships": []}
+
+        handle = self.locate(service)
+        svc_id = handle["service_id"] if handle and "service_id" in handle else service
+
+        path = f"/service_dependencies/technical_services/{urllib.parse.quote(svc_id)}"
+        try:
+            resp = self._request("GET", path, timeout=SHORT_TIMEOUT)
+        except PagerDutyError as exc:
+            logger.warning(f"Could not fetch PagerDuty service dependencies for {svc_id}: {exc}")
+            return {"service_id": svc_id, "supporting": [], "dependent": [], "relationships": []}
+
+        relationships = resp.get("relationships", []) if isinstance(resp, dict) else []
+        supporting: List[Dict[str, Any]] = []
+        dependent: List[Dict[str, Any]] = []
+
+        for rel in relationships:
+            if not isinstance(rel, dict):
+                continue
+            supp = rel.get("supporting_service") or {}
+            dep = rel.get("dependent_service") or {}
+            rel_id = rel.get("id")
+
+            if dep.get("id") == svc_id and supp.get("id") != svc_id:
+                supporting.append({
+                    "relationship_id": rel_id,
+                    "service_id": supp.get("id"),
+                    "service_type": supp.get("type"),
+                    "name": supp.get("summary"),
+                })
+            elif supp.get("id") == svc_id and dep.get("id") != svc_id:
+                dependent.append({
+                    "relationship_id": rel_id,
+                    "service_id": dep.get("id"),
+                    "service_type": dep.get("type"),
+                    "name": dep.get("summary"),
+                })
+
+        return {
+            "service_id": svc_id,
+            "supporting": supporting,
+            "dependent": dependent,
+            "relationships": relationships,
+        }

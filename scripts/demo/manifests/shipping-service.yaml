@@ -49,9 +49,13 @@ data:
         def log_message(self, fmt, *args):
             pass
 
+    import socketserver
+    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
     def run():
         print(f"[shipping-service] Listening on port {PORT}", flush=True)
-        http.server.HTTPServer(("0.0.0.0", PORT), ShippingHandler).serve_forever()
+        ThreadedHTTPServer(("0.0.0.0", PORT), ShippingHandler).serve_forever()
 
     if __name__ == "__main__":
         run()

@@ -703,3 +703,76 @@ def test_priority_maps_to_internal_severity():
     assert _incident_severity({"priority": {"summary": "P5"}}) == "low"
     assert _incident_severity({"priority": None, "urgency": "high"}) == "high"
     assert _incident_severity({"priority": None, "urgency": "low"}) == "low"
+
+
+def test_get_oncalls_returns_user_and_escalation_details(monkeypatch):
+    oncalls_payload = {
+        "oncalls": [
+            {
+                "escalation_level": 1,
+                "start": "2026-09-20T00:00:00Z",
+                "end": "2026-09-20T08:00:00Z",
+                "user": {"id": "PUSER1", "name": "Alice Engineer", "email": "alice@example.com"},
+                "schedule": {"id": "PSCHED1", "summary": "Primary Oncall"},
+                "escalation_policy": {"id": "PEPOL1", "summary": "Default Escalation"},
+            }
+        ]
+    }
+    services_payload = {"services": [{"id": "PSVC1", "name": "checkout"}], "more": False}
+    calls = _sequenced_urlopen(monkeypatch, [
+        json.dumps(services_payload).encode(),
+        json.dumps(oncalls_payload).encode(),
+    ])
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
+    results = pd.get_oncalls(service="checkout", escalation_policy_id="PEPOL1")
+    assert len(results) == 1
+    assert results[0]["user_name"] == "Alice Engineer"
+    assert results[0]["user_email"] == "alice@example.com"
+    assert results[0]["escalation_level"] == 1
+    assert results[0]["schedule_name"] == "Primary Oncall"
+    assert "service_ids[]=PSVC1" in calls[1].full_url
+    assert "escalation_policy_ids[]=PEPOL1" in calls[1].full_url
+
+
+def test_get_oncalls_empty_without_api_key():
+    pd = PagerDutyConnector({})
+    assert pd.get_oncalls(service="checkout") == []
+
+
+def test_get_service_dependencies_partitions_supporting_and_dependent(monkeypatch):
+    services_payload = {"services": [{"id": "PSVC1", "name": "checkout"}], "more": False}
+    deps_payload = {
+        "relationships": [
+            {
+                "id": "REL1",
+                "supporting_service": {"id": "PSVC_DB", "summary": "Postgres DB", "type": "technical_service"},
+                "dependent_service": {"id": "PSVC1", "summary": "checkout", "type": "technical_service"},
+            },
+            {
+                "id": "REL2",
+                "supporting_service": {"id": "PSVC1", "summary": "checkout", "type": "technical_service"},
+                "dependent_service": {"id": "PSVC_WEB", "summary": "Web Frontend", "type": "business_service"},
+            },
+        ]
+    }
+    calls = _sequenced_urlopen(monkeypatch, [
+        json.dumps(services_payload).encode(),
+        json.dumps(deps_payload).encode(),
+    ])
+    pd = PagerDutyConnector({"PAGERDUTY_API_KEY": "k"})
+    deps = pd.get_service_dependencies("checkout")
+    assert deps["service_id"] == "PSVC1"
+    assert len(deps["supporting"]) == 1
+    assert deps["supporting"][0]["service_id"] == "PSVC_DB"
+    assert deps["supporting"][0]["name"] == "Postgres DB"
+    assert len(deps["dependent"]) == 1
+    assert deps["dependent"][0]["service_id"] == "PSVC_WEB"
+    assert deps["dependent"][0]["name"] == "Web Frontend"
+    assert "/service_dependencies/technical_services/PSVC1" in calls[1].full_url
+
+
+def test_get_service_dependencies_empty_without_api_key():
+    pd = PagerDutyConnector({})
+    res = pd.get_service_dependencies("checkout")
+    assert res == {"service_id": "checkout", "supporting": [], "dependent": [], "relationships": []}
+
