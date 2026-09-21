@@ -450,3 +450,208 @@ def dispatch_email_alert(
         del DISPATCHED_EMAILS[50:]
 
     return email_record
+
+
+def generate_copilot_chat_email_html(
+    user_query: str,
+    copilot_reply: str,
+    incident_id: str,
+    service: str = "checkout-api",
+    status: str = "ACTIVE",
+    action: Optional[str] = None,
+    base_url: str = "http://localhost:8000",
+) -> str:
+    """Generates an executive-grade conversational response email from Lear Copilot."""
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    is_resolved = (status or "").upper() in ("RESOLVED", "RECOVERED", "HEALTHY") or action == "approved"
+    status_icon = "🟢" if is_resolved else "🚨"
+    status_badge = "RECOVERED" if is_resolved else "INCIDENT ACTIVE"
+    status_color = "#10B981" if is_resolved else "#EF4444"
+
+    war_room_url = f"{base_url}/incident/{incident_id}"
+    approve_url = f"{base_url}/api/incident/{incident_id}/approve"
+    deny_url = f"{base_url}/api/incident/{incident_id}/deny"
+
+    # Action buttons
+    if not is_resolved:
+        buttons_markup = f"""
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 20px auto 0 auto; width: 100%;">
+          <tr>
+            <td align="center" style="padding: 4px;">
+              <a href="{war_room_url}" target="_blank" style="display: block; background: #2563EB; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 12px 16px; border-radius: 6px; text-decoration: none; border: 1px solid #3B82F6;">
+                💬 Open War Room
+              </a>
+            </td>
+            <td align="center" style="padding: 4px;">
+              <a href="{approve_url}" target="_blank" style="display: block; background: #059669; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 12px 16px; border-radius: 6px; text-decoration: none; border: 1px solid #10B981;">
+                ✅ Approve & Apply Fix
+              </a>
+            </td>
+            <td align="center" style="padding: 4px;">
+              <a href="{deny_url}" target="_blank" style="display: block; background: #DC2626; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 12px 16px; border-radius: 6px; text-decoration: none; border: 1px solid #EF4444;">
+                ❌ Deny Fix
+              </a>
+            </td>
+          </tr>
+        </table>
+        """
+    else:
+        buttons_markup = f"""
+        <div style="margin-top: 18px; padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid #059669; border-radius: 6px; text-align: center;">
+          <a href="{war_room_url}" target="_blank" style="color: #34D399; font-size: 13px; font-weight: 600; text-decoration: none;">
+            ✅ Remediation Deployed — View Timeline in War Room →
+          </a>
+        </div>
+        """
+
+    formatted_reply = html.escape(copilot_reply).replace("\n", "<br>")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lear Copilot Response</title>
+</head>
+<body style="margin:0;padding:0;background-color:#080B11;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#E2E8F0;">
+  <div style="max-width:640px;margin:24px auto;background:#0E131F;border:1px solid #1E293B;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg, #131B2E 0%, #0F172A 100%);padding:20px 28px;border-bottom:1px solid #1E293B;display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:18px;font-weight:800;letter-spacing:1.5px;color:#F8FAFC;">
+        LEAR<span style="color:#00F0FF;">.AI</span> <span style="font-size:12px;color:#94A3B8;font-weight:400;margin-left:8px;">Copilot Response</span>
+      </div>
+      <div style="background:{status_color};color:#FFFFFF;font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;">
+        {status_icon} {status_badge}
+      </div>
+    </div>
+    
+    <!-- Body -->
+    <div style="padding:28px;">
+      <!-- Quoted user question -->
+      <div style="margin-bottom:20px;padding:12px 16px;background:#141C2E;border-left:3px solid #38BDF8;border-radius:4px;">
+        <div style="font-size:11px;font-weight:700;color:#7DD3FC;text-transform:uppercase;margin-bottom:4px;">Your Question</div>
+        <div style="font-size:14px;color:#E2E8F0;font-style:italic;">"{html.escape(user_query)}"</div>
+      </div>
+
+      <!-- Copilot Answer -->
+      <div style="background:#111827;border:1px solid #1F2937;border-radius:8px;padding:20px;margin-bottom:20px;">
+        <div style="display:flex;align-items:center;margin-bottom:12px;">
+          <span style="font-size:16px;margin-right:8px;">🧠</span>
+          <span style="font-size:14px;font-weight:700;color:#F9FAFB;">Lear SRE Copilot</span>
+          <span style="margin-left:auto;font-size:11px;color:#6B7280;">{now_str}</span>
+        </div>
+        <div style="font-size:14px;line-height:1.6;color:#D1D5DB;">
+          {formatted_reply}
+        </div>
+      </div>
+
+      <!-- Incident Metadata Context -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;background:#0A0E17;border:1px solid #1E293B;padding:12px;border-radius:6px;font-size:12px;">
+        <div><span style="color:#64748B;">Target Service:</span> <strong style="color:#E2E8F0;">{html.escape(service)}</strong></div>
+        <div><span style="color:#64748B;">Incident:</span> <strong style="color:#E2E8F0;">{html.escape(incident_id)}</strong></div>
+      </div>
+
+      <!-- Action Buttons -->
+      {buttons_markup}
+
+      <!-- Interactive instructions -->
+      <div style="margin-top:20px;padding:12px;background:#0F172A;border-radius:6px;border:1px dashed #334155;text-align:center;font-size:12px;color:#94A3B8;">
+        💡 <strong>Live Email Chat:</strong> Reply directly to this email with questions or type <em>"Approve"</em> to automatically trigger cluster remediation.
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div style="background:#070A10;padding:14px;text-align:center;font-size:11px;color:#64748B;border-top:1px solid #1E293B;">
+      Lear Autonomous SRE Copilot • EKS Infrastructure Intelligence • <a href="{war_room_url}" style="color:#38BDF8;text-decoration:none;">War Room</a>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def dispatch_copilot_email_reply(
+    to_email: str,
+    subject: str,
+    user_query: str,
+    copilot_reply: str,
+    incident_id: str,
+    service: str = "checkout-api",
+    status: str = "ACTIVE",
+    action: Optional[str] = None,
+    base_url: str = "http://localhost:8000",
+) -> Dict[str, Any]:
+    """Dispatches a conversational email reply via Gmail SMTP directly to the recipient."""
+    creds = {}
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if env_file.exists():
+        for line in open(env_file, encoding="utf-8", errors="ignore"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                creds.setdefault(k.strip(), v.strip().strip("'").strip('"'))
+
+    html_content = generate_copilot_chat_email_html(
+        user_query=user_query,
+        copilot_reply=copilot_reply,
+        incident_id=incident_id,
+        service=service,
+        status=status,
+        action=action,
+        base_url=base_url,
+    )
+
+    recipient = to_email or creds.get("EMAIL_TO", "anantacharya5568@gmail.com")
+    user = (creds.get("EMAIL_USER") or os.environ.get("EMAIL_USER") or "").strip()
+    password = (creds.get("EMAIL_PASSWORD") or os.environ.get("EMAIL_PASSWORD") or "").strip()
+    if password:
+        password = password.replace(" ", "").strip()
+    sender = (creds.get("EMAIL_FROM") or os.environ.get("EMAIL_FROM") or user or "anantacharya290@gmail.com").strip()
+    smtp_host = (creds.get("EMAIL_SMTP_HOST") or os.environ.get("EMAIL_SMTP_HOST") or "smtp.gmail.com").strip()
+    port = int(creds.get("EMAIL_SMTP_PORT") or os.environ.get("EMAIL_SMTP_PORT") or "587")
+
+    email_record = {
+        "id": f"email_chat_{int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)}",
+        "incident_id": incident_id,
+        "subject": subject,
+        "recipient": recipient,
+        "sender": sender,
+        "smtp_sent": False,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+    try:
+        msg = email.message.EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg.set_content(
+            f"Lear Copilot Response:\n\nIn response to: \"{user_query}\"\n\n{copilot_reply}\n\n"
+            f"Open War Room: {base_url}/incident/{incident_id}\n"
+            f"Approve Fix: {base_url}/api/incident/{incident_id}/approve\n"
+            f"Deny Fix: {base_url}/api/incident/{incident_id}/deny\n"
+        )
+        msg.add_alternative(html_content, subtype="html")
+
+        if port == 465:
+            with smtplib.SMTP_SSL(smtp_host, port, timeout=12) as server:
+                if user and password:
+                    server.login(user, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, port, timeout=12) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                if user and password:
+                    server.login(user, password)
+                server.send_message(msg)
+        email_record["smtp_sent"] = True
+        logger.info(f"Sent Copilot conversational email reply to {recipient} via {smtp_host}")
+    except Exception as exc:
+        logger.warning(f"SMTP send failed for Copilot reply: {exc}")
+        email_record["smtp_error"] = str(exc)
+
+    DISPATCHED_EMAILS.insert(0, email_record)
+    return email_record
+

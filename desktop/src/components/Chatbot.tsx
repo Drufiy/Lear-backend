@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Send, Sparkles, Trash2, ArrowRight, ShieldAlert } from 'lucide-react';
+import { X, Send, Sparkles, Trash2, ArrowRight, ShieldAlert, RefreshCw } from 'lucide-react';
 import ChatMessage, { ChatMessageData } from './ChatMessage';
 import { ChatContextType } from '../context/LearContext';
 
@@ -19,6 +19,8 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [executingActionId, setExecutingActionId] = useState<number | null>(null);
+  const [channelMode, setChannelMode] = useState<'dashboard' | 'slack' | 'email'>('dashboard');
+  const [pollingEmail, setPollingEmail] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Sync activeContext with serviceContext prop updates
@@ -92,12 +94,21 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
       }
 
       if (inc && inc.conversation && inc.conversation.length > 0) {
-        const formatted: ChatMessageData[] = inc.conversation.map((c: any, i: number) => ({
-          id: i + 1,
-          sender: c.sender === 'Lear SRE Copilot' ? 'agent' : 'user',
-          text: c.message,
-          timestamp: c.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        }));
+        const formatted: ChatMessageData[] = inc.conversation.map((c: any, i: number) => {
+          let prefix = '';
+          const sLower = (c.sender || '').toLowerCase();
+          if (sLower.includes('slack')) {
+            prefix = '💬 [Slack] ';
+          } else if (sLower.includes('email')) {
+            prefix = '✉️ [Email] ';
+          }
+          return {
+            id: i + 1,
+            sender: c.sender === 'Lear SRE Copilot' ? 'agent' : 'user',
+            text: prefix + c.message,
+            timestamp: c.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          };
+        });
         setMessages(formatted);
         const lastMsg = inc.conversation[inc.conversation.length - 1];
         if (lastMsg && lastMsg.quick_replies) {
@@ -144,6 +155,23 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
     }
   }, []);
 
+  // Check Gmail IMAP inbox immediately on demand
+  const handlePollEmailNow = async () => {
+    setPollingEmail(true);
+    try {
+      const res = await fetch('/api/email/poll-now', { method: 'POST' });
+      if (res.ok) {
+        if (activeContext?.incidentId) {
+          await loadIncidentSession(activeContext);
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setPollingEmail(false);
+    }
+  };
+
   // Fetch greeting or load incident when drawer opens
   useEffect(() => {
     if (isOpen) {
@@ -175,7 +203,7 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
     const userMsg: ChatMessageData = {
       id: Date.now(),
       sender: 'user',
-      text: overridePrompt || input.trim(),
+      text: (channelMode !== 'dashboard' ? `[Sent via ${channelMode.toUpperCase()}] ` : '') + (overridePrompt || input.trim()),
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
@@ -185,7 +213,93 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
 
     const streamMsgId = Date.now() + 1;
 
-    // 1. If we are in an incident session, route message directly to the incident war room brain
+    // 1. If sending via Slack Channel
+    if (channelMode === 'slack') {
+      try {
+        const chatRes = await fetch('/api/slack/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: targetText,
+            incident_id: currentCtx?.incidentId,
+            user_name: 'Engineer'
+          }),
+        });
+        if (chatRes.ok) {
+          const chatData = await chatRes.json();
+          const copilotReply = chatData.copilot_reply || 'Dispatched to Slack webhook.';
+          setMessages(prev => [
+            ...prev,
+            {
+              id: streamMsgId,
+              sender: 'agent',
+              text: `💬 **[Slack Response via Webhook]**\n\n${copilotReply}`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+          setLoading(false);
+          return;
+        }
+      } catch (err: any) {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: streamMsgId,
+            sender: 'agent',
+            text: `Slack Dispatch Error: ${err?.message || err}`,
+            isError: true,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
+        setLoading(false);
+        return;
+      }
+    }
+
+    // 2. If sending via Email (Gmail)
+    if (channelMode === 'email') {
+      try {
+        const chatRes = await fetch('/api/email/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: targetText,
+            incident_id: currentCtx?.incidentId,
+            from_email: 'anantacharya5568@gmail.com'
+          }),
+        });
+        if (chatRes.ok) {
+          const chatData = await chatRes.json();
+          const copilotReply = chatData.copilot_reply || 'Dispatched via Gmail SMTP.';
+          setMessages(prev => [
+            ...prev,
+            {
+              id: streamMsgId,
+              sender: 'agent',
+              text: `✉️ **[Email SMTP Response to anantacharya5568@gmail.com]**\n\n${copilotReply}`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+          setLoading(false);
+          return;
+        }
+      } catch (err: any) {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: streamMsgId,
+            sender: 'agent',
+            text: `Email Dispatch Error: ${err?.message || err}`,
+            isError: true,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
+        setLoading(false);
+        return;
+      }
+    }
+
+    // 3. If in an incident session on Dashboard, route message directly to the incident war room brain
     if (currentCtx?.incidentId) {
       try {
         const chatRes = await fetch(`/api/incident/${currentCtx.incidentId}/chat`, {
@@ -224,7 +338,6 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
           },
         ]);
         setLoading(false);
-        return;
       }
     }
 
@@ -511,6 +624,23 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
               </div>
             </div>
 
+            {/* Live Omni-Channel Status Bar */}
+            <div className="px-4 py-1.5 bg-[#070A10] border-b border-border-subtle/40 flex items-center justify-between text-[10px]">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-500 font-mono">LIVE CHANNELS:</span>
+                <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Slack
+                </span>
+                <span className="text-gray-700">•</span>
+                <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Email (IMAP/SMTP)
+                </span>
+              </div>
+              <span className="text-[10px] text-accent/80 font-mono">2-way sync</span>
+            </div>
+
             {/* Context Header */}
             {activeContext?.incidentId ? (
               <div className="px-4 py-2.5 bg-rose-500/15 border-b border-rose-500/30 flex items-center justify-between text-xs">
@@ -599,8 +729,58 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
               </div>
             )}
 
+            {/* Channel Dispatch Selector & Inbox Poller */}
+            <div className="flex items-center justify-between px-4 py-1.5 bg-[#090D15] border-t border-border-subtle/50 text-[11px]">
+              <div className="flex items-center gap-1.5">
+                <span className="text-gray-500 font-mono text-[10px]">ROUTE:</span>
+                <button
+                  type="button"
+                  onClick={() => setChannelMode('dashboard')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
+                    channelMode === 'dashboard'
+                      ? 'bg-accent/20 text-accent border border-accent/40 font-bold'
+                      : 'text-gray-400 hover:text-white border border-transparent'
+                  }`}
+                >
+                  Dashboard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChannelMode('slack')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
+                    channelMode === 'slack'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold'
+                      : 'text-gray-400 hover:text-white border border-transparent'
+                  }`}
+                >
+                  💬 Slack
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChannelMode('email')}
+                  className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
+                    channelMode === 'email'
+                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40 font-bold'
+                      : 'text-gray-400 hover:text-white border border-transparent'
+                  }`}
+                >
+                  ✉️ Email
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={handlePollEmailNow}
+                disabled={pollingEmail}
+                title="Trigger immediate IMAP check for new incoming user emails"
+                className="text-[10px] text-gray-400 hover:text-white flex items-center gap-1 bg-surface px-2 py-0.5 rounded border border-border-subtle hover:border-gray-600 disabled:opacity-50 cursor-pointer"
+              >
+                <RefreshCw size={10} className={pollingEmail ? 'animate-spin text-accent' : ''} />
+                {pollingEmail ? 'Checking...' : 'Poll Inbox'}
+              </button>
+            </div>
+
             {/* Input Bar */}
-            <div className="p-4 border-t border-border-subtle bg-surface/30">
+            <div className="p-3 border-t border-border-subtle bg-surface/30">
               <div className="flex items-center gap-2 bg-surface border border-border-subtle rounded-xl px-3 py-1.5 focus-within:border-accent transition-all">
                 <input
                   type="text"

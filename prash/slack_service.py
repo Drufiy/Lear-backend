@@ -140,3 +140,147 @@ def dispatch_slack_alert(
     except Exception as exc:
         logger.warning(f"Slack webhook dispatch failed: {exc}")
         return {"sent": False, "error": str(exc)}
+
+
+def dispatch_slack_chat_response(
+    user_name: str,
+    user_message: str,
+    copilot_reply: str,
+    incident_id: Optional[str] = None,
+    service: str = "checkout-api",
+    status: str = "ACTIVE",
+    action: Optional[str] = None,
+    base_url: str = "http://localhost:8000",
+    webhook_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Posts an interactive conversational response from Lear Copilot into Slack."""
+    url = webhook_url or os.environ.get("SLACK_WEBHOOK_URL", "")
+    if not url:
+        env_file = Path(__file__).resolve().parent.parent / ".env"
+        if env_file.exists():
+            for line in open(env_file, encoding="utf-8", errors="ignore"):
+                line = line.strip()
+                if line.startswith("SLACK_WEBHOOK_URL=") or line.startswith("SLACK_WEBHOOK="):
+                    url = line.split("=", 1)[1].strip().strip("'").strip('"')
+                    break
+
+    if not url:
+        return {"sent": False, "reason": "SLACK_WEBHOOK_URL not configured"}
+
+    inc_id = incident_id or "INC-GENERAL"
+    war_room_url = f"{base_url}/incident/{inc_id}"
+    approve_url = f"{base_url}/api/incident/{inc_id}/approve"
+    deny_url = f"{base_url}/api/incident/{inc_id}/deny"
+
+    status_upper = (status or "ACTIVE").upper()
+    is_resolved = status_upper in ("RESOLVED", "RECOVERED", "HEALTHY") or action == "approved"
+    icon = "✅" if is_resolved else "🤖"
+
+    header_text = f"{icon} Lear SRE Copilot (Live)"
+    quoted_user = f"> *<@{user_name}>:* {user_message}"
+
+    blocks: list = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": header_text
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": quoted_user
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": copilot_reply
+            }
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Service: *{service}*  |  Incident: *{inc_id}*  |  Status: *{status_upper}*"
+                }
+            ]
+        }
+    ]
+
+    # Add action buttons
+    if inc_id != "INC-GENERAL":
+        if not is_resolved:
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "💬 Open War Room"},
+                        "url": war_room_url,
+                        "style": "primary"
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Approve & Apply Fix"},
+                        "url": approve_url
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "❌ Deny"},
+                        "url": deny_url,
+                        "style": "danger"
+                    }
+                ]
+            })
+        else:
+            blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "💬 View Incident Timeline"},
+                        "url": war_room_url
+                    }
+                ]
+            })
+
+    payload = {
+        "text": f"🤖 Lear Copilot to @{user_name}: {copilot_reply[:160]}",
+        "blocks": blocks
+    }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            logger.info(f"Slack chat message sent to webhook: HTTP {resp.status}")
+            return {"sent": True, "status": resp.status, "body": body}
+    except urllib.error.HTTPError as he:
+        # Fallback to simple mrkdwn
+        try:
+            simple_text = f"🤖 *Lear Copilot* responding to *@{user_name}*:\n\n{copilot_reply}\n\n<{war_room_url}|Open War Room>"
+            simple_req = urllib.request.Request(
+                url,
+                data=json.dumps({"text": simple_text}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(simple_req, timeout=5) as r2:
+                return {"sent": True, "fallback": True, "status": r2.status}
+        except Exception:
+            pass
+        return {"sent": False, "error": f"HTTP {he.code}: {he.reason}"}
+    except Exception as exc:
+        logger.warning(f"Slack chat webhook failed: {exc}")
+        return {"sent": False, "error": str(exc)}
+

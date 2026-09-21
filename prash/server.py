@@ -368,11 +368,21 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Error loading persisted notifications on startup: {e}")
     _ws_polling_task = asyncio.create_task(_poll_watches_loop())
     _health_check_task = asyncio.create_task(_health_check_loop())
+    try:
+        from prash.conversation_router import start_imap_listener
+        start_imap_listener()
+    except Exception as ie:
+        logger.warning(f"Could not start background IMAP listener: {ie}")
     yield
     if _ws_polling_task:
         _ws_polling_task.cancel()
     if _health_check_task:
         _health_check_task.cancel()
+    try:
+        from prash.conversation_router import stop_imap_listener
+        stop_imap_listener()
+    except Exception:
+        pass
     for handle in list(_active_watches.values()):
         try:
             handle.stop()
@@ -3566,30 +3576,179 @@ async def incident_chat_endpoint(incident_id: str, body: Dict[str, Any] = Body(.
 @app.post("/api/incident/{incident_id}/email-reply")
 async def incident_email_reply_endpoint(incident_id: str, body: Dict[str, Any] = Body(...)):
     """Handles inbound email replies, parses with LLM, and dispatches an auto-generated reply back."""
-    from prash.incident_manager import post_incident_chat
-    from prash.email_service import dispatch_email_alert
+    from prash.conversation_router import route_inbound_message
     from_email = body.get("from_email", "anantacharya5568@gmail.com")
     user_msg = body.get("body", "")
-    res = await post_incident_chat(incident_id, user_msg, sender=f"Email ({from_email})")
-    
-    copilot_reply = res.get("copilot_reply", "Understood. The incident is being managed.")
-    reply_record = dispatch_email_alert(
-        subject=f"Re: [UPDATE] Lear SRE Copilot Response regarding {incident_id}",
-        to_email=from_email,
-        incident_id=incident_id,
-        diagnosis=copilot_reply,
-        action_taken=f"Auto-generated response from Lear Copilot based on your reply: '{user_msg}'"
+    res = await route_inbound_message(
+        source="email",
+        sender_identifier=from_email,
+        message_text=user_msg,
+        incident_id=incident_id
     )
+    return res
+
+
+@app.post("/api/email/poll-now")
+def email_poll_now_endpoint():
+    """Immediately triggers an IMAP inbox check for unseen emails."""
+    from prash.conversation_router import poll_imap_inbox_once
+    count = poll_imap_inbox_once()
+    return {"success": True, "unseen_processed": count}
+
+
+@app.post("/api/email/chat")
+async def email_chat_endpoint(body: Dict[str, Any] = Body(...)):
+    """Directly sends a query to Lear Copilot via email channel, replies via SMTP, and records conversation."""
+    from prash.conversation_router import route_inbound_message
+    from_email = body.get("from_email", "anantacharya5568@gmail.com")
+    user_msg = body.get("message", "")
+    incident_id = body.get("incident_id")
+    subject = body.get("subject", "")
+    res = await route_inbound_message(
+        source="email",
+        sender_identifier=from_email,
+        message_text=user_msg,
+        incident_id=incident_id,
+        subject=subject
+    )
+    return res
+
+
+@app.post("/api/slack/chat")
+async def slack_chat_endpoint(body: Dict[str, Any] = Body(...)):
+    """Talk to Lear Copilot as Slack user; answers query, records in incident conversation, and posts back to Slack webhook."""
+    from prash.conversation_router import route_inbound_message
+    user_name = body.get("user_name", "anant")
+    user_msg = body.get("message", "")
+    incident_id = body.get("incident_id")
+    res = await route_inbound_message(
+        source="slack",
+        sender_identifier=user_name,
+        message_text=user_msg,
+        incident_id=incident_id
+    )
+    return res
+
+
+@app.post("/api/slack/command")
+async def slack_command_endpoint(request: Request):
+    """Handles Slack Slash Command (e.g. /lear <query>)."""
+    from prash.conversation_router import route_inbound_message
+    form = await request.form()
+    text = form.get("text", "").strip()
+    user_name = form.get("user_name", "engineer")
+    channel_name = form.get("channel_name", "general")
+
+    if not text:
+        return {
+            "response_type": "ephemeral",
+            "text": "Usage: `/lear <question or command>` — e.g. `/lear why is checkout-api failing?` or `/lear approve`"
+        }
+
+    res = await route_inbound_message(
+        source="slack",
+        sender_identifier=user_name,
+        message_text=text
+    )
+
+    reply_text = res.get("copilot_reply", "Lear Copilot processed your request.")
     return {
-        "success": True,
-        "action": res.get("action"),
-        "copilot_reply": copilot_reply,
-        "email_record": reply_record,
-        "incident": res.get("incident")
+        "response_type": "in_channel",
+        "text": f"🤖 *Lear Copilot* responding to *@{user_name}* in *#{channel_name}*:\n\n{reply_text}"
     }
+
+
+@app.post("/api/slack/events")
+async def slack_events_endpoint(request: Request):
+    """Handles Slack Events API (URL verification handshake and app_mention/messages)."""
+    from prash.conversation_router import route_inbound_message
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    # 1. URL verification handshake
+    if body.get("type") == "url_verification":
+        return {"challenge": body.get("challenge", "")}
+
+    # 2. Event callback
+    if body.get("type") == "event_callback":
+        event = body.get("event", {})
+        event_type = event.get("type")
+        bot_id = event.get("bot_id")
+        user = event.get("user", "SlackUser")
+        raw_text = event.get("text", "")
+
+        # Skip messages sent by bots to avoid loops
+        if not bot_id and event_type in ("app_mention", "message") and raw_text:
+            # Strip bot mention tag like <@U12345>
+            cleaned = re.sub(r"<@[A-Z0-9]+>", "", raw_text).strip()
+            if cleaned:
+                asyncio.create_task(
+                    route_inbound_message(
+                        source="slack",
+                        sender_identifier=user,
+                        message_text=cleaned
+                    )
+                )
+
+    return {"ok": True}
+
+
+@app.post("/api/slack/interactivity")
+async def slack_interactivity_endpoint(request: Request):
+    """Handles Slack Interactive Components (e.g. clicking Approve/Deny buttons)."""
+    from prash.incident_manager import approve_incident, deny_incident, get_incident
+    from prash.slack_service import dispatch_slack_chat_response
+    form = await request.form()
+    payload_str = form.get("payload", "{}")
+    try:
+        payload = json.loads(payload_str)
+    except Exception:
+        payload = {}
+
+    actions = payload.get("actions", [])
+    user_info = payload.get("user", {})
+    user_name = user_info.get("username") or user_info.get("name") or "Engineer"
+
+    if actions:
+        action_item = actions[0]
+        action_id = action_item.get("action_id", "")
+        value = action_item.get("value", "")
+
+        # Extract incident ID
+        incident_id = value if value.startswith("INC-") else "INC-LIVE"
+
+        if "approve" in action_id.lower():
+            res = approve_incident(incident_id, approver=f"Slack ({user_name})")
+            inc = get_incident(incident_id)
+            dispatch_slack_chat_response(
+                user_name=user_name,
+                user_message="[Clicked Approve Fix in Slack]",
+                copilot_reply="✅ Fix Approved! ConfigMap patched and checkout-api pods rolled out successfully.",
+                incident_id=incident_id,
+                status="RESOLVED",
+                action="approved"
+            )
+            return {"text": "✅ Fix approved and applied to cluster."}
+
+        elif "deny" in action_id.lower():
+            res = deny_incident(incident_id, reason=f"Denied by {user_name} via Slack")
+            dispatch_slack_chat_response(
+                user_name=user_name,
+                user_message="[Clicked Deny Fix in Slack]",
+                copilot_reply="❌ Remediation Denied. Autonomous execution halted. Escalated to on-call human.",
+                incident_id=incident_id,
+                status="DENIED",
+                action="denied"
+            )
+            return {"text": "❌ Remediation denied."}
+
+    return {"ok": True}
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("prash.server:app", host="127.0.0.1", port=8000, reload=True)
+
 
