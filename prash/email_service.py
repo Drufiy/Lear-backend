@@ -364,7 +364,7 @@ def dispatch_email_alert(
     except Exception as e:
         logger.warning(f"Could not write email file: {e}")
 
-    recipient = to_email or creds.get("EMAIL_TO", "anantacharya290@gmail.com")
+    recipient = to_email or creds.get("EMAIL_TO") or os.environ.get("EMAIL_TO") or "anantacharya5568@gmail.com"
 
     email_record = {
         "id": f"email_{int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000)}",
@@ -375,7 +375,7 @@ def dispatch_email_alert(
         "resolution_status": resolution_status,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "recipient": recipient,
-        "sender": creds.get("EMAIL_FROM", "anantacharya5568@gmail.com"),
+        "sender": (creds.get("EMAIL_FROM") or os.environ.get("EMAIL_FROM") or "anantacharya290@gmail.com").strip(),
         "smtp_sent": False,
         "html": html_body,
     }
@@ -385,7 +385,7 @@ def dispatch_email_alert(
     password = (creds.get("EMAIL_PASSWORD") or os.environ.get("EMAIL_PASSWORD") or "").strip()
     if password:
         password = password.replace(" ", "").strip()
-    sender = (creds.get("EMAIL_FROM") or os.environ.get("EMAIL_FROM") or user or "anantacharya5568@gmail.com").strip()
+    sender = (creds.get("EMAIL_FROM") or os.environ.get("EMAIL_FROM") or user or "anantacharya290@gmail.com").strip()
     smtp_host = (creds.get("EMAIL_SMTP_HOST") or os.environ.get("EMAIL_SMTP_HOST") or "").strip()
     if not smtp_host and ("@gmail.com" in user.lower() or "@gmail.com" in sender.lower()):
         smtp_host = "smtp.gmail.com"

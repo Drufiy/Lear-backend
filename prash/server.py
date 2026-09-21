@@ -2974,12 +2974,20 @@ def serve_demo_dashboard():
     return HTMLResponse(content=DEMO_PAGE_HTML)
 
 
+CHAOS_STATE = {
+    "gateway_timeout": False,
+    "high_load": False,
+    "active_error": None
+}
+
+
 @app.get("/api/demo/status")
 @app.get("/api/demo/health")
 def get_demo_status():
-    """Returns real cluster pod status and live ELB response time."""
+    """Returns real cluster pod status, active DB host, incident state, and live ELB latency."""
     import subprocess
     import urllib.request
+    from prash.incident_manager import get_latest_incident
     
     pods = []
     try:
@@ -3004,9 +3012,22 @@ def get_demo_status():
     except Exception as e:
         logger.warning(f"Could not fetch pods: {e}")
 
+    # Fetch live DATABASE_HOST from ConfigMap
+    db_host = "postgres"
+    try:
+        raw_cm = subprocess.check_output(
+            ["kubectl", "get", "configmap", "checkout-api-config", "-n", "lear-demo", "-o", "jsonpath={.data.DATABASE_HOST}"],
+            timeout=3, stderr=subprocess.DEVNULL, text=True
+        )
+        if raw_cm:
+            db_host = raw_cm.strip()
+    except Exception:
+        pass
+
+    # Check ELB checkout-api health via /api/healthz (routes to checkout-api and checks DB)
     elb_healthy = False
     latency_ms = 0
-    elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/healthz"
+    elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/api/healthz"
     try:
         t0 = time.time()
         req = urllib.request.Request(elb_url)
@@ -3015,20 +3036,30 @@ def get_demo_status():
             elb_healthy = (resp.status == 200)
     except Exception:
         elb_healthy = False
+        latency_ms = 999 if CHAOS_STATE.get("active_error") else 45
+
+    if CHAOS_STATE.get("high_load"):
+        latency_ms = max(latency_ms, 1820)
+        elb_healthy = False
 
     return {
         "pods": pods,
         "elb_healthy": elb_healthy,
-        "latency_ms": latency_ms
+        "latency_ms": latency_ms,
+        "database_host": db_host,
+        "chaos_state": CHAOS_STATE,
+        "latest_incident": get_latest_incident()
     }
 
 
 @app.post("/api/demo/inject-failure")
 def demo_inject_failure():
-    """Injects real ConfigMap break and dispatches high-priority incident email with 3 action buttons."""
+    """Injects real ConfigMap break and dispatches high-priority incident alert."""
     import subprocess
     from prash.email_service import dispatch_email_alert
     from prash.incident_manager import create_incident
+
+    CHAOS_STATE["active_error"] = "config_corrupt"
 
     try:
         subprocess.run(
@@ -3037,7 +3068,7 @@ def demo_inject_failure():
             check=True, timeout=10, capture_output=True
         )
         subprocess.run(
-            ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+            ["kubectl", "-n", "lear-demo", "delete", "pod", "-l", "app=checkout-api", "--now"],
             check=True, timeout=10, capture_output=True
         )
     except Exception as e:
@@ -3049,13 +3080,16 @@ def demo_inject_failure():
         namespace="lear-demo",
         title="[CRITICAL] checkout-api Database Connectivity Failure (CrashLoopBackOff)",
         severity="CRITICAL",
+        tags=["CRITICAL", "CONFIG-ERROR", "AWAITING APPROVAL"],
         error_summary="gaierror: [Errno -2] Name does not resolve for database host 'postgres-wrong:5432'",
         diagnosis="DeepSeek Brain identified DATABASE_HOST misconfigured to 'postgres-wrong'. Episodic memory confirms matching past resolution.",
-        proposed_remediation="Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger rolling restart.",
-        cluster="AWS EKS lear-demo (ap-south-1 Mumbai)"
+        proposed_remediation="Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger immediate pod restart.",
+        patch_data={"DATABASE_HOST": "postgres"},
+        cluster="AWS EKS lear-demo (ap-south-1 Mumbai)",
+        requires_approval=True
     )
 
-    # 2. Dispatch beautiful alert email with 3 action buttons
+    # 2. Dispatch beautiful alert email with action buttons + Slack notification
     email_record = dispatch_email_alert(
         subject="[CRITICAL] checkout-api Database Connectivity Failure (CrashLoopBackOff)",
         service="checkout-api",
@@ -3063,7 +3097,7 @@ def demo_inject_failure():
         status="CRITICAL",
         error_summary="gaierror: [Errno -2] Name does not resolve for database host 'postgres-wrong:5432'",
         diagnosis="DeepSeek Brain identified DATABASE_HOST misconfigured to 'postgres-wrong'. Episodic memory confirms matching past resolution.",
-        action_taken="Lear Auto-Fix recommended: Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger rolling restart.",
+        action_taken="Lear Auto-Fix recommended: Patch ConfigMap checkout-api-config (DATABASE_HOST -> postgres) and trigger immediate pod restart.",
         resolution_status="FAILED",
         incident_id=inc["incident_id"]
     )
@@ -3073,14 +3107,26 @@ def demo_inject_failure():
 
 @app.post("/api/demo/auto-fix")
 def demo_auto_fix():
-    """Autonomous fix: restores ConfigMap to postgres, updates incident, and dispatches resolution email."""
+    """Autonomous fix: restores ConfigMap to postgres, scales primary DB, and dispatches resolution email."""
     import subprocess
     from prash.email_service import dispatch_email_alert
     from prash.incident_manager import get_latest_incident, execute_remediation
 
+    CHAOS_STATE["active_error"] = None
+    CHAOS_STATE["gateway_timeout"] = False
+    CHAOS_STATE["high_load"] = False
+
     latest = get_latest_incident()
     inc_id = latest["incident_id"] if latest else None
     
+    try:
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "scale", "deployment", "postgres", "--replicas=1"],
+            timeout=10, capture_output=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not scale postgres: {e}")
+
     if inc_id:
         res = execute_remediation(inc_id)
         if not res.get("success"):
@@ -3093,7 +3139,7 @@ def demo_auto_fix():
                 check=True, timeout=10, capture_output=True
             )
             subprocess.run(
-                ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+                ["kubectl", "-n", "lear-demo", "delete", "pod", "-l", "app=checkout-api", "--now"],
                 check=True, timeout=10, capture_output=True
             )
         except Exception as e:
@@ -3128,9 +3174,27 @@ def demo_customer_checkout(body: Dict[str, Any] = Body(...)):
     import urllib.request
     import urllib.error
 
+    # 1. Handle injected gateway timeout
+    if CHAOS_STATE.get("gateway_timeout"):
+        time.sleep(3.5)
+        return JSONResponse(
+            status_code=504,
+            content={
+                "status": "FAILED",
+                "error": "HTTP 504 Gateway Timeout: Upstream payment gateway timed out after 5000ms. Circuit breaker tripped.",
+                "service": "payment-gateway",
+                "cluster": "AWS EKS lear-demo",
+                "code": 504
+            }
+        )
+
+    # 2. Handle injected high load latency
+    if CHAOS_STATE.get("high_load"):
+        time.sleep(1.2)
+
     elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/api/checkout"
     payload = json.dumps({
-        "item": body.get("item", "AI SRE Sentinel Key"),
+        "item": body.get("item", "Lear Tensor Node S4"),
         "price": body.get("price", 49.99),
         "timestamp": time.time()
     }).encode("utf-8")
@@ -3141,9 +3205,31 @@ def demo_customer_checkout(body: Dict[str, Any] = Body(...)):
             data = json.loads(resp.read().decode())
             return data
     except urllib.error.HTTPError as he:
-        return JSONResponse(status_code=he.code, content={"status": "FAILED", "error": f"HTTP {he.code}: {he.reason}"})
+        err_body = he.read().decode("utf-8", errors="ignore")
+        try:
+            err_json = json.loads(err_body)
+            return JSONResponse(status_code=he.code, content=err_json)
+        except Exception:
+            return JSONResponse(
+                status_code=he.code,
+                content={
+                    "status": "FAILED",
+                    "error": f"HTTP {he.code}: {he.reason}",
+                    "details": err_body[:300] if err_body else "Upstream server failure",
+                    "service": "checkout-api",
+                    "code": he.code
+                }
+            )
     except Exception as exc:
-        return JSONResponse(status_code=502, content={"status": "FAILED", "error": f"Gateway Error: {str(exc)}"})
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "FAILED",
+                "error": f"502 Bad Gateway: Upstream checkout-api unreachable ({str(exc)})",
+                "service": "checkout-api",
+                "code": 502
+            }
+        )
 
 
 @app.get("/api/demo/emails/latest", response_class=HTMLResponse)
@@ -3201,14 +3287,23 @@ def demo_inject_db_failure():
     from prash.email_service import dispatch_email_alert
     from prash.incident_manager import create_incident
 
+    CHAOS_STATE["active_error"] = "db_failure"
+
     try:
+        # Scale primary DB to 0 to simulate hard crash
+        subprocess.run(
+            ["kubectl", "-n", "lear-demo", "scale", "deployment", "postgres", "--replicas=0"],
+            check=True, timeout=10, capture_output=True
+        )
+        # Point configmap to offline target
         subprocess.run(
             ["kubectl", "-n", "lear-demo", "patch", "configmap", "checkout-api-config",
              "--type", "merge", "-p", '{"data":{"DATABASE_HOST":"postgres-primary-offline"}}'],
             check=True, timeout=10, capture_output=True
         )
+        # Terminate running checkout pod so failure is immediate
         subprocess.run(
-            ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+            ["kubectl", "-n", "lear-demo", "delete", "pod", "-l", "app=checkout-api", "--now"],
             check=True, timeout=10, capture_output=True
         )
     except Exception as e:
@@ -3247,7 +3342,7 @@ def demo_inject_db_failure():
         title="[CRITICAL] Primary PostgreSQL Outage - Standby Replica Failover Available",
         severity="CRITICAL",
         tags=["CRITICAL", "DB-FAILOVER", "AWAITING APPROVAL"],
-        error_summary="psycopg2.OperationalError: could not connect to server 'postgres' (10.100.220.14), port 5432: Connection refused",
+        error_summary="psycopg2.OperationalError: could not connect to server 'postgres' (10.100.87.108:5432): Connection refused",
         diagnosis=f"Primary database 'postgres:5432' experienced connection failure. Lear Service Discovery discovered active standby replica '{target_replica_host}:5432'.",
         proposed_remediation=f"Execute Failover: Re-route checkout-api traffic to standby replica '{target_replica_host}' by patching ConfigMap.",
         patch_data={"DATABASE_HOST": target_replica_host},
@@ -3279,6 +3374,10 @@ def demo_auto_failover_db():
     from prash.email_service import dispatch_email_alert
     from prash.incident_manager import get_latest_incident, execute_remediation
 
+    CHAOS_STATE["active_error"] = None
+    CHAOS_STATE["gateway_timeout"] = False
+    CHAOS_STATE["high_load"] = False
+
     latest = get_latest_incident()
     inc_id = latest["incident_id"] if latest else None
 
@@ -3292,7 +3391,7 @@ def demo_auto_failover_db():
                 check=True, timeout=10, capture_output=True
             )
             subprocess.run(
-                ["kubectl", "-n", "lear-demo", "rollout", "restart", "deployment/checkout-api"],
+                ["kubectl", "-n", "lear-demo", "delete", "pod", "-l", "app=checkout-api", "--now"],
                 check=True, timeout=10, capture_output=True
             )
         except Exception as e:
@@ -3319,6 +3418,9 @@ def demo_inject_timeout():
     """Simulates downstream gateway latency and 504 timeout."""
     from prash.incident_manager import create_incident
     from prash.email_service import dispatch_email_alert
+
+    CHAOS_STATE["gateway_timeout"] = True
+    CHAOS_STATE["active_error"] = "gateway_timeout"
 
     inc = create_incident(
         service="checkout-api",
@@ -3358,8 +3460,10 @@ def demo_inject_load():
     import urllib.request
     import threading
 
+    CHAOS_STATE["high_load"] = True
+
     def fire():
-        elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/healthz"
+        elb_url = "http://a4131978a1f9447f29e142dc50cba962-1618812194.ap-south-1.elb.amazonaws.com/api/healthz"
         for _ in range(50):
             try:
                 urllib.request.urlopen(elb_url, timeout=2)

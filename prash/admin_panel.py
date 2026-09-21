@@ -566,10 +566,16 @@ def generate_admin_chaos_html() -> str:
                 Expected: Agent discovers replica & executes failover
               </div>
             </div>
-            <button class="chaos-btn inject-purple" id="btnDbFail" onclick="injectDbFailure()">
-              <span>💥</span>
-              <span>Inject Primary DB Failure</span>
-            </button>
+            <div style="display:flex;gap:8px;margin-top:10px;">
+              <button class="chaos-btn inject-purple" style="flex:1;" id="btnDbFail" onclick="injectDbFailure()">
+                <span>💥</span>
+                <span>Inject DB Failure</span>
+              </button>
+              <button class="chaos-btn" style="background:#059669;color:#ffffff;border:1px solid #10B981;flex:1;" id="btnFailover" onclick="triggerFailover()">
+                <span>⚡</span>
+                <span>Execute Failover</span>
+              </button>
+            </div>
           </div>
 
           <!-- Scenario 2: ConfigMap Database Host Corruption -->
@@ -833,6 +839,31 @@ def generate_admin_chaos_html() -> str:
       } finally {
         btn.disabled = false;
         btn.innerHTML = '<span>📈</span><span>Fire Traffic Surge (500 req)</span>';
+      }
+    }
+
+    async function triggerFailover() {
+      const btn = document.getElementById('btnFailover');
+      if (btn) { btn.disabled = true; btn.innerText = 'Executing Failover...'; }
+      addLog('WARN', 'Triggering autonomous failover to postgres-replica...');
+      try {
+        const res = await fetch('/api/demo/auto-failover-db', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          addLog('SUCC', 'Failover verified. checkout-api re-routed to standby replica postgres-replica:5432.');
+          document.getElementById('valPostgres').innerText = 'FAILOVER (REPLICA)';
+          document.getElementById('cardPostgres').className = 'metric-card healthy';
+          document.getElementById('dotPostgres').className = 'metric-status-dot dot-healthy';
+          document.getElementById('activeDbHost').innerText = 'postgres-replica (STANDBY)';
+        }
+      } catch (e) {
+        addLog('ERR', 'Failover error: ' + e);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<span>⚡</span><span>Execute Failover</span>';
+        }
+        setTimeout(refreshClusterTelemetry, 2000);
       }
     }
 

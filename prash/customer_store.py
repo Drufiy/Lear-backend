@@ -523,7 +523,9 @@ def generate_customer_store_html() -> str:
         <!-- Receipt details populated by JS -->
       </div>
 
-      <button class="btn-close" onclick="closeModal()">Done</button>
+      <div id="modalFooterActions">
+        <button class="btn-close" onclick="closeModal()">Done</button>
+      </div>
     </div>
   </div>
 
@@ -544,7 +546,7 @@ def generate_customer_store_html() -> str:
       const btn = document.getElementById('btnCheckout');
       const text = document.getElementById('btnText');
       btn.disabled = true;
-      text.innerText = 'Routing to AWS ELB...';
+      text.innerText = 'Authorizing payment via AWS ELB...';
 
       try {
         const res = await fetch('/api/demo/customer-checkout', {
@@ -561,7 +563,7 @@ def generate_customer_store_html() -> str:
           showModal(false, data);
         }
       } catch (e) {
-        showModal(false, { error: e.message });
+        showModal(false, { error: e.message, code: 502 });
       } finally {
         btn.disabled = false;
         text.innerText = 'Place Order & Process Payment';
@@ -574,6 +576,7 @@ def generate_customer_store_html() -> str:
       const title = document.getElementById('modalTitle');
       const desc = document.getElementById('modalDesc');
       const receipt = document.getElementById('modalReceipt');
+      const footer = document.getElementById('modalFooterActions');
 
       if (isSuccess) {
         icon.className = 'modal-icon success';
@@ -583,17 +586,28 @@ def generate_customer_store_html() -> str:
         receipt.innerHTML = 
           '<div><strong>ORDER ID:</strong> ' + (data.order_id || 'ord_live') + '</div>' +
           '<div><strong>PAYMENT:</strong> ' + (data.payment?.tx_id || 'tx_ok') + ' (' + (data.payment?.status || 'success') + ')</div>' +
-          '<div><strong>SHIPPING:</strong> ' + (data.shipping?.carrier || 'Standard') + ' (Est: ' + (data.shipping?.estimated_days || 3) + ' days)</div>' +
+          '<div><strong>SHIPPING:</strong> ' + (data.shipping?.carrier || 'Standard Express') + ' (Est: ' + (data.shipping?.estimated_days || 3) + ' days)</div>' +
+          '<div><strong>PERSISTENCE:</strong> <span style="color:#059669;font-weight:700;">' + (data.database || 'Committed to PostgreSQL') + '</span></div>' +
           '<div><strong>STATUS:</strong> <span style="color:#059669;font-weight:700;">HTTP 200 OK</span></div>';
+        footer.innerHTML = '<button class="btn-close" onclick="closeModal()">Done</button>';
       } else {
         icon.className = 'modal-icon error';
         icon.innerText = '✕';
-        title.innerText = 'Checkout Degraded (502 Bad Gateway)';
-        desc.innerText = 'Upstream database connectivity failure detected in checkout-api. Autonomous SRE failover is handling the incident.';
+        const code = data.code || 502;
+        title.innerText = 'Checkout Failed (HTTP ' + code + ')';
+        desc.innerText = 'Real-time transaction aborted due to an active infrastructure anomaly in AWS EKS cluster.';
         receipt.innerHTML = 
-          '<div><strong style="color:#E11D48;">ERROR:</strong> ' + (data.error || 'Connection refused: database unreachable') + '</div>' +
-          '<div><strong>CLUSTER:</strong> AWS EKS lear-demo</div>' +
-          '<div><strong>ACTION:</strong> Incident registered in Lear Mission Control. Check Chaos Admin or Lear Dashboard.</div>';
+          '<div><strong style="color:#E11D48;">ERROR TRACE:</strong></div>' +
+          '<div style="color:#E11D48;word-break:break-all;margin:4px 0 8px;font-weight:600;">' + (data.error || 'Connection refused: database unreachable') + '</div>' +
+          '<div><strong>SERVICE:</strong> checkout-api (Namespace: lear-demo)</div>' +
+          '<div><strong>CLUSTER:</strong> AWS EKS (ap-south-1 Mumbai)</div>' +
+          '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #CBD5E1;color:#2563EB;"><strong>⚡ AUTONOMOUS SRE:</strong> Lear Copilot has detected this incident. Authorize standby failover in Lear Dashboard or War Room to restore service.</div>';
+        footer.innerHTML = 
+          '<div style="display:flex;gap:8px;width:100%;">' +
+          '<button class="btn-close" style="background:#2563EB;flex:1;" onclick="closeModal(); processCheckout();">🔄 Retry Transaction</button>' +
+          '<a href="/admin" class="btn-close" style="background:#0F172A;flex:1;text-align:center;text-decoration:none;display:inline-block;padding:10px 0;" target="_blank">⚙️ Admin</a>' +
+          '<button class="btn-close" style="background:#64748B;width:80px;" onclick="closeModal()">Dismiss</button>' +
+          '</div>';
       }
 
       modal.classList.add('active');
@@ -603,27 +617,43 @@ def generate_customer_store_html() -> str:
       document.getElementById('resultModal').classList.remove('active');
     }
 
-    // Live pod health poller
+    // Live pod health & incident poller
     setInterval(async () => {
       try {
         const res = await fetch('/api/demo/status');
         const data = await res.json();
         const dot = document.getElementById('statusDot');
         const text = document.getElementById('statusText');
-        if (data.pods) {
-          const chk = data.pods.find(p => p.name.includes('checkout-api'));
-          if (chk && (chk.status.includes('CrashLoop') || chk.status.includes('Error') || !chk.ready)) {
-            dot.className = 'dot outage';
-            text.innerText = 'Production Outage: checkout-api degraded (Failing DB probe)';
-            text.style.color = '#E11D48';
-          } else {
-            dot.className = 'dot';
-            text.innerText = 'All Microservices Operational (AWS EKS lear-demo)';
-            text.style.color = '#059669';
+        const target = document.getElementById('clusterTarget');
+        
+        if (data.database_host) {
+          target.innerText = 'DB: ' + data.database_host + ':5432 | ELB: ap-south-1:80';
+        }
+
+        const isChaos = data.chaos_state && (data.chaos_state.active_error || data.chaos_state.gateway_timeout);
+        const hasCrashingPods = data.pods && data.pods.some(p => p.name && p.name.includes('checkout-api') && (p.status.includes('CrashLoop') || p.status.includes('Error') || !p.ready));
+
+        if (isChaos || hasCrashingPods || !data.elb_healthy) {
+          dot.className = 'dot outage';
+          let errTitle = 'Production Outage: checkout-api degraded';
+          if (data.latest_incident && data.latest_incident.title && data.latest_incident.status !== 'RESOLVED') {
+            errTitle = data.latest_incident.title;
+          } else if (data.chaos_state && data.chaos_state.gateway_timeout) {
+            errTitle = '504 Gateway Timeout: Downstream Payment Egress Latency';
           }
+          text.innerText = errTitle;
+          text.style.color = '#E11D48';
+        } else {
+          dot.className = 'dot';
+          if (data.database_host && data.database_host.includes('replica')) {
+            text.innerText = 'All Microservices Operational (Failover Active: ' + data.database_host + ')';
+          } else {
+            text.innerText = 'All Microservices Operational (AWS EKS lear-demo: postgres:5432)';
+          }
+          text.style.color = '#059669';
         }
       } catch (e) {}
-    }, 4000);
+    }, 3000);
   </script>
 </body>
 </html>
