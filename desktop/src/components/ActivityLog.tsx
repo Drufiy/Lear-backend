@@ -303,7 +303,7 @@ export default function ActivityLog() {
             </span>
           </h1>
           <p className="text-sm text-gray-400">
-            Chronological audit trail aggregating live watcher events, AI Copilot executions, and background health checks.
+            Chronological audit trail aggregating live watcher events, Lear SRE executions, and background health checks.
           </p>
         </div>
 
@@ -599,7 +599,7 @@ export default function ActivityLog() {
                                       className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-accent hover:bg-accent-light text-xs font-bold text-gray-950 transition-all shadow cursor-pointer"
                                     >
                                       <MessageSquare size={13} />
-                                      <span>Investigate with Copilot</span>
+                                      <span>Investigate with Lear</span>
                                     </button>
                                   </div>
                                 </div>

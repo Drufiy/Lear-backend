@@ -2354,7 +2354,7 @@ async def _call_copilot_sre_llm(message: str, telemetry: str) -> str:
     from prash.brain.kimi_client import _deepseek_client, _deepseek_model, _kimi_client, _kimi_model
     
     sys_prompt = (
-        "You are Lear Copilot, an elite autonomous Site Reliability Engineer monitoring a production cloud environment.\n"
+        "You are Lear, an elite autonomous Site Reliability Engineer monitoring a production cloud environment.\n"
         "You have DIRECT, REAL-TIME VISIBILITY into live telemetry:\n\n"
         f"{telemetry}\n\n"
         "Instructions:\n"
@@ -3126,6 +3126,11 @@ def demo_auto_fix():
     CHAOS_STATE["active_error"] = None
     CHAOS_STATE["gateway_timeout"] = False
     CHAOS_STATE["high_load"] = False
+
+    global _dashboard_summary_cache
+    _dashboard_summary_cache = {"data": None, "timestamp": 0}
+    for wid in list(_watch_metadata.keys()):
+        _watch_metadata[wid]["status"] = "healthy"
 
     latest = get_latest_incident()
     inc_id = latest["incident_id"] if latest else None

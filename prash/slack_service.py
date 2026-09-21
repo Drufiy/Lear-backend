@@ -176,7 +176,7 @@ def dispatch_slack_chat_response(
     is_resolved = status_upper in ("RESOLVED", "RECOVERED", "HEALTHY") or action == "approved"
     icon = "✅" if is_resolved else "🤖"
 
-    header_text = f"{icon} Lear SRE Copilot (Live)"
+    header_text = f"{icon} Lear SRE (Live)"
     quoted_user = f"> *<@{user_name}>:* {user_message}"
 
     blocks: list = [
@@ -250,7 +250,7 @@ def dispatch_slack_chat_response(
             })
 
     payload = {
-        "text": f"🤖 Lear Copilot to @{user_name}: {copilot_reply[:160]}",
+        "text": f"🤖 Lear to @{user_name}: {copilot_reply[:160]}",
         "blocks": blocks
     }
 
@@ -268,7 +268,7 @@ def dispatch_slack_chat_response(
     except urllib.error.HTTPError as he:
         # Fallback to simple mrkdwn
         try:
-            simple_text = f"🤖 *Lear Copilot* responding to *@{user_name}*:\n\n{copilot_reply}\n\n<{chat_url}|Open Incident Chat in Lear>"
+            simple_text = f"🤖 *Lear* responding to *@{user_name}*:\n\n{copilot_reply}\n\n<{chat_url}|Open Incident Chat in Lear>"
             simple_req = urllib.request.Request(
                 url,
                 data=json.dumps({"text": simple_text}).encode("utf-8"),
