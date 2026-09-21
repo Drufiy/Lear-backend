@@ -685,14 +685,14 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
             Customize Layout
           </button>
 
-          {/* Ask Copilot */}
+          {/* Ask Lear */}
           {onOpenChat && (
             <button
               onClick={() => onOpenChat(connectorId, resourceId, `Analyze telemetry for ${displayName || connectorId}`)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/15 hover:bg-accent/25 border border-accent/30 text-xs font-medium text-accent transition-all cursor-pointer"
             >
               <MessageSquare size={14} />
-              Ask Copilot
+              Ask Lear
             </button>
           )}
 
@@ -701,7 +701,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
             <div
               className={`w-2 h-2 rounded-full ${
                 status === 'healthy' || status === 'running' || status === 'stable'
-                  ? 'bg-accent animate-pulse'
+                  ? 'bg-accent shadow-[0_0_6px_rgba(255,58,137,0.5)]'
                   : status === 'unconfigured'
                   ? 'bg-amber-400'
                   : 'bg-rose-500'
@@ -909,7 +909,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                       <button
                         onClick={() => onOpenChat(connectorId, resourceId, `Diagnose ${widgetLabel} currently at ${cardData.rawVal}${unit || cardData.unit || '%'}`)}
                         className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-surface-elevated border border-border-subtle text-gray-400 hover:text-accent transition-all cursor-pointer"
-                        title="Ask Copilot about this metric"
+                        title="Ask Lear about this metric"
                       >
                         <MessageSquare size={13} />
                       </button>
@@ -941,7 +941,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                       <button
                         onClick={() => onOpenChat(connectorId, resourceId, `Analyze trends in ${widgetLabel}`)}
                         className="absolute top-4 right-10 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-surface-elevated border border-border-subtle text-gray-400 hover:text-accent transition-all cursor-pointer"
-                        title="Ask Copilot about this chart"
+                        title="Ask Lear about this chart"
                       >
                         <MessageSquare size={13} />
                       </button>
@@ -973,7 +973,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                       <button
                         onClick={() => onOpenChat(connectorId, resourceId, `Inspect breakdown of ${widgetLabel}`)}
                         className="absolute top-4 right-10 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-surface-elevated border border-border-subtle text-gray-400 hover:text-accent transition-all cursor-pointer"
-                        title="Ask Copilot about this chart"
+                        title="Ask Lear about this chart"
                       >
                         <MessageSquare size={13} />
                       </button>
@@ -998,7 +998,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                       <button
                         onClick={() => onOpenChat(connectorId, resourceId, `Explain current value of ${widgetLabel}: ${cardData.value} ${unit || cardData.unit}`)}
                         className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-surface-elevated border border-border-subtle text-gray-400 hover:text-accent transition-all cursor-pointer"
-                        title="Ask Copilot about this metric"
+                        title="Ask Lear about this metric"
                       >
                         <MessageSquare size={13} />
                       </button>
@@ -1149,7 +1149,7 @@ export const ServiceWidget: React.FC<ServiceWidgetProps> = ({
                     className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent text-gray-950 font-bold text-xs hover:bg-accent-light transition-all cursor-pointer shadow-lg"
                   >
                     <MessageSquare size={14} />
-                    Analyze in Copilot
+                    Analyze in Lear
                   </button>
                 )}
                 <button

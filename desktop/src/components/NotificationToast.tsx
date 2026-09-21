@@ -104,7 +104,7 @@ const ToastItem: React.FC<{ toast: AppNotification; onDismiss: (id: string) => v
                 className="text-[10px] text-accent hover:underline flex items-center gap-1 font-bold cursor-pointer"
               >
                 <Sparkles size={11} />
-                {toast.incidentId ? 'Review in Copilot' : 'Investigate'}
+                {toast.incidentId ? 'Review in Lear' : 'Investigate'}
               </button>
             ) : null}
           </div>
