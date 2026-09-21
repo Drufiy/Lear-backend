@@ -3,6 +3,10 @@ active_watches:
   interval: 5
   target: default
   watch_id: aws:default
+- connector: kubernetes
+  interval: 5
+  target: default
+  watch_id: kubernetes:default
 projects:
 - created_at: '2026-09-20T17:07:24.742830+00:00'
   environments:

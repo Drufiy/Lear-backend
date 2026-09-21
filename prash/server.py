@@ -13,6 +13,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -3722,6 +3723,31 @@ async def email_chat_endpoint(body: Dict[str, Any] = Body(...)):
         subject=subject
     )
     return res
+
+
+@app.get("/api/slack/status")
+def get_slack_status_endpoint():
+    """Returns current Slack integration status, webhook config, and live public tunnel URL."""
+    import urllib.request
+    ngrok_url = None
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=2) as r:
+            data = json.loads(r.read())
+            tunnels = data.get("tunnels", [])
+            if tunnels:
+                ngrok_url = tunnels[0].get("public_url")
+    except Exception:
+        pass
+
+    webhook_configured = bool(os.environ.get("SLACK_WEBHOOK_URL"))
+    return {
+        "success": True,
+        "webhook_configured": webhook_configured,
+        "public_tunnel_url": ngrok_url,
+        "events_url": f"{ngrok_url}/api/slack/events" if ngrok_url else None,
+        "interactivity_url": f"{ngrok_url}/api/slack/interactivity" if ngrok_url else None,
+        "slash_command_url": f"{ngrok_url}/api/slack/command" if ngrok_url else None
+    }
 
 
 @app.post("/api/slack/chat")

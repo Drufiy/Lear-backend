@@ -268,7 +268,7 @@ def dispatch_slack_chat_response(
     except urllib.error.HTTPError as he:
         # Fallback to simple mrkdwn
         try:
-            simple_text = f"🤖 *Lear Copilot* responding to *@{user_name}*:\n\n{copilot_reply}\n\n<{war_room_url}|Open War Room>"
+            simple_text = f"🤖 *Lear Copilot* responding to *@{user_name}*:\n\n{copilot_reply}\n\n<{chat_url}|Open Incident Chat in Lear>"
             simple_req = urllib.request.Request(
                 url,
                 data=json.dumps({"text": simple_text}).encode("utf-8"),
