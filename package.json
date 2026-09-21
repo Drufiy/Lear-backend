@@ -1,0 +1,12 @@
+{
+  "name": "lear-backend-root",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix desktop run dev",
+    "dev:desktop": "npm --prefix desktop run dev",
+    "dev:server": "python -m uvicorn prash.server:app --host 127.0.0.1 --port 8000",
+    "build": "npm --prefix desktop run build",
+    "test": "npm --prefix desktop run test"
+  }
+}

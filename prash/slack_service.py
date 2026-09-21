@@ -45,7 +45,7 @@ def dispatch_slack_alert(
         return {"sent": False, "reason": "SLACK_WEBHOOK_URL not configured in environment or .env"}
 
     inc_id = incident_id or "INC-LIVE"
-    war_room_url = f"{base_url}/incident/{inc_id}"
+    chat_url = f"http://localhost:1420/?tab=chat&session={inc_id}"
     approve_url = f"{base_url}/api/incident/{inc_id}/approve"
     deny_url = f"{base_url}/api/incident/{inc_id}/deny"
 
@@ -59,7 +59,7 @@ def dispatch_slack_alert(
         f"• *Incident ID:* `{inc_id}`\n\n"
         f"*Diagnosis:* {diagnosis}\n"
         f"*Remediation:* {action_taken}\n\n"
-        f"<{war_room_url}|💬 Open War Room>  |  <{approve_url}|✅ Approve Fix>  |  <{deny_url}|❌ Deny Fix>"
+        f"<{chat_url}|💬 Open Incident Chat in Lear>  |  <{approve_url}|✅ Approve Fix>  |  <{deny_url}|❌ Deny Fix>"
     )
 
     payload = {
@@ -91,8 +91,8 @@ def dispatch_slack_alert(
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "💬 Open War Room"},
-                        "url": war_room_url,
+                        "text": {"type": "plain_text", "text": "💬 Open Incident Chat in Lear"},
+                        "url": chat_url,
                         "style": "primary"
                     },
                     {
@@ -168,7 +168,7 @@ def dispatch_slack_chat_response(
         return {"sent": False, "reason": "SLACK_WEBHOOK_URL not configured"}
 
     inc_id = incident_id or "INC-GENERAL"
-    war_room_url = f"{base_url}/incident/{inc_id}"
+    chat_url = f"http://localhost:1420/?tab=chat&session={inc_id}"
     approve_url = f"{base_url}/api/incident/{inc_id}/approve"
     deny_url = f"{base_url}/api/incident/{inc_id}/deny"
 
@@ -220,8 +220,8 @@ def dispatch_slack_chat_response(
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "💬 Open War Room"},
-                        "url": war_room_url,
+                        "text": {"type": "plain_text", "text": "💬 Open Incident Chat in Lear"},
+                        "url": chat_url,
                         "style": "primary"
                     },
                     {
@@ -243,8 +243,8 @@ def dispatch_slack_chat_response(
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "💬 View Incident Timeline"},
-                        "url": war_room_url
+                        "text": {"type": "plain_text", "text": "💬 View Incident Chat in Lear"},
+                        "url": chat_url
                     }
                 ]
             })

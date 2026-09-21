@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
 import dotenv
 import yaml
-from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
@@ -3561,7 +3561,117 @@ def deny_incident_endpoint(incident_id: str, request: Request):
             f"<a href='/incident/{incident_id}' style='background:#1E293B;color:#FFFFFF;padding:10px 20px;border-radius:6px;text-decoration:none;'>← Return to War Room</a>"
             f"</body></html>"
         )
-    return {"success": True, "action": "denied", "incident": inc}
+
+# ─── Dedicated Multi-Channel Chat Workspace & Audit Log Endpoints ───────
+
+@app.get("/api/chat/sessions")
+def list_chat_sessions_endpoint(origin: Optional[str] = Query(None)):
+    """Lists all chat sessions across Slack, Email, Dashboard, and Incidents."""
+    from prash.chat_manager import list_sessions
+    sessions = list_sessions(origin=origin)
+    return {"success": True, "sessions": sessions}
+
+
+@app.get("/api/chat/sessions/{session_id}")
+def get_chat_session_endpoint(session_id: str):
+    """Retrieves full conversation history and metadata for a specific session."""
+    from prash.chat_manager import get_session
+    session = get_session(session_id)
+    if not session:
+        from prash.incident_manager import get_incident
+        inc = get_incident(session_id)
+        if inc:
+            from prash.chat_manager import create_session, append_message
+            session = create_session(
+                title=f"Incident: {inc.get('title', session_id)}",
+                origin="incident",
+                service=inc.get("service", "checkout-api"),
+                incident_id=session_id
+            )
+            for item in inc.get("conversation", []):
+                append_message(
+                    session_id=session_id,
+                    sender=item.get("sender", "Operator"),
+                    role=item.get("role", "user"),
+                    text=item.get("message", ""),
+                    origin="incident"
+                )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"success": True, "session": session}
+
+
+@app.post("/api/chat/sessions")
+def create_chat_session_endpoint(body: Dict[str, Any] = Body(...)):
+    """Creates a new dedicated chat session."""
+    from prash.chat_manager import create_session
+    title = body.get("title")
+    origin = body.get("origin", "dashboard")
+    service = body.get("service", "checkout-api")
+    incident_id = body.get("incident_id")
+    session = create_session(
+        title=title,
+        origin=origin,
+        service=service,
+        incident_id=incident_id
+    )
+    return {"success": True, "session": session}
+
+
+@app.post("/api/chat/sessions/{session_id}/message")
+async def post_session_message_endpoint(session_id: str, body: Dict[str, Any] = Body(...)):
+    """Posts a message with optional file/log attachments to a session and queries Lear Copilot."""
+    from prash.conversation_router import route_inbound_message
+    from prash.chat_manager import get_session
+    
+    user_msg = body.get("message", "").strip()
+    sender = body.get("sender", "Operator")
+    origin = body.get("origin", "dashboard")
+    attachment = body.get("attachment")
+
+    session = get_session(session_id)
+    incident_id = (session or {}).get("incident_id")
+
+    full_text = user_msg
+    if attachment and attachment.get("content"):
+        full_text += f"\n\n[Attached File: {attachment.get('filename')}]:\n```{attachment.get('content')[:4000]}\n```"
+
+    res = await route_inbound_message(
+        source=origin,
+        sender_identifier=sender,
+        message_text=full_text,
+        incident_id=incident_id
+    )
+
+    updated_session = get_session(session_id)
+    return {
+        "success": True,
+        "session": updated_session,
+        "reply": res.get("copilot_reply"),
+        "action": res.get("action")
+    }
+
+
+@app.post("/api/chat/upload")
+async def upload_chat_file_endpoint(file: UploadFile = File(...)):
+    """Accepts log or configuration file upload for analysis by Lear Copilot."""
+    try:
+        content_bytes = await file.read()
+        try:
+            text_content = content_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            text_content = content_bytes.decode("latin-1", errors="replace")
+
+        return {
+            "success": True,
+            "filename": file.filename,
+            "size": len(content_bytes),
+            "content": text_content,
+            "preview": text_content[:200]
+        }
+    except Exception as e:
+        logger.error(f"File upload error: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
 
 
 @app.post("/api/incident/{incident_id}/chat")

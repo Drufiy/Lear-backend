@@ -52,6 +52,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Home },
+    { id: 'chat', label: 'Copilot Chat', icon: Sparkles },
     { id: 'projects', label: 'Projects', icon: FolderGit2 },
     { id: 'integrations', label: 'Integrations', icon: Blocks },
     { id: 'activity', label: 'Activity Log', icon: Activity },
