@@ -50,7 +50,7 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
         const greetingMsg: ChatMessageData = {
           id: Date.now(),
           sender: 'agent',
-          text: data.greeting || 'Hello! I am Lear Copilot. How can I assist your operational workflow?',
+          text: data.greeting || 'Hello! I am Lear. How can I assist your operational workflow?',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages([greetingMsg]);
@@ -63,7 +63,7 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
           {
             id: Date.now(),
             sender: 'agent',
-            text: `Lear Copilot active. (Bridge notice: ${errText || 'default telemetry loaded'})`,
+            text: `Lear active. (Bridge notice: ${errText || 'default telemetry loaded'})`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ]);
@@ -73,7 +73,7 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
         {
           id: Date.now(),
           sender: 'agent',
-          text: `Lear Copilot active. Could not reach backend greeting: ${e?.message || String(e)}`,
+          text: `Lear active. Could not reach backend greeting: ${e?.message || String(e)}`,
           isError: true,
         },
       ]);
@@ -592,18 +592,18 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
                   {activeContext?.incidentId ? <ShieldAlert size={18} /> : <Sparkles size={18} />}
                 </div>
                 <div>
-                  <h3 className="font-bold text-base text-white">Lear Copilot</h3>
+                  <h3 className="font-bold text-base text-white">Lear</h3>
                   <p className={`text-[11px] flex items-center gap-1.5 font-mono ${
                     activeContext?.incidentId ? 'text-rose-400 font-bold' : 'text-accent'
                   }`}>
-                    <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                    <span className={`w-1.5 h-1.5 rounded-full ${
                       activeContext?.incidentId ? 'bg-rose-400' : 'bg-accent'
                     }`} />
                     {activeContext?.incidentId 
                       ? 'Incident War Room Active' 
                       : activeContext?.connectorId 
                       ? 'Telemetry Context Active' 
-                      : 'Global Infrastructure Copilot'}
+                      : 'Global Infrastructure SRE'}
                   </p>
                 </div>
               </div>
@@ -786,10 +786,10 @@ export default function Chatbot({ isOpen, onClose, serviceContext }: ChatbotProp
                   type="text"
                   placeholder={
                     activeContext?.incidentId
-                      ? "Reply to Copilot (or type 'Approve' to deploy fix)..."
+                      ? "Reply to Lear (or type 'Approve' to deploy fix)..."
                       : activeContext?.connectorId
-                      ? `Ask Copilot about ${activeContext.connectorId.toUpperCase()} telemetry or actions...`
-                      : "Ask Copilot or use @connector (e.g. @aws, @k8s)..."
+                      ? `Ask Lear about ${activeContext.connectorId.toUpperCase()} telemetry or actions...`
+                      : "Ask Lear or use @connector (e.g. @aws, @k8s)..."
                   }
                   value={input}
                   onChange={e => setInput(e.target.value)}

@@ -437,7 +437,7 @@ export const ChatWorkspace: React.FC = () => {
             </div>
             <div>
               <h2 className="text-sm font-bold tracking-wide text-white flex items-center gap-1.5">
-                Copilot SRE Chat
+                Lear SRE Chat
               </h2>
               <p className="text-[11px] text-gray-400 font-mono">Shared Multi-Channel Audit</p>
             </div>
@@ -617,7 +617,7 @@ export const ChatWorkspace: React.FC = () => {
                   <div className="w-12 h-12 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-[#00F0FF] mb-3">
                     <Sparkles className="w-6 h-6" />
                   </div>
-                  <h4 className="text-sm font-semibold text-white mb-1">Autonomous SRE Copilot Ready</h4>
+                  <h4 className="text-sm font-semibold text-white mb-1">Lear Autonomous SRE Ready</h4>
                   <p className="text-xs text-gray-500 max-w-sm mb-4">
                     Ask questions, upload pod logs, or inspect Kubernetes deployments. Slack, Email, and Dashboard chats stay strictly separated with full audit persistence.
                   </p>
@@ -712,7 +712,7 @@ export const ChatWorkspace: React.FC = () => {
                   </div>
                   <div className="bg-[#0A0E18] border border-[#1E293B] rounded-xl px-4 py-2.5 text-xs text-gray-400 font-mono flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-[#00F0FF] animate-spin" />
-                    <span>Lear Copilot investigating cluster telemetry & formulating reply...</span>
+                    <span>Lear investigating cluster telemetry & formulating reply...</span>
                   </div>
                 </div>
               )}
@@ -726,6 +726,7 @@ export const ChatWorkspace: React.FC = () => {
                 Suggested:
               </span>
               {[
+                '⚡ Full Infrastructure Triage (with Graphs)',
                 'Verify cluster health & microservice status',
                 'Inspect checkout-api pod logs',
                 'Check database replica connectivity',
@@ -733,8 +734,12 @@ export const ChatWorkspace: React.FC = () => {
               ].map((chip) => (
                 <button
                   key={chip}
-                  onClick={() => handleSendMessage(chip)}
-                  className="px-2.5 py-1 rounded-full bg-[#0E1626] hover:bg-[#152035] text-gray-300 hover:text-white border border-[#1E293B] whitespace-nowrap transition-colors"
+                  onClick={() => handleSendMessage(chip === '⚡ Full Infrastructure Triage (with Graphs)' ? 'Perform full cluster health check and audit all pod statuses.' : chip)}
+                  className={`px-2.5 py-1 rounded-full text-xs whitespace-nowrap transition-colors border ${
+                    chip.startsWith('⚡')
+                      ? 'bg-accent/15 hover:bg-accent/25 text-accent border-accent/40 font-semibold'
+                      : 'bg-[#0E1626] hover:bg-[#152035] text-gray-300 hover:text-white border-[#1E293B]'
+                  }`}
                 >
                   {chip}
                 </button>
@@ -798,7 +803,7 @@ export const ChatWorkspace: React.FC = () => {
                       handleSendMessage();
                     }
                   }}
-                  placeholder="Ask Lear SRE Copilot or paste logs... (Enter to send, Shift+Enter for newline)"
+                  placeholder="Ask Lear SRE or paste logs... (Enter to send, Shift+Enter for newline)"
                   rows={1}
                   className="flex-1 bg-transparent px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none resize-none font-sans"
                 />

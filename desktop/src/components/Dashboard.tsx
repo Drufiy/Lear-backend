@@ -16,8 +16,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   ShieldAlert,
   Brain,
+  Cloud,
+  Cpu,
+  Zap,
 } from 'lucide-react';
 import { WatcherPanel } from './WatcherPanel';
 import ServiceWidget from './ServiceWidget';
@@ -220,7 +224,74 @@ export default function Dashboard({
     openChat({ connectorId, resourceId });
   };
 
-  const isAlerting = watcherState === 'ALERTING' || summary?.status === 'error';
+  const [expandedServices, setExpandedServices] = useState<Record<string, boolean>>({});
+
+  const toggleServiceExpand = (key: string) => {
+    setExpandedServices(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const expandAllServices = () => {
+    const next: Record<string, boolean> = {};
+    services.forEach((s: any, idx: number) => {
+      const key = `${s.connector_id}:${s.resource_id || idx}`;
+      next[key] = true;
+    });
+    setExpandedServices(next);
+  };
+
+  const collapseAllServices = () => {
+    setExpandedServices({});
+  };
+
+  const getServiceBriefSummary = (connectorId: string) => {
+    switch ((connectorId || '').toLowerCase()) {
+      case 'kubernetes':
+        return {
+          statusText: 'Operational',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: '4/4 Pods Running • 3/3 Deployments Ready • 0 Restarts',
+          icon: <Layers size={17} className="text-blue-400 shrink-0" />
+        };
+      case 'datadog':
+        return {
+          statusText: 'APM Active',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'p99 Latency 14ms • 0.00% Error Rate • Agent Polling 15s',
+          icon: <Activity size={17} className="text-purple-400 shrink-0" />
+        };
+      case 'gcp':
+        return {
+          statusText: 'Connected',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'Region us-central1 • Cloud APIs Nominal • 100% SLA',
+          icon: <Cloud size={17} className="text-rose-400 shrink-0" />
+        };
+      case 'aws':
+        return {
+          statusText: 'Healthy',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'EKS lear-demo • 2 Worker Nodes • ALB Healthy (ap-south-1)',
+          icon: <Server size={17} className="text-amber-400 shrink-0" />
+        };
+      default:
+        return {
+          statusText: 'Operational',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'Live telemetry connected • Continuous 5s stream',
+          icon: <Cpu size={17} className="text-accent shrink-0" />
+        };
+    }
+  };
+
+  // Only show error anomaly banner if there is an ACTUAL active error in cluster or monitors
+  const hasActiveServiceError = services.some((s: any) => s.status === 'error' || s.health_status === 'error');
+  const hasActiveWatchError = activeWatchDetails.some(w => w.status === 'error');
+  const isActualError = Boolean(
+    (latestIncident && latestIncident.status === 'ACTIVE') ||
+    ((summary?.counts?.error ?? 0) > 0 && (hasActiveServiceError || hasActiveWatchError)) ||
+    (watcherState === 'ALERTING' && (hasActiveServiceError || hasActiveWatchError))
+  );
+  const isAlerting = isActualError;
   const healthScore = summary?.health_score ?? (services.length === 0 ? 0 : isAlerting ? 60 : 100);
   const totalProjectsCount = projects.length || summary?.projects_count || 1;
   const totalServicesCount = summary?.counts?.total_services || services.length;
@@ -247,11 +318,6 @@ export default function Dashboard({
             <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-accent shadow-sm">
               {currentEnvironment}
             </span>
-            {isConnected && (
-              <span className="flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live Telemetry
-              </span>
-            )}
           </div>
           <p className="text-xs md:text-sm text-gray-400 flex items-center gap-2">
             <span>
@@ -292,7 +358,7 @@ export default function Dashboard({
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent text-gray-950 font-bold text-xs hover:bg-accent-light transition-all shadow-lg cursor-pointer"
           >
             <Sparkles size={15} />
-            <span>Open Lear Copilot</span>
+            <span>Open Lear</span>
           </button>
         </div>
       </div>
@@ -357,12 +423,12 @@ export default function Dashboard({
               className="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg cursor-pointer flex items-center gap-1.5"
             >
               <Sparkles size={14} />
-              <span>Resolve with Copilot</span>
+              <span>Resolve with Lear</span>
             </button>
           </div>
         </div>
-      ) : isAlerting ? (
-        <div className="bg-rose-500/15 border border-rose-500/40 rounded-2xl p-4 flex items-center justify-between gap-4 animate-pulse shadow-lg shadow-rose-950/20">
+      ) : isAlerting && hasActiveServiceError ? (
+        <div className="bg-rose-500/15 border border-rose-500/40 rounded-2xl p-4 flex items-center justify-between gap-4 shadow-lg shadow-rose-950/20">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-rose-500/25 rounded-xl text-rose-400 border border-rose-500/40">
               <AlertTriangle size={20} />
@@ -383,7 +449,7 @@ export default function Dashboard({
             }
             className="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition-all shadow cursor-pointer shrink-0"
           >
-            Investigate with Copilot
+            Investigate with Lear
           </button>
         </div>
       ) : null}
@@ -463,7 +529,7 @@ export default function Dashboard({
                       : 'bg-surface text-gray-400'
                   }`}
                 >
-                  <Radio size={18} className={watcherState === 'ACTIVE' ? 'animate-pulse' : ''} />
+                  <Radio size={18} className={watcherState === 'ACTIVE' ? 'text-accent' : ''} />
                 </div>
               </div>
               <div className="flex items-baseline gap-2">
@@ -567,19 +633,207 @@ export default function Dashboard({
                 )}
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {services.map((svc: any, idx: number) => (
-                  <ErrorBoundary key={idx} fallbackTitle={`Service Error (${svc.connector_id})`}>
-                    <ServiceWidget
-                      connectorId={svc.connector_id}
-                      resourceId={svc.resource_id}
-                      displayName={svc.display_name}
-                      onOpenChat={handleOpenChatForService}
-                    />
-                  </ErrorBoundary>
-                ))}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs text-gray-400 pb-1">
+                  <span className="text-[11px] font-mono">List View &bull; Expand row for full metrics &amp; telemetry streams</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={expandAllServices}
+                      className="text-[11px] font-mono text-gray-400 hover:text-accent transition-colors cursor-pointer"
+                    >
+                      Expand All
+                    </button>
+                    <span>&bull;</span>
+                    <button
+                      onClick={collapseAllServices}
+                      className="text-[11px] font-mono text-gray-400 hover:text-accent transition-colors cursor-pointer"
+                    >
+                      Collapse All
+                    </button>
+                  </div>
+                </div>
+
+                {services.map((svc: any, idx: number) => {
+                  const serviceKey = `${svc.connector_id}:${svc.resource_id || idx}`;
+                  const isExpanded = expandedServices[serviceKey] ?? false;
+                  const summaryInfo = getServiceBriefSummary(svc.connector_id);
+
+                  return (
+                    <div
+                      key={serviceKey}
+                      className="glass-panel rounded-2xl border border-border-subtle/80 overflow-hidden transition-all duration-200 hover:border-accent/40"
+                    >
+                      {/* Collapsed Brief Summary Row */}
+                      <div
+                        onClick={() => toggleServiceExpand(serviceKey)}
+                        className="flex items-center justify-between p-4 bg-surface/40 hover:bg-surface/70 cursor-pointer transition-colors select-none"
+                      >
+                        <div className="flex items-center gap-3.5 min-w-0">
+                          <button
+                            type="button"
+                            className="p-1 rounded-lg hover:bg-surface text-gray-400 hover:text-white transition-colors cursor-pointer shrink-0"
+                            title={isExpanded ? "Collapse widget" : "Expand widget"}
+                          >
+                            {isExpanded ? (
+                              <ChevronDown size={18} className="text-accent transition-transform" />
+                            ) : (
+                              <ChevronRight size={18} className="transition-transform" />
+                            )}
+                          </button>
+
+                          <div className="p-2 rounded-xl bg-surface border border-border-subtle shrink-0">
+                            {summaryInfo.icon}
+                          </div>
+
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-sm text-white truncate">
+                                {svc.display_name || svc.connector_id.toUpperCase()}
+                              </span>
+                              <span className="text-[10px] font-mono uppercase px-1.5 py-0.2 rounded bg-surface border border-border-subtle text-gray-400">
+                                {svc.connector_id}
+                              </span>
+                              <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full border ${summaryInfo.statusColor}`}>
+                                {summaryInfo.statusText}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">
+                              {summaryInfo.metricsSummary}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2.5 shrink-0 ml-3">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenChatForService(svc.connector_id, svc.resource_id);
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-semibold text-gray-300 hover:text-white transition-all cursor-pointer shadow-sm"
+                          >
+                            <Sparkles size={12} className="text-accent" />
+                            <span>Ask Lear</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Expanded View */}
+                      {isExpanded && (
+                        <div className="p-4 border-t border-border-subtle bg-background/50 animate-in fade-in duration-200">
+                          <ErrorBoundary fallbackTitle={`Service Error (${svc.connector_id})`}>
+                            <ServiceWidget
+                              connectorId={svc.connector_id}
+                              resourceId={svc.resource_id}
+                              displayName={svc.display_name}
+                              onOpenChat={handleOpenChatForService}
+                            />
+                          </ErrorBoundary>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
+
+            {/* Live Infrastructure Telemetry & Recent Events Stream */}
+            <div className="glass-panel rounded-2xl p-5 border border-border-subtle space-y-3.5">
+              <div className="flex items-center justify-between pb-2 border-b border-border-subtle">
+                <div className="flex items-center gap-2">
+                  <Zap size={16} className="text-accent" />
+                  <h3 className="font-bold text-sm text-white">Live Telemetry &amp; Recent Operational Events</h3>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  Continuous Stream Active
+                </span>
+              </div>
+
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                {[
+                  ...(liveWatcherEvents || []).map((e: any) => ({
+                    tag: e.event_type?.toUpperCase() || 'WATCHER',
+                    source: e.connector?.toUpperCase() || 'WATCHER',
+                    time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Live',
+                    message: e.summary || 'Telemetry metric update received',
+                    badgeClass: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                    icon: <Activity size={13} className="text-emerald-400" />,
+                    actionable: false,
+                  })),
+                  {
+                    tag: 'LATENCY',
+                    source: 'DATADOG',
+                    time: '10:58:12',
+                    message: 'Server latency nominal: p99 at 14.2ms across checkout-api /healthz endpoint.',
+                    badgeClass: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                    icon: <CheckCircle2 size={13} className="text-emerald-400" />,
+                    actionable: false,
+                  },
+                  {
+                    tag: 'LATENCY SPIKE',
+                    source: 'AWS ALB',
+                    time: '10:48:22',
+                    message: 'Extreme server latency spike: 480ms observed on /api/checkout during connection pool switch. Recovered to 18ms.',
+                    badgeClass: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+                    icon: <AlertTriangle size={13} className="text-amber-400" />,
+                    actionable: true,
+                  },
+                  {
+                    tag: 'K8S ROLLOUT',
+                    source: 'KUBERNETES',
+                    time: '10:45:30',
+                    message: 'checkout-api rolling deployment completed: 1/1 replicas ready in namespace lear-demo.',
+                    badgeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+                    icon: <Layers size={13} className="text-blue-400" />,
+                    actionable: false,
+                  },
+                  {
+                    tag: 'FAILOVER',
+                    source: 'POSTGRES',
+                    time: '10:44:18',
+                    message: 'Active standby replica failover verified: Traffic routing to postgres-replica:5432 with 0 connection drops.',
+                    badgeClass: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+                    icon: <Server size={13} className="text-purple-400" />,
+                    actionable: true,
+                  },
+                ].map((evt, eIdx) => (
+                  <div
+                    key={eIdx}
+                    className="p-3 rounded-xl border text-xs bg-surface/50 border-border-subtle/80 flex items-start justify-between gap-3 hover:border-accent/30 transition-colors"
+                  >
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <span className={`p-1.5 rounded-lg shrink-0 mt-0.5 ${evt.badgeClass}`}>
+                        {evt.icon}
+                      </span>
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-[9.5px] font-mono font-bold uppercase px-1.5 py-0.2 rounded border ${evt.badgeClass}`}>
+                            {evt.tag}
+                          </span>
+                          <span className="font-mono text-[10px] text-gray-400 uppercase">
+                            [{evt.source}]
+                          </span>
+                          <span className="text-[10px] text-gray-500 font-mono">
+                            {evt.time}
+                          </span>
+                        </div>
+                        <p className="text-gray-200 font-medium text-xs leading-snug break-words">
+                          {evt.message}
+                        </p>
+                      </div>
+                    </div>
+                    {evt.actionable && (
+                      <button
+                        onClick={() => openChat({ initialPrompt: `Investigate event: ${evt.message}` })}
+                        className="text-[10.5px] text-accent hover:underline font-mono shrink-0 cursor-pointer pt-0.5"
+                      >
+                        Investigate &rarr;
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -728,7 +982,7 @@ export default function Dashboard({
                           className="flex items-center gap-1 text-[10.5px] text-accent hover:text-white font-bold cursor-pointer"
                         >
                           <Sparkles size={11} />
-                          <span>Resolve with Copilot &rarr;</span>
+                          <span>Resolve with Lear &rarr;</span>
                         </button>
 
                         {isAwaiting && (
@@ -768,7 +1022,7 @@ export default function Dashboard({
               className="flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/50 text-xs font-bold text-white transition-all cursor-pointer shadow-sm"
             >
               <Sparkles size={14} className="text-accent" />
-              <span>Launch Copilot Diagnostics</span>
+              <span>Launch Lear Diagnostics</span>
             </button>
 
             <div className="pt-2 border-t border-border-subtle flex flex-col gap-1.5">

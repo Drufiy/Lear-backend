@@ -52,7 +52,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Home },
-    { id: 'chat', label: 'Copilot Chat', icon: Sparkles },
+    { id: 'chat', label: 'Lear Chat', icon: Sparkles },
     { id: 'projects', label: 'Projects', icon: FolderGit2 },
     { id: 'integrations', label: 'Integrations', icon: Blocks },
     { id: 'activity', label: 'Activity Log', icon: Activity },
@@ -116,7 +116,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
                 {/* Aggregate Status Dot */}
                 <span
                   title={`Infrastructure Health: ${context.aggregateStatus.toUpperCase()}`}
-                  className={`w-2 h-2 rounded-full animate-pulse transition-colors ${getStatusDot(context.aggregateStatus)}`}
+                  className={`w-2 h-2 rounded-full transition-colors ${getStatusDot(context.aggregateStatus)}`}
                 />
               </div>
               <p className="text-[10px] text-gray-500 font-mono">Infrastructure Intelligence</p>
@@ -129,7 +129,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               title={`${context.connectedCount} configured backend connectors`}
               className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-surface border border-border-subtle text-[10px] font-mono text-gray-400"
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping" />
+              <span className="w-1.5 h-1.5 rounded-full bg-accent" />
               <span>{context.connectedCount}</span>
             </div>
           )}
@@ -301,7 +301,7 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
               >
                 <div className="flex items-center gap-2 truncate">
                   <span
-                    className={`w-1.5 h-1.5 rounded-full animate-pulse shrink-0 ${getStatusDot(watch.status)}`}
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${getStatusDot(watch.status)}`}
                   />
                   <span className="truncate font-mono text-[11px]">{watch.target}</span>
                 </div>
@@ -351,23 +351,14 @@ export const Sidebar: React.FC<SidebarProps> = (props) => {
       <div className="p-4 border-t border-border-subtle bg-surface/30">
         <div className="flex items-center justify-between text-xs">
           <div className="flex items-center gap-2">
-            <div className="relative flex items-center justify-center">
+            <div className="flex items-center justify-center">
               <span
                 className={`w-2 h-2 rounded-full ${
                   watcherState === 'ALERTING'
-                    ? 'bg-rose-500'
+                    ? 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.6)]'
                     : watcherState === 'DEGRADED'
-                    ? 'bg-amber-400'
-                    : 'bg-accent'
-                }`}
-              />
-              <span
-                className={`absolute w-2 h-2 rounded-full pulse-radar ${
-                  watcherState === 'ALERTING'
-                    ? 'bg-rose-500'
-                    : watcherState === 'DEGRADED'
-                    ? 'bg-amber-400'
-                    : 'bg-accent'
+                    ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]'
+                    : 'bg-accent shadow-[0_0_6px_rgba(255,58,137,0.6)]'
                 }`}
               />
             </div>
