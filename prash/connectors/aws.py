@@ -117,7 +117,7 @@ class AWSConnector(Connector):
         ec2 = session.client("ec2")
 
         try:
-            if not resource:
+            if not resource or resource.lower() in ("default", "main", "cluster"):
                 resp = ec2.describe_instances()
                 for res in resp.get("Reservations", []):
                     for inst in res.get("Instances", []):

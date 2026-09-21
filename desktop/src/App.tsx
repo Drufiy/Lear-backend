@@ -9,6 +9,7 @@ import Notifications from './components/Notifications';
 import Settings from './components/Settings';
 import NotificationToast from './components/NotificationToast';
 import Chatbot from './components/Chatbot';
+import ChatWorkspace from './components/ChatWorkspace';
 import ErrorBoundary from './components/ErrorBoundary';
 import { LearProvider, useLear } from './context/LearContext';
 
@@ -18,6 +19,7 @@ function AppContent() {
 
   const {
     activeTab,
+    setActiveTab,
     activeProject,
     activeEnvironment,
     refreshProjects,
@@ -46,6 +48,15 @@ function AppContent() {
 
   useEffect(() => {
     checkConfig();
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get('tab');
+      if (tabParam) {
+        setActiveTab(tabParam);
+      } else if (params.get('session')) {
+        setActiveTab('chat');
+      }
+    } catch {}
   }, []);
 
   const handleSetupComplete = () => {
@@ -80,6 +91,7 @@ function AppContent() {
                   onOpenWizard={() => setIsSetupComplete(false)}
                 />
               )}
+              {activeTab === 'chat' && <ChatWorkspace />}
               {activeTab === 'projects' && <Projects />}
               {activeTab === 'integrations' && <Integrations />}
               {activeTab === 'activity' && <ActivityLog />}

@@ -86,18 +86,27 @@ const ToastItem: React.FC<{ toast: AppNotification; onDismiss: (id: string) => v
             <span className="text-[9px] text-gray-500 font-mono">
               {new Date(toast.timestamp).toLocaleTimeString()}
             </span>
-            {toast.connector && (
+            {toast.incidentId || toast.connector ? (
               <button
                 onClick={() => {
-                  openChat({ connectorId: toast.connector });
+                  if (toast.incidentId) {
+                    openChat({
+                      incidentId: toast.incidentId,
+                      title: toast.title,
+                      errorSummary: toast.message,
+                      ...(toast.incidentData || {}),
+                    });
+                  } else {
+                    openChat({ connectorId: toast.connector });
+                  }
                   onDismiss(toast.id);
                 }}
                 className="text-[10px] text-accent hover:underline flex items-center gap-1 font-bold cursor-pointer"
               >
                 <Sparkles size={11} />
-                Investigate
+                {toast.incidentId ? 'Review in Lear' : 'Investigate'}
               </button>
-            )}
+            ) : null}
           </div>
         </div>
       </div>

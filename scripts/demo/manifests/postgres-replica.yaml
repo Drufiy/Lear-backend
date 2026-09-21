@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-replica
+  namespace: lear-demo
+  labels:
+    app: postgres-replica
+    team: lear-demo
+    role: standby-replica
+    env: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-replica
+  template:
+    metadata:
+      labels:
+        app: postgres-replica
+        team: lear-demo
+        role: standby-replica
+        env: staging
+    spec:
+      containers:
+        - name: postgres-replica
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_PASSWORD
+              value: "demo"
+            - name: POSTGRES_DB
+              value: "checkout"
+          ports:
+            - containerPort: 5432
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: lear-demo
+  labels:
+    app: postgres-replica
+    team: lear-demo
+    role: standby-replica
+    env: staging
+spec:
+  selector:
+    app: postgres-replica
+  ports:
+    - port: 5432
+      targetPort: 5432

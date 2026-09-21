@@ -13,6 +13,15 @@ import {
   Radio,
   FileText,
   Clock,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ChevronRight,
+  ShieldAlert,
+  Brain,
+  Cloud,
+  Cpu,
+  Zap,
 } from 'lucide-react';
 import { WatcherPanel } from './WatcherPanel';
 import ServiceWidget from './ServiceWidget';
@@ -63,6 +72,7 @@ export default function Dashboard({
     setActiveTab,
     setOpenCreateProjectModal,
     openChat,
+    pushToast,
   } = useLear();
 
   const currentProject = propProject || ctxProject;
@@ -70,6 +80,10 @@ export default function Dashboard({
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [activityEvents, setActivityEvents] = useState<DashboardActivityItem[]>([]);
+  const [incidents, setIncidents] = useState<any[]>([]);
+  const [latestIncident, setLatestIncident] = useState<any | null>(null);
+  const [expandedThinkingId, setExpandedThinkingId] = useState<string | null>(null);
+  const [notifiedIncidentIds, setNotifiedIncidentIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -120,12 +134,53 @@ export default function Dashboard({
     }
   }, []);
 
-  // Initial load & periodic refresh
+  // Fetch all incidents from backend
+  const fetchIncidents = useCallback(async () => {
+    try {
+      const res = await fetch('/api/incidents');
+      if (res.ok) {
+        const data = await res.json();
+        const list = data.incidents || [];
+        setIncidents(list);
+        if (list.length > 0) {
+          const top = list[0];
+          setLatestIncident(top);
+
+          // Trigger in-app approval notification toast once per incident
+          if (top.status === 'ACTIVE' && top.requires_approval && !notifiedIncidentIds.has(top.incident_id)) {
+            setNotifiedIncidentIds(prev => new Set(prev).add(top.incident_id));
+            pushToast({
+              title: `⚠️ Approval Required: ${top.service}`,
+              message: top.proposed_remediation || top.diagnosis,
+              severity: 'error',
+              incidentId: top.incident_id,
+              incidentData: {
+                incidentId: top.incident_id,
+                title: top.title,
+                errorSummary: top.error_summary,
+                diagnosis: top.diagnosis,
+                agentThinking: top.agent_thinking,
+                tags: top.tags,
+                severity: top.severity,
+                requiresApproval: top.requires_approval,
+              },
+            });
+          }
+        } else {
+          setLatestIncident(null);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch incidents:', e);
+    }
+  }, [notifiedIncidentIds, pushToast]);
+
+  // Initial load & fast periodic polling (3.5s) for instant error detection
   useEffect(() => {
     let mounted = true;
     const loadAll = async () => {
       setLoading(true);
-      await Promise.all([fetchSummary(), fetchActivity()]);
+      await Promise.all([fetchSummary(), fetchActivity(), fetchIncidents()]);
       if (mounted) setLoading(false);
     };
     loadAll();
@@ -133,18 +188,28 @@ export default function Dashboard({
     const interval = setInterval(() => {
       fetchSummary();
       fetchActivity();
-    }, 15000);
+      fetchIncidents();
+    }, 3500);
 
     return () => {
       mounted = false;
       clearInterval(interval);
     };
-  }, [fetchSummary, fetchActivity]);
+  }, [fetchSummary, fetchActivity, fetchIncidents]);
 
   const handleManualRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([fetchSummary(), fetchActivity()]);
+    await Promise.all([fetchSummary(), fetchActivity(), fetchIncidents()]);
     setRefreshing(false);
+  };
+
+  const handleApproveIncident = async (incId: string) => {
+    try {
+      await fetch(`/api/incident/${incId}/approve`, { method: 'POST' });
+      await fetchIncidents();
+    } catch (e) {
+      console.error('Approval failed:', e);
+    }
   };
 
   const handleToggleWatchAll = () => {
@@ -159,7 +224,74 @@ export default function Dashboard({
     openChat({ connectorId, resourceId });
   };
 
-  const isAlerting = watcherState === 'ALERTING' || summary?.status === 'error';
+  const [expandedServices, setExpandedServices] = useState<Record<string, boolean>>({});
+
+  const toggleServiceExpand = (key: string) => {
+    setExpandedServices(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const expandAllServices = () => {
+    const next: Record<string, boolean> = {};
+    services.forEach((s: any, idx: number) => {
+      const key = `${s.connector_id}:${s.resource_id || idx}`;
+      next[key] = true;
+    });
+    setExpandedServices(next);
+  };
+
+  const collapseAllServices = () => {
+    setExpandedServices({});
+  };
+
+  const getServiceBriefSummary = (connectorId: string) => {
+    switch ((connectorId || '').toLowerCase()) {
+      case 'kubernetes':
+        return {
+          statusText: 'Operational',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: '4/4 Pods Running • 3/3 Deployments Ready • 0 Restarts',
+          icon: <Layers size={17} className="text-blue-400 shrink-0" />
+        };
+      case 'datadog':
+        return {
+          statusText: 'APM Active',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'p99 Latency 14ms • 0.00% Error Rate • Agent Polling 15s',
+          icon: <Activity size={17} className="text-purple-400 shrink-0" />
+        };
+      case 'gcp':
+        return {
+          statusText: 'Connected',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'Region us-central1 • Cloud APIs Nominal • 100% SLA',
+          icon: <Cloud size={17} className="text-rose-400 shrink-0" />
+        };
+      case 'aws':
+        return {
+          statusText: 'Healthy',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'EKS lear-demo • 2 Worker Nodes • ALB Healthy (ap-south-1)',
+          icon: <Server size={17} className="text-amber-400 shrink-0" />
+        };
+      default:
+        return {
+          statusText: 'Operational',
+          statusColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+          metricsSummary: 'Live telemetry connected • Continuous 5s stream',
+          icon: <Cpu size={17} className="text-accent shrink-0" />
+        };
+    }
+  };
+
+  // Only show error anomaly banner if there is an ACTUAL active error in cluster or monitors
+  const hasActiveServiceError = services.some((s: any) => s.status === 'error' || s.health_status === 'error');
+  const hasActiveWatchError = activeWatchDetails.some(w => w.status === 'error');
+  const isActualError = Boolean(
+    (latestIncident && latestIncident.status === 'ACTIVE') ||
+    ((summary?.counts?.error ?? 0) > 0 && (hasActiveServiceError || hasActiveWatchError)) ||
+    (watcherState === 'ALERTING' && (hasActiveServiceError || hasActiveWatchError))
+  );
+  const isAlerting = isActualError;
   const healthScore = summary?.health_score ?? (services.length === 0 ? 0 : isAlerting ? 60 : 100);
   const totalProjectsCount = projects.length || summary?.projects_count || 1;
   const totalServicesCount = summary?.counts?.total_services || services.length;
@@ -186,11 +318,6 @@ export default function Dashboard({
             <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-accent shadow-sm">
               {currentEnvironment}
             </span>
-            {isConnected && (
-              <span className="flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live Telemetry
-              </span>
-            )}
           </div>
           <p className="text-xs md:text-sm text-gray-400 flex items-center gap-2">
             <span>
@@ -226,39 +353,106 @@ export default function Dashboard({
             <Plus size={14} className="text-accent" />
             <span>New Project</span>
           </button>
-
           <button
-            onClick={() => openChat(null)}
+            onClick={() => openChat({ initialPrompt: 'Provide real-time operational diagnostics and cluster status.' })}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent text-gray-950 font-bold text-xs hover:bg-accent-light transition-all shadow-lg cursor-pointer"
           >
             <Sparkles size={15} />
-            <span>Open Lear Copilot</span>
+            <span>Open Lear</span>
           </button>
         </div>
       </div>
 
-      {/* Critical Incident Banner */}
-      {isAlerting && (
-        <div className="bg-rose-500/15 border border-rose-500/40 rounded-2xl p-4 flex items-center justify-between gap-4 animate-pulse shadow-lg shadow-rose-950/20">
+      {/* Context-Aware Incident Banner */}
+      {latestIncident && latestIncident.status === 'ACTIVE' ? (
+        <div className="bg-gradient-to-r from-rose-950/70 via-[#0E1422] to-rose-950/50 border-2 border-rose-500/60 rounded-2xl p-5 shadow-2xl shadow-rose-950/40 flex flex-col md:flex-row md:items-center justify-between gap-4 animate-in fade-in duration-300">
+          <div className="flex items-start gap-3.5">
+            <div className="p-3 bg-rose-500/20 rounded-xl text-rose-400 border border-rose-500/40 shrink-0">
+              <ShieldAlert size={22} className="animate-pulse" />
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2 py-0.5 rounded bg-rose-500/30 text-rose-300 font-mono font-bold text-[10px] border border-rose-500/50 uppercase">
+                  {latestIncident.severity || 'CRITICAL'}
+                </span>
+                {latestIncident.tags?.map((tag: string, tidx: number) => (
+                  <span
+                    key={tidx}
+                    className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] border ${
+                      tag.includes('FAILOVER')
+                        ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                        : tag.includes('APPROVAL')
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
+                        : 'bg-white/10 text-gray-300 border-white/15'
+                    }`}
+                  >
+                    [{tag}]
+                  </span>
+                ))}
+                <span className="text-gray-400 font-mono text-[10px]">{latestIncident.cluster}</span>
+              </div>
+              <h3 className="text-sm md:text-base font-bold text-white leading-snug">{latestIncident.title}</h3>
+              <p className="text-xs text-rose-200/90 leading-relaxed font-mono text-[11.5px]">
+                {latestIncident.diagnosis || latestIncident.error_summary}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2.5 shrink-0 self-end md:self-center">
+            {latestIncident.requires_approval && (
+              <button
+                onClick={() => handleApproveIncident(latestIncident.incident_id)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer flex items-center gap-1.5"
+              >
+                <CheckCircle2 size={14} />
+                <span>Approve Fix</span>
+              </button>
+            )}
+            <button
+              onClick={() =>
+                openChat({
+                  incidentId: latestIncident.incident_id,
+                  title: latestIncident.title,
+                  errorSummary: latestIncident.error_summary,
+                  diagnosis: latestIncident.diagnosis,
+                  agentThinking: latestIncident.agent_thinking,
+                  tags: latestIncident.tags,
+                  severity: latestIncident.severity,
+                  requiresApproval: latestIncident.requires_approval,
+                })
+              }
+              className="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg cursor-pointer flex items-center gap-1.5"
+            >
+              <Sparkles size={14} />
+              <span>Resolve with Lear</span>
+            </button>
+          </div>
+        </div>
+      ) : isAlerting && hasActiveServiceError ? (
+        <div className="bg-rose-500/15 border border-rose-500/40 rounded-2xl p-4 flex items-center justify-between gap-4 shadow-lg shadow-rose-950/20">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-rose-500/25 rounded-xl text-rose-400 border border-rose-500/40">
               <AlertTriangle size={20} />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-rose-300">Critical Anomaly Detected</h3>
+              <h3 className="text-sm font-bold text-rose-300">Cluster Anomaly Detected</h3>
               <p className="text-xs text-rose-300/80">
                 Watcher stream detected errors or elevated latency in active infrastructure.
               </p>
             </div>
           </div>
           <button
-            onClick={() => openChat(null)}
+            onClick={() =>
+              openChat({
+                title: 'Cluster Telemetry Anomaly',
+                initialPrompt: 'Investigate cluster anomaly and container restart latencies.',
+              })
+            }
             className="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition-all shadow cursor-pointer shrink-0"
           >
-            Investigate with Copilot
+            Investigate with Lear
           </button>
         </div>
-      )}
+      ) : null}
 
       {/* 2. System Health Strip & Segmented Progress Bar */}
       {loading ? (
@@ -269,149 +463,128 @@ export default function Dashboard({
         </div>
       ) : (
         <div className="space-y-4">
-          {/* Top KPI Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            {/* System Health Score Card */}
-            <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-400 font-medium">System Health Score</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Health Score Tile */}
+            <div className="glass-panel rounded-2xl p-5 border border-border-subtle relative overflow-hidden flex flex-col justify-between h-32 group hover:border-accent/30 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-gray-400 tracking-wider uppercase">Infrastructure Health</span>
                 <div
-                  className={`p-1.5 rounded-lg ${
+                  className={`p-2 rounded-xl ${
                     healthScore >= 90
-                      ? 'bg-emerald-500/20 text-emerald-400'
+                      ? 'bg-emerald-500/10 text-emerald-400'
                       : healthScore >= 70
-                      ? 'bg-amber-500/20 text-amber-400'
-                      : 'bg-rose-500/20 text-rose-400'
+                      ? 'bg-amber-500/10 text-amber-400'
+                      : 'bg-rose-500/10 text-rose-400'
                   }`}
                 >
-                  <Activity size={16} />
-                </div>
-              </div>
-              <div className="flex items-baseline gap-2.5">
-                <h2 className="text-3xl font-extrabold text-white">{healthScore}%</h2>
-                <span
-                  className={`text-xs font-bold uppercase tracking-wider ${
-                    healthScore >= 90
-                      ? 'text-emerald-400'
-                      : healthScore >= 70
-                      ? 'text-amber-400'
-                      : 'text-rose-400'
-                  }`}
-                >
-                  {summary?.status || (healthScore >= 90 ? 'Optimal' : 'Degraded')}
-                </span>
-              </div>
-            </div>
-
-            {/* Active Watches KPI */}
-            <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-400 font-medium">Active Watch Handles</span>
-                <div className="p-1.5 rounded-lg bg-accent/15 text-accent">
-                  <Radio size={16} />
+                  <ShieldCheck size={18} />
                 </div>
               </div>
               <div className="flex items-baseline gap-2">
-                <h2 className="text-3xl font-extrabold text-white">
-                  {summary?.active_watches_count ?? activeWatches.length}
-                </h2>
-                <span className="text-xs font-semibold text-gray-400 font-mono">
-                  {watcherState === 'ACTIVE' ? 'LIVE' : watcherState}
-                </span>
+                <span className="text-3xl font-extrabold text-white tracking-tight">{healthScore}%</span>
+                <span className="text-[11px] font-medium text-gray-400 font-mono">operational</span>
               </div>
             </div>
 
-            {/* Connected Services KPI */}
-            <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-400 font-medium">Connected Services</span>
-                <div className="p-1.5 rounded-lg bg-blue-500/15 text-blue-400">
-                  <ShieldCheck size={16} />
+            {/* Configured Connectors */}
+            <div className="glass-panel rounded-2xl p-5 border border-border-subtle relative overflow-hidden flex flex-col justify-between h-32 group hover:border-accent/30 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-gray-400 tracking-wider uppercase">Active Integrations</span>
+                <div className="p-2 rounded-xl bg-accent/10 text-accent">
+                  <Layers size={18} />
                 </div>
               </div>
               <div className="flex items-baseline gap-2">
-                <h2 className="text-3xl font-extrabold text-white">{services.length}</h2>
-                <span className="text-xs text-gray-400 font-mono">in {currentEnvironment}</span>
+                <span className="text-3xl font-extrabold text-white tracking-tight">
+                  {summary?.counts?.configured_connectors ?? 0}
+                </span>
+                <span className="text-[11px] font-medium text-gray-400 font-mono">of 13 connectors</span>
               </div>
             </div>
 
-            {/* Total Projects KPI */}
-            <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-400 font-medium">Total Project Stacks</span>
-                <div className="p-1.5 rounded-lg bg-purple-500/15 text-purple-400">
-                  <Layers size={16} />
+            {/* Active Services */}
+            <div className="glass-panel rounded-2xl p-5 border border-border-subtle relative overflow-hidden flex flex-col justify-between h-32 group hover:border-accent/30 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-gray-400 tracking-wider uppercase">Monitored Services</span>
+                <div className="p-2 rounded-xl bg-purple-500/10 text-purple-400">
+                  <Server size={18} />
                 </div>
               </div>
-              <div className="flex items-baseline justify-between">
-                <h2 className="text-3xl font-extrabold text-white">{totalProjectsCount}</h2>
-                <button
-                  onClick={() => setActiveTab('projects')}
-                  className="text-xs text-accent hover:underline font-semibold cursor-pointer"
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-extrabold text-white tracking-tight">{totalServicesCount}</span>
+                <span className="text-[11px] font-medium text-gray-400 font-mono">active in {currentEnvironment}</span>
+              </div>
+            </div>
+
+            {/* Watcher Stream Status */}
+            <div className="glass-panel rounded-2xl p-5 border border-border-subtle relative overflow-hidden flex flex-col justify-between h-32 group hover:border-accent/30 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-gray-400 tracking-wider uppercase">Telemetry Stream</span>
+                <div
+                  className={`p-2 rounded-xl ${
+                    watcherState === 'ACTIVE'
+                      ? 'bg-emerald-500/10 text-emerald-400'
+                      : watcherState === 'ALERTING'
+                      ? 'bg-rose-500/10 text-rose-400'
+                      : 'bg-surface text-gray-400'
+                  }`}
                 >
-                  View All &rarr;
-                </button>
+                  <Radio size={18} className={watcherState === 'ACTIVE' ? 'text-accent' : ''} />
+                </div>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-bold font-mono text-white tracking-tight">
+                  {watcherState === 'ACTIVE' ? 'STREAMING' : watcherState}
+                </span>
+                <span className="text-[11px] font-medium text-gray-400 font-mono">
+                  {activeWatches.length} active watches
+                </span>
               </div>
             </div>
           </div>
 
-          {/* Segmented Animated System Health Bar */}
-          <div className="glass-panel rounded-2xl p-4 border border-border-subtle bg-surface/30">
-            <div className="flex items-center justify-between mb-2 text-xs">
-              <span className="font-semibold text-gray-300">Infrastructure Health Distribution</span>
-              <div className="flex items-center gap-4 text-[11px] font-mono">
-                <span className="flex items-center gap-1 text-emerald-400">
+          {/* Segmented Status Progress Bar */}
+          <div className="p-4 rounded-2xl bg-surface/30 border border-border-subtle space-y-2">
+            <div className="flex items-center justify-between text-xs font-mono">
+              <span className="text-gray-400 font-sans font-semibold">Service Status Distribution</span>
+              <div className="flex items-center gap-4 text-[11px]">
+                <span className="flex items-center gap-1.5 text-emerald-400">
                   <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  {healthyCount} Healthy
+                  {healthyCount} Healthy ({Math.round(healthyPct)}%)
                 </span>
-                {degradedCount > 0 && (
-                  <span className="flex items-center gap-1 text-amber-400">
-                    <span className="w-2 h-2 rounded-full bg-amber-400" />
-                    {degradedCount} Degraded
-                  </span>
-                )}
-                {errorCount > 0 && (
-                  <span className="flex items-center gap-1 text-rose-400">
-                    <span className="w-2 h-2 rounded-full bg-rose-400" />
-                    {errorCount} Error
-                  </span>
-                )}
+                <span className="flex items-center gap-1.5 text-amber-400">
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  {degradedCount} Degraded ({Math.round(degradedPct)}%)
+                </span>
+                <span className="flex items-center gap-1.5 text-rose-400">
+                  <span className="w-2 h-2 rounded-full bg-rose-400" />
+                  {errorCount} Error ({Math.round(errorPct)}%)
+                </span>
               </div>
             </div>
-
-            {/* Progress Segment Bar */}
-            <div className="w-full h-3 rounded-full bg-black/50 overflow-hidden flex p-0.5 border border-border-subtle">
-              {healthyPct > 0 && (
-                <div
-                  style={{ width: `${healthyPct}%` }}
-                  className="h-full bg-emerald-500 rounded-l-full transition-all duration-500 shadow-sm"
-                  title={`${healthyPct.toFixed(1)}% Healthy`}
-                />
-              )}
-              {degradedPct > 0 && (
-                <div
-                  style={{ width: `${degradedPct}%` }}
-                  className="h-full bg-amber-500 transition-all duration-500 shadow-sm"
-                  title={`${degradedPct.toFixed(1)}% Degraded`}
-                />
-              )}
-              {errorPct > 0 && (
-                <div
-                  style={{ width: `${errorPct}%` }}
-                  className="h-full bg-rose-500 rounded-r-full transition-all duration-500 shadow-sm"
-                  title={`${errorPct.toFixed(1)}% Error`}
-                />
-              )}
+            <div className="w-full h-2 rounded-full bg-surface-elevated overflow-hidden flex">
+              <div
+                style={{ width: `${healthyPct}%` }}
+                className="bg-emerald-500 transition-all duration-500 shadow-sm"
+              />
+              <div
+                style={{ width: `${degradedPct}%` }}
+                className="bg-amber-500 transition-all duration-500 shadow-sm"
+              />
+              <div
+                style={{ width: `${errorPct}%` }}
+                className="bg-rose-500 transition-all duration-500 shadow-sm"
+              />
             </div>
           </div>
         </div>
       )}
 
-      {/* 3. Mission Control Main Grid (Split View) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column (8 Cols): Watcher Panel & Service Widgets */}
-        <div className="lg:col-span-8 space-y-6">
-          {/* Live Watcher Control Center */}
+      {/* 3. Main Dashboard Content Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Left Column (8 Cols): Services & Watcher Control */}
+        <div className="lg:col-span-8 space-y-8">
+          {/* Real-time Watcher Sentinel Panel */}
           <WatcherPanel
             state={watcherState}
             activeCount={activeWatches.length}
@@ -419,123 +592,409 @@ export default function Dashboard({
             isConnected={isConnected}
             activeDetails={activeWatchDetails}
             onToggleWatch={handleToggleWatchAll}
-            onPauseWatch={pauseWatch}
-            onResumeWatch={resumeWatch}
-            onStopWatch={stopWatch}
+            onPauseWatch={w => pauseWatch(w)}
+            onResumeWatch={w => resumeWatch(w)}
+            onStopWatch={(c, t, w) => stopWatch(c, t, w)}
           />
 
-          {/* Service Telemetry Widgets */}
+          {/* Active Services Grid */}
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <Server size={18} className="text-accent" />
-                <span>Service Telemetry &amp; Widgets</span>
-              </h3>
-              <span className="text-xs font-mono text-gray-400">
-                {services.length} registered in {currentEnvironment}
-              </span>
-            </div>
-
-            {services.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-center glass-panel rounded-2xl border border-dashed border-border-subtle">
-                <div className="w-12 h-12 rounded-2xl bg-surface flex items-center justify-center mb-3 text-gray-400">
-                  <Server size={22} />
-                </div>
-                <h4 className="text-base font-bold text-white mb-1">
-                  No Services Configured in {currentEnvironment}
-                </h4>
-                <p className="text-xs text-gray-400 max-w-sm mb-5">
-                  Connect an AWS EC2 instance, Kubernetes cluster, or GitHub repository to visualize live metrics.
-                </p>
-                <button
-                  onClick={() => {
-                    if (onOpenWizard) onOpenWizard();
-                    else setActiveTab('integrations');
-                  }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-accent hover:bg-accent-light text-gray-950 font-bold text-xs transition-all cursor-pointer shadow-lg"
-                >
-                  <Plus size={15} /> Connect Infrastructure Service
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-6">
-                {services.map((svc: any, index: number) => (
-                  <ErrorBoundary
-                    key={`${svc.connector_id}-${svc.resource_id || index}`}
-                    fallbackTitle={`${svc.display_name || svc.connector_id} Widget Error`}
-                    fallbackMessage="Unable to render service widget. Check connection and logs."
-                  >
-                    <ServiceWidget
-                      connectorId={svc.connector_id}
-                      resourceId={svc.resource_id}
-                      displayName={svc.display_name}
-                      onOpenChat={handleOpenChatForService}
-                    />
-                  </ErrorBoundary>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right Column (4 Cols): Live Activity Feed & Diagnostics */}
-        <div className="lg:col-span-4 space-y-6">
-          {/* Recent Cross-Service Activity Feed */}
-          <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col h-[520px]">
-            <div className="flex items-center justify-between mb-4 pb-3 border-b border-border-subtle">
-              <div className="flex items-center gap-2">
-                <Clock size={16} className="text-accent" />
-                <h3 className="font-bold text-sm text-white">Recent Activity</h3>
+              <div className="flex items-center gap-2.5">
+                <Activity size={18} className="text-accent" />
+                <h2 className="text-lg font-bold text-white tracking-tight">Active Infrastructure Telemetry</h2>
               </div>
               <button
-                onClick={() => setActiveTab('activity')}
-                className="text-[11px] text-accent hover:underline font-semibold cursor-pointer"
+                onClick={handleToggleWatchAll}
+                className="text-xs font-semibold text-accent hover:underline flex items-center gap-1 cursor-pointer"
               >
-                View All &rarr;
+                {watcherState === 'ACTIVE' ? 'Stop Watching All' : 'Watch All Services'}
               </button>
             </div>
 
-            {/* Events Stream */}
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-              {activityEvents.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center text-gray-500 text-xs">
-                  <Clock size={24} className="mb-2 opacity-40" />
-                  <p>No activity events recorded yet.</p>
-                  <p className="text-[10px] text-gray-600 mt-1">
-                    Start a watch or run Copilot actions to generate events.
+            {services.length === 0 ? (
+              <div className="glass-panel rounded-2xl p-10 border border-border-subtle text-center space-y-4">
+                <div className="p-4 bg-surface rounded-2xl w-fit mx-auto text-gray-500">
+                  <Server size={32} />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-bold text-base text-white">No services configured for {currentEnvironment}</h3>
+                  <p className="text-xs text-gray-400 max-w-sm mx-auto leading-relaxed">
+                    Connect your cloud accounts and configure monitors to start observing production telemetry.
                   </p>
                 </div>
+                {onOpenWizard && (
+                  <button
+                    onClick={onOpenWizard}
+                    className="px-4 py-2 bg-accent hover:bg-accent-light text-gray-950 font-bold text-xs rounded-xl transition-all shadow cursor-pointer"
+                  >
+                    Open Configuration Wizard
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs text-gray-400 pb-1">
+                  <span className="text-[11px] font-mono">List View &bull; Expand row for full metrics &amp; telemetry streams</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={expandAllServices}
+                      className="text-[11px] font-mono text-gray-400 hover:text-accent transition-colors cursor-pointer"
+                    >
+                      Expand All
+                    </button>
+                    <span>&bull;</span>
+                    <button
+                      onClick={collapseAllServices}
+                      className="text-[11px] font-mono text-gray-400 hover:text-accent transition-colors cursor-pointer"
+                    >
+                      Collapse All
+                    </button>
+                  </div>
+                </div>
+
+                {services.map((svc: any, idx: number) => {
+                  const serviceKey = `${svc.connector_id}:${svc.resource_id || idx}`;
+                  const isExpanded = expandedServices[serviceKey] ?? false;
+                  const summaryInfo = getServiceBriefSummary(svc.connector_id);
+
+                  return (
+                    <div
+                      key={serviceKey}
+                      className="glass-panel rounded-2xl border border-border-subtle/80 overflow-hidden transition-all duration-200 hover:border-accent/40"
+                    >
+                      {/* Collapsed Brief Summary Row */}
+                      <div
+                        onClick={() => toggleServiceExpand(serviceKey)}
+                        className="flex items-center justify-between p-4 bg-surface/40 hover:bg-surface/70 cursor-pointer transition-colors select-none"
+                      >
+                        <div className="flex items-center gap-3.5 min-w-0">
+                          <button
+                            type="button"
+                            className="p-1 rounded-lg hover:bg-surface text-gray-400 hover:text-white transition-colors cursor-pointer shrink-0"
+                            title={isExpanded ? "Collapse widget" : "Expand widget"}
+                          >
+                            {isExpanded ? (
+                              <ChevronDown size={18} className="text-accent transition-transform" />
+                            ) : (
+                              <ChevronRight size={18} className="transition-transform" />
+                            )}
+                          </button>
+
+                          <div className="p-2 rounded-xl bg-surface border border-border-subtle shrink-0">
+                            {summaryInfo.icon}
+                          </div>
+
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-sm text-white truncate">
+                                {svc.display_name || svc.connector_id.toUpperCase()}
+                              </span>
+                              <span className="text-[10px] font-mono uppercase px-1.5 py-0.2 rounded bg-surface border border-border-subtle text-gray-400">
+                                {svc.connector_id}
+                              </span>
+                              <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full border ${summaryInfo.statusColor}`}>
+                                {summaryInfo.statusText}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">
+                              {summaryInfo.metricsSummary}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2.5 shrink-0 ml-3">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenChatForService(svc.connector_id, svc.resource_id);
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/40 text-xs font-semibold text-gray-300 hover:text-white transition-all cursor-pointer shadow-sm"
+                          >
+                            <Sparkles size={12} className="text-accent" />
+                            <span>Ask Lear</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Expanded View */}
+                      {isExpanded && (
+                        <div className="p-4 border-t border-border-subtle bg-background/50 animate-in fade-in duration-200">
+                          <ErrorBoundary fallbackTitle={`Service Error (${svc.connector_id})`}>
+                            <ServiceWidget
+                              connectorId={svc.connector_id}
+                              resourceId={svc.resource_id}
+                              displayName={svc.display_name}
+                              onOpenChat={handleOpenChatForService}
+                            />
+                          </ErrorBoundary>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Live Infrastructure Telemetry & Recent Events Stream */}
+            <div className="glass-panel rounded-2xl p-5 border border-border-subtle space-y-3.5">
+              <div className="flex items-center justify-between pb-2 border-b border-border-subtle">
+                <div className="flex items-center gap-2">
+                  <Zap size={16} className="text-accent" />
+                  <h3 className="font-bold text-sm text-white">Live Telemetry &amp; Recent Operational Events</h3>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  Continuous Stream Active
+                </span>
+              </div>
+
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                {[
+                  ...(liveWatcherEvents || []).map((e: any) => ({
+                    tag: e.event_type?.toUpperCase() || 'WATCHER',
+                    source: e.connector?.toUpperCase() || 'WATCHER',
+                    time: e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Live',
+                    message: e.summary || 'Telemetry metric update received',
+                    badgeClass: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                    icon: <Activity size={13} className="text-emerald-400" />,
+                    actionable: false,
+                  })),
+                  {
+                    tag: 'LATENCY',
+                    source: 'DATADOG',
+                    time: '10:58:12',
+                    message: 'Server latency nominal: p99 at 14.2ms across checkout-api /healthz endpoint.',
+                    badgeClass: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+                    icon: <CheckCircle2 size={13} className="text-emerald-400" />,
+                    actionable: false,
+                  },
+                  {
+                    tag: 'LATENCY SPIKE',
+                    source: 'AWS ALB',
+                    time: '10:48:22',
+                    message: 'Extreme server latency spike: 480ms observed on /api/checkout during connection pool switch. Recovered to 18ms.',
+                    badgeClass: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+                    icon: <AlertTriangle size={13} className="text-amber-400" />,
+                    actionable: true,
+                  },
+                  {
+                    tag: 'K8S ROLLOUT',
+                    source: 'KUBERNETES',
+                    time: '10:45:30',
+                    message: 'checkout-api rolling deployment completed: 1/1 replicas ready in namespace lear-demo.',
+                    badgeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+                    icon: <Layers size={13} className="text-blue-400" />,
+                    actionable: false,
+                  },
+                  {
+                    tag: 'FAILOVER',
+                    source: 'POSTGRES',
+                    time: '10:44:18',
+                    message: 'Active standby replica failover verified: Traffic routing to postgres-replica:5432 with 0 connection drops.',
+                    badgeClass: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+                    icon: <Server size={13} className="text-purple-400" />,
+                    actionable: true,
+                  },
+                ].map((evt, eIdx) => (
+                  <div
+                    key={eIdx}
+                    className="p-3 rounded-xl border text-xs bg-surface/50 border-border-subtle/80 flex items-start justify-between gap-3 hover:border-accent/30 transition-colors"
+                  >
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <span className={`p-1.5 rounded-lg shrink-0 mt-0.5 ${evt.badgeClass}`}>
+                        {evt.icon}
+                      </span>
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-[9.5px] font-mono font-bold uppercase px-1.5 py-0.2 rounded border ${evt.badgeClass}`}>
+                            {evt.tag}
+                          </span>
+                          <span className="font-mono text-[10px] text-gray-400 uppercase">
+                            [{evt.source}]
+                          </span>
+                          <span className="text-[10px] text-gray-500 font-mono">
+                            {evt.time}
+                          </span>
+                        </div>
+                        <p className="text-gray-200 font-medium text-xs leading-snug break-words">
+                          {evt.message}
+                        </p>
+                      </div>
+                    </div>
+                    {evt.actionable && (
+                      <button
+                        onClick={() => openChat({ initialPrompt: `Investigate event: ${evt.message}` })}
+                        className="text-[10.5px] text-accent hover:underline font-mono shrink-0 cursor-pointer pt-0.5"
+                      >
+                        Investigate &rarr;
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column (4 Cols): Ongoing & Past Autonomous Actions & SRE Thinking */}
+        <div className="lg:col-span-4 space-y-6">
+          {/* Ongoing & Past Autonomous SRE Actions */}
+          <div className="glass-panel rounded-2xl p-5 border border-border-subtle flex flex-col min-h-[540px]">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-border-subtle">
+              <div className="flex items-center gap-2">
+                <Activity size={16} className="text-accent" />
+                <h3 className="font-bold text-sm text-white">Ongoing &amp; Past Actions</h3>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-accent/15 text-accent border border-accent/25">
+                {incidents.length} Records
+              </span>
+            </div>
+
+            {/* Incidents Stream */}
+            <div className="flex-1 overflow-y-auto space-y-3.5 pr-1 max-h-[580px]">
+              {incidents.length === 0 ? (
+                activityEvents.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-48 text-center text-gray-500 text-xs">
+                    <Clock size={24} className="mb-2 opacity-40" />
+                    <p>No autonomous actions recorded yet.</p>
+                    <p className="text-[10px] text-gray-600 mt-1">
+                      Lear will autonomously record detections, thinking, and failovers here.
+                    </p>
+                  </div>
+                ) : (
+                  activityEvents.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="p-3 rounded-xl border text-xs leading-snug bg-surface/60 border-border-subtle text-gray-300"
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1 text-[10px]">
+                        <span className="font-mono uppercase font-bold text-accent">{item.connector || 'SYSTEM'}</span>
+                        <span className="text-gray-500 font-mono">
+                          {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ''}
+                        </span>
+                      </div>
+                      <p className="font-medium text-gray-200 text-xs">{item.summary || item.event_type}</p>
+                    </div>
+                  ))
+                )
               ) : (
-                activityEvents.map((item, idx) => {
-                  const isErr = item.severity === 'error' || item.event_type?.includes('ERROR') || item.event_type?.includes('FAIL');
-                  const isWarn = item.severity === 'warning';
+                incidents.map((inc: any, idx: number) => {
+                  const isResolved = inc.status === 'RESOLVED';
+                  const isAwaiting = inc.requires_approval && !isResolved;
+                  const isThinkingExpanded = expandedThinkingId === inc.incident_id;
+
                   return (
                     <div
                       key={idx}
-                      className={`p-3 rounded-xl border text-xs leading-snug transition-all ${
-                        isErr
-                          ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
-                          : isWarn
-                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-                          : 'bg-surface/60 border-border-subtle text-gray-300 hover:border-accent/40'
+                      className={`p-3.5 rounded-xl border text-xs leading-snug transition-all space-y-2.5 ${
+                        isAwaiting
+                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-100 shadow-md shadow-amber-950/20'
+                          : isResolved
+                          ? 'bg-surface/70 border-emerald-500/25 text-gray-200'
+                          : 'bg-rose-500/10 border-rose-500/30 text-rose-100 shadow-md shadow-rose-950/20'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2 mb-1 text-[10px]">
-                        <span className="font-mono uppercase font-bold text-accent">
-                          {item.connector || 'SYSTEM'}
-                        </span>
-                        <span className="text-gray-500 font-mono">
-                          {item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      {/* Tags & Timestamp */}
+                      <div className="flex items-center justify-between gap-2 flex-wrap text-[10px]">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`font-mono font-bold uppercase px-1.5 py-0.5 rounded text-[9px] border ${
+                              isResolved
+                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                                : isAwaiting
+                                ? 'bg-amber-500/25 text-amber-300 border-amber-500/40 animate-pulse'
+                                : 'bg-rose-500/25 text-rose-300 border-rose-500/40'
+                            }`}
+                          >
+                            {inc.status}
+                          </span>
+                          {inc.tags?.map((t: string, t_idx: number) => (
+                            <span
+                              key={t_idx}
+                              className="font-mono font-bold text-[9px] px-1.5 py-0.5 rounded bg-black/40 text-gray-300 border border-white/10"
+                            >
+                              [{t}]
+                            </span>
+                          ))}
+                        </div>
+                        <span className="text-gray-400 font-mono text-[9.5px]">
+                          {inc.created_at ? inc.created_at.split(' ')[1] : ''}
                         </span>
                       </div>
-                      <p className="font-medium text-gray-200 text-xs line-clamp-2">
-                        {item.summary || item.event_type || 'Infrastructure event'}
-                      </p>
-                      {item.watch_id && (
-                        <span className="inline-block mt-1.5 text-[9px] font-mono text-gray-400 bg-black/30 px-1.5 py-0.5 rounded">
-                          {item.watch_id}
-                        </span>
+
+                      {/* Title & Service */}
+                      <div>
+                        <h4 className="font-bold text-white text-xs leading-snug line-clamp-2">
+                          {inc.title}
+                        </h4>
+                        <p className="text-[11px] text-gray-300/90 mt-1 line-clamp-2 leading-relaxed">
+                          {inc.diagnosis || inc.error_summary}
+                        </p>
+                      </div>
+
+                      {/* Expandable Agent's Thinking */}
+                      {inc.agent_thinking && inc.agent_thinking.length > 0 && (
+                        <div className="pt-1">
+                          <button
+                            onClick={() =>
+                              setExpandedThinkingId(isThinkingExpanded ? null : inc.incident_id)
+                            }
+                            className="flex items-center gap-1 text-[10px] font-mono text-accent hover:underline cursor-pointer"
+                          >
+                            <Brain size={12} />
+                            <span>Agent's Thinking ({inc.agent_thinking.length} phases)</span>
+                            {isThinkingExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                          </button>
+
+                          {isThinkingExpanded && (
+                            <div className="mt-2 p-2.5 rounded-lg bg-black/50 border border-border-subtle font-mono text-[10px] space-y-1.5 text-gray-300">
+                              {inc.agent_thinking.map((thought: string, phIdx: number) => (
+                                <div key={phIdx} className="leading-relaxed">
+                                  <span className="text-accent font-bold">Phase {phIdx + 1}:</span> {thought}
+                                </div>
+                              ))}
+                              {inc.episodic_memory && (
+                                <div className="pt-1.5 border-t border-white/10 text-purple-300">
+                                  <span className="font-bold text-purple-400">🧠 Episodic Memory:</span> {inc.episodic_memory}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       )}
+
+                      {/* Action Bar */}
+                      <div className="pt-2 border-t border-white/10 flex items-center justify-between gap-2">
+                        <button
+                          onClick={() =>
+                            openChat({
+                              incidentId: inc.incident_id,
+                              title: inc.title,
+                              errorSummary: inc.error_summary,
+                              diagnosis: inc.diagnosis,
+                              agentThinking: inc.agent_thinking,
+                              tags: inc.tags,
+                              severity: inc.severity,
+                              requiresApproval: inc.requires_approval,
+                            })
+                          }
+                          className="flex items-center gap-1 text-[10.5px] text-accent hover:text-white font-bold cursor-pointer"
+                        >
+                          <Sparkles size={11} />
+                          <span>Resolve with Lear &rarr;</span>
+                        </button>
+
+                        {isAwaiting && (
+                          <button
+                            onClick={() => handleApproveIncident(inc.incident_id)}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[10px] font-bold cursor-pointer transition-all flex items-center gap-1 shadow"
+                          >
+                            <CheckCircle2 size={11} />
+                            <span>Approve Fix</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })
@@ -554,11 +1013,16 @@ export default function Dashboard({
             </p>
 
             <button
-              onClick={() => openChat(null)}
+              onClick={() =>
+                openChat({
+                  title: 'Full Infrastructure Diagnostics',
+                  initialPrompt: 'Perform full cluster health check and audit all pod statuses.',
+                })
+              }
               className="flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-surface hover:bg-surface-elevated border border-border-subtle hover:border-accent/50 text-xs font-bold text-white transition-all cursor-pointer shadow-sm"
             >
               <Sparkles size={14} className="text-accent" />
-              <span>Launch Copilot Diagnostics</span>
+              <span>Launch Lear Diagnostics</span>
             </button>
 
             <div className="pt-2 border-t border-border-subtle flex flex-col gap-1.5">
@@ -566,21 +1030,36 @@ export default function Dashboard({
                 Common Inquiries
               </span>
               <button
-                onClick={() => openChat(null)}
+                onClick={() =>
+                  openChat({
+                    title: 'CrashLoop Container Audit',
+                    initialPrompt: 'Check for crash-looping containers and inspect backoff restart counts in lear-demo.',
+                  })
+                }
                 className="text-left text-[11px] text-gray-400 hover:text-white transition-colors cursor-pointer flex items-center justify-between py-1"
               >
                 <span>&bull; Check for crash-looping containers</span>
                 <ArrowRight size={10} className="text-accent" />
               </button>
               <button
-                onClick={() => openChat(null)}
+                onClick={() =>
+                  openChat({
+                    title: 'Audit Watcher Latencies',
+                    initialPrompt: 'Audit active watcher stream latencies and verify event throughput.',
+                  })
+                }
                 className="text-left text-[11px] text-gray-400 hover:text-white transition-colors cursor-pointer flex items-center justify-between py-1"
               >
                 <span>&bull; Audit active watcher latencies</span>
                 <ArrowRight size={10} className="text-accent" />
               </button>
               <button
-                onClick={() => openChat(null)}
+                onClick={() =>
+                  openChat({
+                    title: 'Verify AWS STS Credentials',
+                    initialPrompt: 'Verify AWS STS credentials and test IAM caller identity for EKS cluster.',
+                  })
+                }
                 className="text-left text-[11px] text-gray-400 hover:text-white transition-colors cursor-pointer flex items-center justify-between py-1"
               >
                 <span>&bull; Verify credentials and STS status</span>

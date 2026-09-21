@@ -240,7 +240,7 @@ export default function Settings({ onReconfigure }: { onReconfigure?: () => void
           </span>
         </div>
         <p className="text-xs text-gray-400">
-          Select the large language model that powers Lear Copilot, automated incident root-cause diagnosis, and widget synthesis.
+          Select the large language model that powers Lear, automated incident root-cause diagnosis, and widget synthesis.
         </p>
 
         {loading && availableModels.length === 0 ? (

@@ -1388,11 +1388,22 @@ def test_pagerduty_page_plan_with_params(tmp_path):
     assert "Trigger PagerDuty incident 'DB down' (severity warning)" in plan.steps[0].description
 
 
+def test_pagerduty_page_plan_surfaces_current_oncall(tmp_path):
+    class _OncallPagerDuty(_FakePagePagerDuty):
+        def get_oncalls(self, service=None):
+            return [{"user_name": "Bob Builder", "user_email": "bob@example.com"}]
+
+    plan = PagerdutyPageAction().plan(_page_ctx(tmp_path, pd=_OncallPagerDuty()))
+    assert "Current on-call: Bob Builder" in plan.steps[0].impact
+
+
 def test_pagerduty_page_execute(tmp_path):
     pd = _FakePagePagerDuty()
     result = PagerdutyPageAction().execute(_page_ctx(tmp_path, pd=pd))
     assert result.status is ActionResultStatus.SUCCEEDED
     assert result.detail["dedup_key"]
+    assert result.detail["event"]["event_type"] == "page_oncall"
+    assert result.detail["event"]["connector"] == "pagerduty"
     assert pd.posted == [("Prash page: checkout-service", "prash", "critical", result.detail["dedup_key"], None)]
 
 

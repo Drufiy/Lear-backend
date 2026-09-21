@@ -110,8 +110,8 @@ verify() confirms incident state → notify team → loop
 - [x] **Pagination handling:** PagerDuty paginates incidents — implemented REST-v2 `limit`/`offset` + `more`-flag pagination under a hard 200-item cap (`_paginate`). **Correction to this sheet: PagerDuty REST v2 is NOT cursor-based** — the spec §8 note records the same finding
 - [x] **Urgency awareness:** Respect PagerDuty urgency levels (high/low) in `ConnectorEvent` context
 - [x] **Escalation policy context:** Include escalation policy info in `get_stats()` raw data
-- [ ] **Service dependency mapping:** PagerDuty supports service dependencies — surface for correlation *(not yet surfaced; only remaining Phase E item)*
-- [ ] **On-call schedule awareness:** Know who's on-call before suggesting a page action *(not implemented — `/oncalls` unused)*
+- [x] **Service dependency mapping:** PagerDuty supports service dependencies — surface for correlation (`get_service_dependencies` partitions supporting upstream and dependent downstream)
+- [x] **On-call schedule awareness:** Know who's on-call before suggesting a page action (`get_oncalls` queries `/oncalls?include[]=users&include[]=schedules` and enriches `pagerduty-page` plan)
 - [x] **Rate limit handling:** PagerDuty has strict rate limits (900 req/min for REST API) — implement backoff (429 + `Retry-After` wins, capped exponential)
 - [x] **Event deduplication:** Use PagerDuty's `dedup_key` to prevent duplicate incident creation
 - [x] **Priority levels:** Map PagerDuty priority (P1–P5) to Lear severity (`_PRIORITY_SEVERITY`, urgency as fallback)

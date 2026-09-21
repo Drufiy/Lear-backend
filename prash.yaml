@@ -1,6 +1,14 @@
-active_watches: []
+active_watches:
+- connector: aws
+  interval: 5
+  target: default
+  watch_id: aws:default
+- connector: kubernetes
+  interval: 5
+  target: default
+  watch_id: kubernetes:default
 projects:
-- created_at: '2026-09-11T17:00:54.035989+00:00'
+- created_at: '2026-09-20T17:07:24.742830+00:00'
   environments:
   - name: Production
     services:
@@ -10,8 +18,11 @@ projects:
     - connector_id: gcp
       display_name: Google Cloud
       resource_id: ''
-    - connector_id: github
-      display_name: GitHub Actions
+    - connector_id: kubernetes
+      display_name: Kubernetes
+      resource_id: ''
+    - connector_id: datadog
+      display_name: Datadog
       resource_id: ''
   id: default
   name: Default Project

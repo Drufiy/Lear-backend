@@ -64,6 +64,17 @@ class PagerdutyPageAction(Action):
     def plan(self, ctx: ActionContext) -> Plan:
         summary = ctx.extra.get("summary") or f"Prash page: {ctx.target.resource}"
         severity = ctx.extra.get("severity", "critical")
+        impact = "Pages the on-call engineer now; the incident cannot be un-triggered and must be resolved by hand"
+        pd = ctx.extra.get("connectors", {}).get("pagerduty")
+        if pd and hasattr(pd, "get_oncalls"):
+            try:
+                oncalls = pd.get_oncalls(service=ctx.target.resource)
+                if oncalls:
+                    names = [o.get("user_name") for o in oncalls if o.get("user_name")]
+                    if names:
+                        impact += f" (Current on-call: {', '.join(names)})"
+            except Exception:
+                pass
         return Plan(
             action_id=self.spec.id,
             reversible=False,
@@ -71,7 +82,7 @@ class PagerdutyPageAction(Action):
             steps=[
                 PlanStep(
                     description=f"Trigger PagerDuty incident '{summary}' (severity {severity}) via the Events API routing key",
-                    impact="Pages the on-call engineer now; the incident cannot be un-triggered and must be resolved by hand",
+                    impact=impact,
                 )
             ],
         )
@@ -95,11 +106,24 @@ class PagerdutyPageAction(Action):
         status = resp.get("status", "") if isinstance(resp, dict) else ""
         if status != "success":
             return ActionResult(status=ActionResultStatus.FAILED, summary=f"page not accepted by PagerDuty: {resp}")
+        event = {
+            "timestamp": posted_at.isoformat(),
+            "connector": "pagerduty",
+            "event_type": "page_oncall",
+            "summary": summary,
+            "severity": severity,
+            "dedup_key": dedup_key,
+        }
         return ActionResult(
             status=ActionResultStatus.SUCCEEDED,
             summary=f"on-call paged: '{summary}' (dedup key {dedup_key})",
-            detail={"dedup_key": dedup_key, "severity": severity, "summary": summary,
-                    "posted_at": posted_at.isoformat()},
+            detail={
+                "dedup_key": dedup_key,
+                "severity": severity,
+                "summary": summary,
+                "posted_at": posted_at.isoformat(),
+                "event": event,
+            },
         )
 
     def verify(self, ctx: ActionContext, result: ActionResult) -> VerificationResult:

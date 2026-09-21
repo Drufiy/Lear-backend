@@ -27,24 +27,32 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
+from pathlib import Path
 import sys
+
+# Ensure repository root is on sys.path
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from prash.brain.correlation import correlate, format_incident_context
 
 UTC = datetime.timezone.utc
 
 
-def _env(path: str = ".env") -> dict:
+def _env(path: str | None = None) -> dict:
     out = {}
+    env_file = Path(path) if path else _REPO_ROOT / ".env"
     try:
-        for line in open(path):
+        for line in open(env_file):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
+                out[k.strip()] = v.strip().strip("'").strip('"')
     except FileNotFoundError:
         pass
-    return out
+    return {**out, **os.environ}
 
 
 def _k8s_events_live(namespace: str, pod: str) -> list[dict]:
@@ -74,11 +82,11 @@ def _k8s_event_canned() -> list[dict]:
     }]
 
 
-_DATADOG_MONITOR = "prash-test-synthetic-error-rate"
+_DATADOG_MONITOR = "Lear Demo: checkout-api health"
 
 
-def _datadog_events_live(since: datetime.datetime) -> list[dict]:
-    """Real Datadog ConnectorEvents for the standing synthetic monitor
+def _datadog_events_live(monitor: str, since: datetime.datetime) -> list[dict]:
+    """Real Datadog ConnectorEvents for the monitor
     (M4, Aryan's DatadogConnector.get_stats())."""
     from prash.connectors.datadog import DatadogConnector
 
@@ -86,19 +94,20 @@ def _datadog_events_live(since: datetime.datetime) -> list[dict]:
     conn = DatadogConnector({
         "DATADOG_API_KEY": creds.get("DATADOG_API_KEY"),
         "DATADOG_APP_KEY": creds.get("DATADOG_APP_KEY"),
+        "DATADOG_SITE": creds.get("DATADOG_SITE"),
     })
     if not conn.authenticate():
         raise RuntimeError("could not authenticate to Datadog (DATADOG_API_KEY/APP_KEY missing or invalid)")
-    return conn.get_stats(_DATADOG_MONITOR, since=since)
+    return conn.get_stats(monitor, since=since)
 
 
-def _datadog_spike_canned(anchor: datetime.datetime) -> list[dict]:
+def _datadog_spike_canned(anchor: datetime.datetime, monitor: str = _DATADOG_MONITOR) -> list[dict]:
     """Canned fallback for --offline or missing credentials."""
     return [{
         "timestamp": anchor + datetime.timedelta(seconds=6),
         "connector": "datadog",
         "event_type": "metric_spike",
-        "summary": f"checkout-api p99 latency spiked to 4200ms (monitor {_DATADOG_MONITOR})",
+        "summary": f"checkout-api p99 latency spiked to 4200ms (monitor {monitor})",
         "raw": {"canned": True},
     }]
 
@@ -112,8 +121,9 @@ def _auto_pod(namespace: str) -> str | None:
             capture_output=True, text=True, timeout=10,
         ).stdout
         for line in out.splitlines():
-            if "broken-app" in line:
-                return line.strip()
+            line = line.strip()
+            if "checkout-api" in line or "broken-app" in line:
+                return line
     except Exception:
         pass
     return None
@@ -121,11 +131,14 @@ def _auto_pod(namespace: str) -> str | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Combined k8s+Datadog correlation fixture (M6)")
-    ap.add_argument("--namespace", default="prash-demo")
-    ap.add_argument("--pod", default=None, help="crash-looping pod (default: auto-detect broken-app)")
+    ap.add_argument("--namespace", default="lear-demo")
+    ap.add_argument("--pod", default=None, help="crash-looping pod (default: auto-detect checkout-api or broken-app)")
+    ap.add_argument("--monitor", default=None, help="Datadog monitor name or ID")
     ap.add_argument("--offline", action="store_true", help="use a canned k8s event instead of the live cluster")
     ap.add_argument("--window", type=int, default=120, help="correlation window seconds")
     args = ap.parse_args()
+
+    monitor_target = args.monitor or ("Lear Demo: checkout-api health" if args.namespace == "lear-demo" else "prash-test-synthetic-error-rate")
 
     if args.offline:
         k8s_events = _k8s_event_canned()
@@ -152,18 +165,18 @@ def main() -> int:
         anchor = anchor.replace(tzinfo=UTC)
 
     if args.offline:
-        datadog_events = _datadog_spike_canned(anchor)
+        datadog_events = _datadog_spike_canned(anchor, monitor=monitor_target)
         print("datadog leg: CANNED (--offline)")
     else:
         try:
             since = datetime.datetime.now(UTC) - datetime.timedelta(hours=1)
-            datadog_events = _datadog_events_live(since)
+            datadog_events = _datadog_events_live(monitor_target, since)
             if datadog_events:
-                print(f"datadog leg: LIVE — {len(datadog_events)} event(s) from {_DATADOG_MONITOR}")
+                print(f"datadog leg: LIVE — {len(datadog_events)} event(s) from {monitor_target}")
             else:
-                print(f"datadog leg: LIVE call succeeded but returned 0 events — is {_DATADOG_MONITOR} "
-                      f"in Alert? (run break_datadog.py first, allow ~1-5min to evaluate)", file=sys.stderr)
-                datadog_events = _datadog_spike_canned(anchor)
+                print(f"datadog leg: LIVE call succeeded but returned 0 events — is {monitor_target} "
+                      f"in Alert? (allow ~1-5min to evaluate or trigger failure)", file=sys.stderr)
+                datadog_events = _datadog_spike_canned(anchor, monitor=monitor_target)
                 print("datadog leg: falling back to CANNED")
         except Exception as exc:
             print(f"datadog live leg failed ({exc}); falling back to canned", file=sys.stderr)

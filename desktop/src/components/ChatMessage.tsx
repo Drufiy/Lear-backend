@@ -198,7 +198,7 @@ export default function ChatMessage({ message, isExecuting = false, onExecute }:
       {!isUser && (
         <div className="flex items-center gap-1.5 mb-1 px-1 text-[11px] font-semibold text-gray-400">
           <Sparkles size={13} className="text-accent" />
-          <span>Lear Copilot</span>
+          <span>Lear</span>
           {message.timestamp && (
             <span className="text-[10px] text-gray-500 font-normal">
               {message.timestamp}

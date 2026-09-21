@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shipping-service-code
+  namespace: lear-demo
+  labels:
+    app: shipping-service
+    team: lear-demo
+    env: staging
+data:
+  server.py: |
+    import http.server
+    import json
+    import os
+    import random
+    import time
+
+    PORT = int(os.environ.get("PORT", "4000"))
+
+    class ShippingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/healthz":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "service": "shipping-service", "healthy": True}).encode("utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            if self.path == "/calculate":
+                delay = random.uniform(0.05, 0.20)
+                time.sleep(delay)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "service": "shipping-service",
+                    "cost": 5.99,
+                    "currency": "USD",
+                    "estimated_days": 3,
+                    "carrier": "Standard Express"
+                }).encode("utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, fmt, *args):
+            pass
+
+    import socketserver
+    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    def run():
+        print(f"[shipping-service] Listening on port {PORT}", flush=True)
+        ThreadedHTTPServer(("0.0.0.0", PORT), ShippingHandler).serve_forever()
+
+    if __name__ == "__main__":
+        run()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping-service
+  namespace: lear-demo
+  labels:
+    app: shipping-service
+    team: lear-demo
+    env: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shipping-service
+  template:
+    metadata:
+      labels:
+        app: shipping-service
+        team: lear-demo
+        env: staging
+    spec:
+      containers:
+        - name: shipping-service
+          image: python:3.12-alpine
+          command: ["python", "/app/server.py"]
+          ports:
+            - containerPort: 4000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: code
+          configMap:
+            name: shipping-service-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shipping-service
+  namespace: lear-demo
+  labels:
+    app: shipping-service
+    team: lear-demo
+    env: staging
+spec:
+  selector:
+    app: shipping-service
+  ports:
+    - port: 4000
+      targetPort: 4000

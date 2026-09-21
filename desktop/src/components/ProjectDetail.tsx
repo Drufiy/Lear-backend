@@ -612,7 +612,7 @@ export const ProjectDetail: React.FC<ProjectDetailProps> = ({
                       className="flex items-center justify-center gap-1 py-1.5 px-3 rounded-lg bg-accent/15 hover:bg-accent/25 text-[11px] font-bold text-accent border border-accent/30 transition-colors cursor-pointer"
                       title="Investigate with AI"
                     >
-                      <Sparkles size={12} /> Copilot
+                      <Sparkles size={12} /> Lear
                     </button>
                   </div>
                 </motion.div>

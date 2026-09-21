@@ -33,6 +33,7 @@ from .brain.diagnosis_agent import (
     format_grafana_context,
 )
 from .brain.gitlab_log_fetcher import fetch_pipeline_logs
+from .brain.local_memory import load_memory, save_fix
 from .brain.log_fetcher import fetch_workflow_logs
 from .brain.multi_diagnosis import MultiFailureResult, diagnose_multi_failure
 from .brain.schemas import Diagnosis
@@ -149,6 +150,7 @@ async def diagnose_k8s_pod(
                 f"content, not a regenerated new_content.)"
             )
 
+    repo_memory = load_memory(repo or f"{namespace}/{pod}")
     return await diagnose_failure(
         logs=context,
         # With a manifest repo wired up, the brain's investigation tools read
@@ -158,6 +160,7 @@ async def diagnose_k8s_pod(
         repo_full_name=repo or f"{namespace}/{pod}",
         commit_message="(no commit — Kubernetes pod diagnosis)",
         workflow_name="kubernetes",
+        repo_memory=repo_memory,
         investigation_context=investigation_context,
         # CI diagnosis arrives with the failing logs already in the prompt, so
         # investigation there is a bonus lookup or two and 2 steps is plenty.
@@ -190,11 +193,13 @@ async def diagnose_datadog_monitor(monitor: str, creds: dict | None = None) -> D
         raise FixTargetError(f"monitor {monitor!r} not found")
     events = connector.get_stats(monitor, since=datetime.now(timezone.utc) - timedelta(hours=1))
     context = format_datadog_context(state, events)
+    repo_memory = load_memory(f"datadog/{monitor}")
     return await diagnose_failure(
         logs=context,
         repo_full_name=f"datadog/{monitor}",
         commit_message="(no commit — Datadog monitor diagnosis, not a CI run)",
         workflow_name="datadog",
+        repo_memory=repo_memory,
     )
 
 
@@ -216,11 +221,13 @@ async def diagnose_pagerduty_incident(service: str, creds: dict | None = None) -
         raise FixTargetError(f"service {service!r} not found")
     events = connector.get_stats(service, since=datetime.now(timezone.utc) - timedelta(hours=1))
     context = format_pagerduty_context(state, events)
+    repo_memory = load_memory(f"pagerduty/{service}")
     return await diagnose_failure(
         logs=context,
         repo_full_name=f"pagerduty/{service}",
         commit_message="(no commit — PagerDuty incident diagnosis, not a CI run)",
         workflow_name="pagerduty",
+        repo_memory=repo_memory,
     )
 
 
@@ -242,11 +249,13 @@ async def diagnose_grafana_alert(rule: str, creds: dict | None = None) -> Diagno
         raise FixTargetError(f"alert rule {rule!r} not found")
     events = connector.get_stats(rule, since=datetime.now(timezone.utc) - timedelta(hours=1))
     context = format_grafana_context(state, events)
+    repo_memory = load_memory(f"grafana/{rule}")
     return await diagnose_failure(
         logs=context,
         repo_full_name=f"grafana/{rule}",
         commit_message="(no commit — Grafana alert-rule diagnosis, not a CI run)",
         workflow_name="grafana",
+        repo_memory=repo_memory,
     )
 
 
@@ -604,11 +613,13 @@ async def diagnose_aws_instance(
     
     context = format_aws_context(target, state, stats)
     
+    repo_memory = load_memory(target)
     return await diagnose_failure(
         logs=context,
         repo_full_name=target,
         commit_message="(no commit — AWS instance diagnosis)",
         workflow_name="aws",
+        repo_memory=repo_memory,
         investigation_context=None,
         multi_file=False,
         category_hint="aws infrastructure, resource limits, instance state",
@@ -636,11 +647,13 @@ async def diagnose_gcp_instance(
     
     context = format_gcp_context(target, state, stats)
     
+    repo_memory = load_memory(target)
     return await diagnose_failure(
         logs=context,
         repo_full_name=target,
         commit_message="(no commit — GCP instance diagnosis)",
         workflow_name="gcp",
+        repo_memory=repo_memory,
         investigation_context=None,
         multi_file=False,
         category_hint="gcp infrastructure, resource limits, instance state",

@@ -92,9 +92,9 @@ export const WatcherPanel: React.FC<WatcherPanelProps> = ({
           <motion.div
             initial={{ scale: 0.9, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            className="flex items-center gap-2 px-3 py-1 bg-rose-500/15 border border-rose-500/30 text-rose-400 rounded-full text-xs font-semibold animate-pulse"
+            className="flex items-center gap-2 px-3 py-1 bg-rose-500/15 border border-rose-500/30 text-rose-400 rounded-full text-xs font-semibold"
           >
-            <AlertTriangle size={14} className="animate-bounce" />
+            <AlertTriangle size={14} />
             CRITICAL ALERT DETECTED
           </motion.div>
         );
@@ -105,7 +105,7 @@ export const WatcherPanel: React.FC<WatcherPanelProps> = ({
             animate={{ scale: 1, opacity: 1 }}
             className="flex items-center gap-2 px-3 py-1 bg-amber-500/15 border border-amber-500/30 text-amber-400 rounded-full text-xs font-semibold"
           >
-            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+            <span className="w-2 h-2 rounded-full bg-amber-400" />
             DEGRADED TELEMETRY
           </motion.div>
         );
@@ -139,12 +139,8 @@ export const WatcherPanel: React.FC<WatcherPanelProps> = ({
         <div className="flex items-center gap-4">
           <div className="relative">
             <div className="p-3 bg-surface rounded-xl border border-border-subtle flex items-center justify-center text-accent">
-              <Radio size={22} className={isLive ? 'animate-pulse text-accent' : 'text-gray-400'} />
+              <Radio size={22} className={isLive ? 'text-accent' : 'text-gray-400'} />
             </div>
-            {/* Dynamic radar ripple wave */}
-            {isLive && (
-              <span className="absolute -inset-1 rounded-2xl bg-accent/20 animate-ping pointer-events-none" />
-            )}
           </div>
           <div>
             <div className="flex items-center gap-3">
