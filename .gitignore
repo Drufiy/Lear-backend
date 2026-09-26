@@ -14,6 +14,11 @@ dist/
 .coverage
 htmlcov/
 
+# Node
+node_modules/
+package-lock.json
+desktop/dist/
+
 # Env / secrets — Prash v2's whole trust model is that these never get committed
 .env
 .env.*
@@ -45,3 +50,7 @@ Thumbs.db
 crash.log
 *.auto.tfvars
 prash.yaml
+
+# Lock files (uv)
+uv.lock
+
